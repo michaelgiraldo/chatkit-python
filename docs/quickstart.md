@@ -71,8 +71,21 @@ python -m pip install . fastapi
 Create `main.py` with a minimal server that is hard-coded to always reply “Hello, world!”—you'll replace this with an actual call to a model in [Respond to a user message](guides/respond-to-user-message.md).
 
 ```python
-# Other imports omitted for brevity; see the starter repo for a runnable file with all imports.
-from chatkit.server import ChatKitServer
+from collections.abc import AsyncIterator
+from datetime import datetime
+
+from fastapi import FastAPI, Request
+from fastapi.responses import Response, StreamingResponse
+
+from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.types import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    ThreadItemDoneEvent,
+    ThreadMetadata,
+    ThreadStreamEvent,
+    UserMessageItem,
+)
 
 app = FastAPI()
 
@@ -95,8 +108,7 @@ class MyChatKitServer(ChatKitServer[dict]):
         )
 
 
-# Create your server by passing a store implementation.
-# MyChatKitStore is defined in the next section.
+# Place the MyChatKitStore definition from the next section above this line.
 server = MyChatKitServer(store=MyChatKitStore())
 
 
@@ -232,6 +244,33 @@ This store implements only the methods required for basic chat while the server 
 
 For production, replace this with a database-backed store (for example, Postgres or MySQL) so threads and items persist across restarts.
 
+## Verify your backend
+
+With the server and store in `main.py`, start the example server from that directory.
+
+```sh
+python -m uvicorn main:app --port 8000
+```
+
+In another terminal, send a test message directly to the backend.
+
+```sh
+curl --no-buffer --fail-with-body http://localhost:8000/chatkit \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "type": "threads.create",
+    "params": {
+      "input": {
+        "content": [{"type": "input_text", "text": "Hi there!"}],
+        "attachments": [],
+        "inference_options": {}
+      }
+    }
+  }'
+```
+
+Look for a `thread.item.done` event with `item.type` set to `assistant_message`
+and the text `Hello, world!`. The hardcoded responder runs without an API key.
 
 ## Generate model responses
 
