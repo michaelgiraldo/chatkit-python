@@ -137,6 +137,7 @@ def diff_widget(
             if (
                 is_streaming_text(before)
                 and is_streaming_text(after)
+                and before.id
                 and field == "value"
                 and getattr(after, "value", "").startswith(getattr(before, "value", ""))
             ):
