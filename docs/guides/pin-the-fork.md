@@ -1,22 +1,22 @@
 # Pin an app to the fork
 
 Pin a full GitHub commit SHA to install the same tested ChatKit code whenever
-you build your app. This fork and the PyPI release can both report `1.6.5`.
-The installed package's source URL identifies the fork commit.
+you build your app. The installed package's source URL identifies the commit,
+and Turnspan 1 reports the version `1.6.5+turnspan.1`.
 
 ## Lock the fork as an app dependency
 
 From your app's repository, keep `openai-chatkit` in the `dependencies` list in
-`pyproject.toml`. For this example, `openai-chatkit==1.6.5` matches the package
-version declared at the fork commit. Add this entry to the app's uv sources.
+`pyproject.toml`. For Turnspan 1, use `openai-chatkit==1.6.5+turnspan.1`. Add
+this entry to the app's uv sources, replacing `COMMIT_SHA` with the full SHA
+for the release or commit you tested.
 
 ```toml
 [tool.uv.sources]
-openai-chatkit = { url = "https://github.com/michaelgiraldo/chatkit-python/archive/1c0b0a200de7bc90584e4d63ca23775579bb4dda.tar.gz" }
+openai-chatkit = { url = "https://github.com/michaelgiraldo/chatkit-python/archive/COMMIT_SHA.tar.gz" }
 ```
 
-Use the full SHA of the fork commit you tested. Refresh the lock and install it
-with Python 3.14.
+Refresh the lock and install it with Python 3.14.
 
 ```sh
 uv lock --python 3.14
@@ -29,16 +29,16 @@ your build so it installs the reviewed dependency graph.
 
 ## Verify the installed build
 
-Run this from the app directory with the interpreter that runs the app. If
-checking a container image, run the Python snippet with the app's interpreter
-inside that image.
+Replace `COMMIT_SHA` with the same SHA and run this from the app directory with
+the interpreter that runs the app. If checking a container image, run the
+Python snippet with the app's interpreter inside that image.
 
 ```sh
 uv run --locked --no-sync python - <<'PY'
 import json
 from importlib.metadata import distribution
 
-commit = "1c0b0a200de7bc90584e4d63ca23775579bb4dda"
+commit = "COMMIT_SHA"
 expected = f"https://github.com/michaelgiraldo/chatkit-python/archive/{commit}.tar.gz"
 package = distribution("openai-chatkit")
 metadata = package.read_text("direct_url.json")

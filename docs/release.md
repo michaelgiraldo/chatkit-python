@@ -2,7 +2,8 @@
 
 The project follows a slightly modified version of [semantic versioning](https://semver.org/spec/v2.0.0.html). The SDK is still evolving and certain backwards-incompatible changes may be released as minor versions.
 
-For full release notes, see [https://github.com/openai/chatkit-python/releases](https://github.com/openai/chatkit-python/releases).
+See OpenAI's [ChatKit release notes](https://github.com/openai/chatkit-python/releases)
+for the original releases.
 
 ## Minor versions
 
@@ -20,7 +21,7 @@ We will increment patch versions for non-breaking changes:
 
 ## Breaking change changelog
 
-### Unreleased fork changes
+### Turnspan 1 (`1.6.5+turnspan.1`)
 
 - The fork now requires Python 3.14 or newer. For Python 3.10 through 3.13, the upstream `v1.6.5` release remains available.
 - Installing the fork requires OpenAI Python 3.56.0 through 3.x, Agents SDK
@@ -30,6 +31,11 @@ We will increment patch versions for non-breaking changes:
   If your app passes a custom HTTP client to the OpenAI SDK, see the
   [HTTPX2 migration guide](https://github.com/openai/openai-python/blob/v3.56.0/httpx2.md).
 - The `fastapi` extra installs the FastAPI version used by the quickstart.
+- Interrupted streams close cleanly. The FastAPI example verifies that a
+  partial reply can be reloaded and the thread can accept another turn.
+- Widget updates handle added and removed properties and text without IDs.
+  Repeated workflow tasks update the correct position, and empty streamed
+  citations leave subsequent citations intact.
 
 ### 1.6.0
 

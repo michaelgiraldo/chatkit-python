@@ -1,10 +1,14 @@
-# ChatKit Python SDK
+# Turnspan for ChatKit
 
-This fork requires **Python 3.14 or newer**. Development and CI use Python 3.14.
+Turnspan is a maintained Python 3.14 fork of OpenAI ChatKit.
 
-Install from the root of this fork's checkout with `python -m pip install .`.
-See the [quick start](docs/quickstart.md) to run a ChatKit server.
-To use a specific fork commit in an app, see [Pin an app to the fork](docs/guides/pin-the-fork.md).
+**Turnspan 1** reports `openai-chatkit 1.6.5+turnspan.1`. It requires Python
+3.14 or newer and uses the existing `chatkit` imports.
+
+Install from the root of the checkout with `python -m pip install .`. See the
+[quick start](docs/quickstart.md) to run a ChatKit server and
+[Pin an app to the fork](docs/guides/pin-the-fork.md) to install a specific commit.
+The [changelog](docs/release.md) covers what changed in Turnspan 1.
 
 ## License
 This project is licensed under the [Apache License 2.0](LICENSE).
