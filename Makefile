@@ -1,6 +1,7 @@
 .PHONY: sync install format format-check lint mypy pyright test build serve-docs deploy-docs check
 
-UV_ENV := env -i PATH="$(PATH)" HOME="$(HOME)"
+# Pass the version explicitly because uv --no-config skips .python-version.
+UV_ENV := env -i PATH="$(PATH)" HOME="$(HOME)" UV_PYTHON="$(shell cat .python-version)"
 UV := $(UV_ENV) uv --no-config
 UV_LOCK_ARGS := --locked --default-index https://pypi.org/simple
 

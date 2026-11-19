@@ -60,10 +60,12 @@ The chat UI will render, but sending messages will fail until you start the serv
 
 ## Run your ChatKit server
 
-Install the ChatKit Python package and expose a single `/chatkit` endpoint that forwards requests to a `ChatKitServer` instance.
+This fork requires Python 3.14 or newer. From the root of this fork's checkout,
+install the package. Then expose a single `/chatkit` endpoint that forwards
+requests to a `ChatKitServer` instance.
 
 ```sh
-pip install openai-chatkit
+python -m pip install .
 ```
 
 Create `main.py` with a minimal server that is hard-coded to always reply “Hello, world!”—you'll replace this with an actual call to a model in [Respond to a user message](guides/respond-to-user-message.md).

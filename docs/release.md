@@ -20,6 +20,10 @@ We will increment patch versions for non-breaking changes:
 
 ## Breaking change changelog
 
+### Unreleased fork changes
+
+- The fork now requires Python 3.14 or newer. For Python 3.10 through 3.13, the upstream `v1.6.5` release remains available.
+
 ### 1.6.0
 
 - `Store.save_attachment` may now be called with updates to existing attachments (treated as an upsert), not only inserts.

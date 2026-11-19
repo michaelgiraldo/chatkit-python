@@ -11,6 +11,7 @@ from typing import (
     Generic,
     Sequence,
     TypeVar,
+    assert_never,
     cast,
 )
 
@@ -45,7 +46,6 @@ from openai.types.responses.response_output_text import (
     AnnotationURLCitation,
 )
 from pydantic import BaseModel, ConfigDict, SkipValidation, TypeAdapter
-from typing_extensions import assert_never
 
 from .server import stream_widget
 from .store import Store, StoreItemType

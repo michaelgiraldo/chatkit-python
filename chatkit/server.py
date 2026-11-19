@@ -10,6 +10,8 @@ from typing import (
     AsyncIterable,
     Callable,
     Generic,
+    TypeVar,
+    assert_never,
 )
 
 import agents
@@ -20,7 +22,6 @@ from agents.models.openai_responses import (
     _HEADERS_OVERRIDE as responses_headers_override,
 )
 from pydantic import BaseModel, TypeAdapter
-from typing_extensions import TypeVar, assert_never
 
 from chatkit.errors import CustomStreamError, StreamError
 

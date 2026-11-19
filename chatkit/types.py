@@ -1,7 +1,5 @@
-from __future__ import annotations
-
 from datetime import datetime
-from typing import Any, Generic, Literal
+from typing import Annotated, Any, Generic, Literal, TypeIs, TypeVar
 
 from pydantic import (
     AnyUrl,
@@ -10,7 +8,6 @@ from pydantic import (
     SerializationInfo,
     model_serializer,
 )
-from typing_extensions import Annotated, TypeIs, TypeVar
 
 from chatkit.errors import ErrorCode
 

@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 import inspect
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
+from warnings import deprecated
 
 from jinja2 import Environment, StrictUndefined, Template
 from pydantic import (
@@ -13,7 +12,6 @@ from pydantic import (
     Field,
     model_serializer,
 )
-from typing_extensions import NotRequired, TypedDict, deprecated
 
 from .actions import ActionConfig
 from .icons import IconName

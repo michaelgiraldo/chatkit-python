@@ -1,8 +1,6 @@
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any, Generic, Literal
-
-from typing_extensions import TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from .types import (
     Attachment,

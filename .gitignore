@@ -35,6 +35,5 @@ site/
 .DS_Store
 .idea/
 .vscode/
-.python-version
 .cache/
 .ipynb_checkpoints/
