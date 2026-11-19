@@ -24,7 +24,7 @@ pyright:
 	$(UV) run $(UV_LOCK_ARGS) pyright
 
 test:
-	$(UV_ENV) PYTHONPATH=. uv --no-config run $(UV_LOCK_ARGS) pytest
+	$(UV) run $(UV_LOCK_ARGS) pytest
 
 build:
 	$(UV) build --default-index https://pypi.org/simple
