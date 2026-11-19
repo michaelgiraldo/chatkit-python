@@ -41,6 +41,16 @@ See [Trigger client-side effects without blocking](../guides/update-client-durin
 
 [`StreamOptionsEvent`](../api/chatkit/types.md#chatkit.types.StreamOptionsEvent) configures runtime stream behavior (for example, allowing user cancellation). `ChatKitServer` emits one at the start of every stream using `get_stream_options`; override that method to change defaults such as `allow_cancel`.
 
+## Closing a stream
+
+When the HTTP transport stops sending a response early, have it cancel the task
+reading the stream or close the iterator it owns. `aiter(result)` and
+`result.json_events` expose the same iterator on a `StreamingResult`. Closing an
+active stream releases the responder and runs the server's cancellation hook.
+
+When your own `respond` or `action` generator forwards another async generator,
+wrap the inner generator in `contextlib.aclosing`. This carries early closure
+through the forwarding generator, including when it is suspended at a `yield`.
 
 ## Related guides
 - [Respond to a user message](../guides/respond-to-user-message.md)

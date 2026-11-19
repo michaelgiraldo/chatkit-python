@@ -229,6 +229,8 @@ Use ChatKit's Agents SDK helpers to simplify request conversion and streaming. T
 
 
 ```python
+from contextlib import aclosing
+
 from agents import Agent, Runner
 from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
 
@@ -258,6 +260,7 @@ class MyChatKitServer(ChatKitServer[dict]):
         # Stream the run through ChatKit events
         agent_context = AgentContext(thread=thread, store=self.store, request_context=context)
         result = Runner.run_streamed(assistant, input_items, context=agent_context)
-        async for event in stream_agent_response(agent_context, result):
-            yield event
+        async with aclosing(stream_agent_response(agent_context, result)) as events:
+            async for event in events:
+                yield event
 ```

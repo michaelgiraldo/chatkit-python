@@ -1,7 +1,8 @@
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from datetime import datetime
 from inspect import cleandoc
 from typing import (
@@ -47,7 +48,8 @@ from openai.types.responses.response_output_text import (
 )
 from pydantic import BaseModel, ConfigDict, SkipValidation, TypeAdapter
 
-from .server import stream_widget
+from .logger import logger
+from .server import _close_stream, stream_widget
 from .store import Store, StoreItemType
 from .types import (
     Annotation,
@@ -234,36 +236,53 @@ T2 = TypeVar("T2")
 async def _merge_generators(
     a: AsyncIterator[T1],
     b: AsyncIterator[T2],
-) -> AsyncIterator[T1 | T2]:
-    pending: list[AsyncIterator[T1 | T2]] = [a, b]
-    pending_tasks: dict[asyncio.Task, AsyncIterator[T1 | T2]] = {
-        asyncio.ensure_future(g.__anext__()): g for g in pending
+    *,
+    on_abort: Callable[[], None] | None = None,
+) -> AsyncGenerator[T1 | T2, None]:
+    async def read(source: AsyncIterator[T1 | T2]) -> T1 | T2:
+        return await anext(source)
+
+    pending_tasks: dict[asyncio.Task[T1 | T2], AsyncIterator[T1 | T2]] = {
+        asyncio.create_task(read(a), name="chatkit-agent-event"): a,
+        asyncio.create_task(read(b), name="chatkit-context-event"): b,
     }
-    while len(pending_tasks) > 0:
-        done, _ = await asyncio.wait(
-            pending_tasks.keys(), return_when="FIRST_COMPLETED"
-        )
-        stop = False
-        for d in done:
-            try:
-                result = d.result()
-                yield result
-                dg = pending_tasks[d]
-                pending_tasks[asyncio.ensure_future(dg.__anext__())] = dg
-            except StopAsyncIteration:
-                stop = True
-            finally:
-                del pending_tasks[d]
-        if stop:
-            for task in pending_tasks.keys():
-                if not task.cancel():
-                    try:
-                        yield task.result()
-                    except asyncio.CancelledError:
-                        pass
-                    except asyncio.InvalidStateError:
-                        pass
-            break
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                pending_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            exhausted = False
+            for task in done:
+                try:
+                    event = task.result()
+                except StopAsyncIteration:
+                    exhausted = True
+                else:
+                    yield event
+            if exhausted:
+                # Keep events that arrived while we were yielding from the done set.
+                for task in pending_tasks.keys() - done:
+                    if not task.cancel():
+                        try:
+                            yield task.result()
+                        except (asyncio.CancelledError, StopAsyncIteration):
+                            pass
+                return
+
+            for task in done:
+                source = pending_tasks.pop(task)
+                pending_tasks[
+                    asyncio.create_task(read(source), name=task.get_name())
+                ] = source
+    except BaseException:
+        if on_abort is not None:
+            on_abort()
+        raise
+    finally:
+        for task in pending_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
 
 
 class _EventWrapper:
@@ -479,12 +498,12 @@ async def stream_agent_response(
     result: RunResultStreaming,
     *,
     converter: ResponseStreamConverter = _DEFAULT_RESPONSE_STREAM_CONVERTER,
-) -> AsyncIterator[ThreadStreamEvent]:
+) -> AsyncGenerator[ThreadStreamEvent, None]:
     """
     Convert a streamed Agents SDK run into ChatKit thread stream events.
 
     This function consumes a streaming run result and yields `ThreadStreamEvent`
-    objects as the run progresses.
+    objects as the run progresses. Closing the stream early cancels an active run.
 
     Args:
         context: The AgentContext to use for the stream.
@@ -495,11 +514,54 @@ async def stream_agent_response(
     Returns:
         An async iterator that yields thread stream events representing the run result.
     """
+    queue_iterator = _AsyncQueueIterator(context._events)
+    model_events = aiter(result.stream_events())
+    cancel_requested = False
+
+    def cancel_run() -> None:
+        nonlocal cancel_requested
+        if cancel_requested or result.is_complete:
+            return
+        cancel_requested = True
+        try:
+            result.cancel()
+        except (Exception, asyncio.CancelledError):
+            logger.exception("Failed to cancel the Agents SDK run")
+
+    merged_events = _merge_generators(
+        model_events, queue_iterator, on_abort=cancel_run
+    )
+    try:
+        async with aclosing(
+            _stream_agent_response(context, merged_events, queue_iterator, converter)
+        ) as events:
+            async for event in events:
+                yield event
+    except BaseException:
+        cancel_run()
+        try:
+            for stream in (merged_events, model_events):
+                try:
+                    await _close_stream(stream)
+                except (Exception, asyncio.CancelledError):
+                    logger.exception("Failed to close an agent event stream")
+        finally:
+            queue_iterator.drain_and_complete()
+        raise
+    else:
+        await _close_stream(model_events)
+
+
+async def _stream_agent_response(
+    context: AgentContext,
+    events: AsyncIterator[StreamEvent | _EventWrapper],
+    queue_iterator: _AsyncQueueIterator,
+    converter: ResponseStreamConverter,
+) -> AsyncGenerator[ThreadStreamEvent, None]:
     current_item_id = None
     current_tool_call = None
     ctx = context
     thread = context.thread
-    queue_iterator = _AsyncQueueIterator(context._events)
     produced_items = set()
     streaming_thought: None | StreamingThoughtTracker = None
     # item_id -> content_index -> annotation count
@@ -540,7 +602,7 @@ async def stream_agent_response(
         return ThreadItemDoneEvent(item=item)
 
     try:
-        async for event in _merge_generators(result.stream_events(), queue_iterator):
+        async for event in events:
             # Events emitted from agent context helpers
             if isinstance(event, _EventWrapper):
                 event = event.event

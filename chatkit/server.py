@@ -2,7 +2,7 @@ import asyncio
 import base64
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from typing import (
     Any,
@@ -258,22 +258,63 @@ async def stream_widget(
 @contextmanager
 def agents_sdk_user_agent_override():
     ua = f"Agents/Python {agents.__version__} ChatKit/Python {__version__}"
-    chat_completions_token = chat_completions_headers_override.set({"User-Agent": ua})
-    responses_token = responses_headers_override.set({"User-Agent": ua})
+    with (
+        chat_completions_headers_override.set({"User-Agent": ua}),
+        responses_headers_override.set({"User-Agent": ua}),
+    ):
+        yield
 
-    yield
 
-    chat_completions_headers_override.reset(chat_completions_token)
-    responses_headers_override.reset(responses_token)
+TEvent = TypeVar("TEvent")
+
+
+async def _close_stream(stream: AsyncIterator[Any]) -> None:
+    # The responder contract also accepts custom iterators that have no aclose().
+    close = getattr(stream, "aclose", None)
+    if close is not None:
+        await close()
+
+
+@asynccontextmanager
+async def _closing_stream(
+    stream: AsyncIterator[TEvent],
+) -> AsyncIterator[AsyncIterator[TEvent]]:
+    try:
+        yield stream
+    except BaseException:
+        try:
+            await _close_stream(stream)
+        except Exception:
+            logger.exception("Error while closing interrupted stream")
+        raise
+    else:
+        await _close_stream(stream)
+
+
+async def _stream_with_user_agent(
+    factory: Callable[[], AsyncIterator[ThreadStreamEvent]],
+) -> AsyncGenerator[ThreadStreamEvent, None]:
+    with agents_sdk_user_agent_override():
+        events = aiter(factory())
+    try:
+        while True:
+            with agents_sdk_user_agent_override():
+                event = await anext(events, None)
+            if event is None:
+                return
+            # The HTTP consumer sees its own headers between reads.
+            yield event
+    finally:
+        with agents_sdk_user_agent_override():
+            await _close_stream(events)
 
 
 class StreamingResult(AsyncIterable[bytes]):
     def __init__(self, stream: AsyncGenerator[bytes, None]):
         self.json_events = stream
 
-    async def __aiter__(self):
-        async for event in self.json_events:
-            yield event
+    def __aiter__(self) -> AsyncGenerator[bytes, None]:
+        return self.json_events
 
 
 class NonStreamingResult:
@@ -534,9 +575,12 @@ class ChatKitServer(ABC, Generic[TContext]):
         self, request: StreamingReq, context: TContext
     ) -> AsyncGenerator[bytes, None]:
         try:
-            async for event in self._process_streaming_impl(request, context):
-                b = self._serialize(event)
-                yield b"data: " + b + b"\n\n"
+            async with _closing_stream(
+                self._process_streaming_impl(request, context)
+            ) as events:
+                async for event in events:
+                    b = self._serialize(event)
+                    yield b"data: " + b + b"\n\n"
         except asyncio.CancelledError:
             # Let cancellation bubble up without logging as an error.
             raise
@@ -562,12 +606,11 @@ class ChatKitServer(ABC, Generic[TContext]):
                 user_message = await self._build_user_message_item(
                     request.params.input, thread, context
                 )
-                async for event in self._process_new_thread_item_respond(
+                stream = self._process_new_thread_item_respond(
                     thread,
                     user_message,
                     context,
-                ):
-                    yield event
+                )
 
             case ThreadsAddUserMessageReq():
                 thread = await self.store.load_thread(
@@ -576,12 +619,11 @@ class ChatKitServer(ABC, Generic[TContext]):
                 user_message = await self._build_user_message_item(
                     request.params.input, thread, context
                 )
-                async for event in self._process_new_thread_item_respond(
+                stream = self._process_new_thread_item_respond(
                     thread,
                     user_message,
                     context,
-                ):
-                    yield event
+                )
 
             case ThreadsAddClientToolOutputReq():
                 thread = await self.store.load_thread(
@@ -615,12 +657,11 @@ class ChatKitServer(ABC, Generic[TContext]):
                 # when creating input response messages.
                 await self._cleanup_pending_client_tool_call(thread, context)
 
-                async for event in self._process_events(
+                stream = self._process_events(
                     thread,
                     context,
                     lambda: self.respond(thread, None, context),
-                ):
-                    yield event
+                )
 
             case ThreadsAddStructuredInputReq():
                 thread = await self.store.load_thread(
@@ -647,15 +688,17 @@ class ChatKitServer(ABC, Generic[TContext]):
                     # Keep this replacement inside _process_events so it is persisted
                     # through the same event pipeline as other thread item replacements.
                     yield ThreadItemReplacedEvent(item=updated_item)
-                    async for event in self.respond(thread, None, context):
-                        yield event
+                    async with _closing_stream(
+                        aiter(self.respond(thread, None, context))
+                    ) as events:
+                        async for event in events:
+                            yield event
 
-                async for event in self._process_events(
+                stream = self._process_events(
                     thread,
                     context,
                     stream_structured_input_response,
-                ):
-                    yield event
+                )
 
             case ThreadsRetryAfterItemReq():
                 thread_metadata = await self.store.load_thread(
@@ -678,21 +721,22 @@ class ChatKitServer(ABC, Generic[TContext]):
                         break
                     items_to_remove.append(item)
 
-                if user_message_item:
-                    for item in items_to_remove:
-                        await self.store.delete_thread_item(
-                            request.params.thread_id, item.id, context=context
-                        )
-                    async for event in self._process_events(
+                if user_message_item is None:
+                    return
+                for item in items_to_remove:
+                    await self.store.delete_thread_item(
+                        request.params.thread_id, item.id, context=context
+                    )
+                stream = self._process_events(
+                    thread_metadata,
+                    context,
+                    lambda: self.respond(
                         thread_metadata,
+                        user_message_item,
                         context,
-                        lambda: self.respond(
-                            thread_metadata,
-                            user_message_item,
-                            context,
-                        ),
-                    ):
-                        yield event
+                    ),
+                )
+
             case ThreadsCustomActionReq():
                 thread_metadata = await self.store.load_thread(
                     request.params.thread_id, context=context
@@ -714,7 +758,7 @@ class ChatKitServer(ABC, Generic[TContext]):
                     )
                     return
 
-                async for event in self._process_events(
+                stream = self._process_events(
                     thread_metadata,
                     context,
                     lambda: self.action(
@@ -723,11 +767,14 @@ class ChatKitServer(ABC, Generic[TContext]):
                         item,
                         context,
                     ),
-                ):
-                    yield event
+                )
 
             case _:
                 assert_never(request)
+
+        async with _closing_stream(stream) as events:
+            async for event in events:
+                yield event
 
     async def _process_sync_custom_action(
         self, request: ThreadsSyncCustomActionReq, context: TContext
@@ -828,12 +875,13 @@ class ChatKitServer(ABC, Generic[TContext]):
         await self.store.add_thread_item(thread.id, item, context=context)
         yield ThreadItemDoneEvent(item=item)
 
-        async for event in self._process_events(
-            thread,
-            context,
-            lambda: self.respond(thread, item, context),
-        ):
-            yield event
+        async with _closing_stream(
+            self._process_events(
+                thread, context, lambda: self.respond(thread, item, context)
+            )
+        ) as events:
+            async for event in events:
+                yield event
 
     async def _process_events(
         self,
@@ -855,8 +903,8 @@ class ChatKitServer(ABC, Generic[TContext]):
         pending_items: dict[str, ThreadItem] = {}
 
         try:
-            with agents_sdk_user_agent_override():
-                async for event in stream():
+            async with _closing_stream(_stream_with_user_agent(stream)) as events:
+                async for event in events:
                     if isinstance(event, ThreadItemAddedEvent):
                         # Stash an isolated copy in case we need to persist unfinished items
                         # on cancellation; downstream handlers keep using the original event.item.
@@ -906,7 +954,7 @@ class ChatKitServer(ABC, Generic[TContext]):
                     last_thread = thread.model_copy(deep=True)
                     await self.store.save_thread(thread, context=context)
                     yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             await self.handle_stream_cancelled(
                 thread, list(pending_items.values()), context
             )
