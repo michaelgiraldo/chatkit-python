@@ -821,6 +821,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "starlette" },
 ]
 lint = [
     { name = "ruff" },
@@ -846,6 +847,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff", specifier = "==0.17.6" },
+    { name = "starlette" },
 ]
 lint = [{ name = "ruff", specifier = "==0.17.6" }]
 
