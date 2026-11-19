@@ -78,28 +78,25 @@ class MyResponseStreamConverter(ResponseStreamConverter):
 
 ### Pass your converter to `stream_agent_response`
 
-Create your converter and pass it into `stream_agent_response`. The returned URL will be what gets persisted on the `GeneratedImageItem`.
+Inside `respond`, build `input_items` from your thread history as shown in
+[Respond to a user message](respond-to-user-message.md#load-thread-history-recommended-default).
+Pass your converter into `stream_agent_response` to persist the returned URL
+on the `GeneratedImageItem`.
 
 ```python
+from contextlib import aclosing
+
 from agents import Runner
 
 from chatkit.agents import AgentContext, stream_agent_response
 
+agent_context = AgentContext(thread=thread, store=self.store, request_context=context)
+result = Runner.run_streamed(agent, input_items, context=agent_context)
 
-async def respond(...):
-    agent_context = AgentContext(
-        thread=thread,
-        store=self.store,
-        request_context=context,
-        previous_response_id=thread.previous_response_id,
-    )
-    result = Runner.run_streamed(agent, input_items, context=agent_context)
-
-    async for event in stream_agent_response(
-        agent_context,
-        result,
-        converter=MyResponseStreamConverter(),
-    ):
+async with aclosing(
+    stream_agent_response(agent_context, result, converter=MyResponseStreamConverter())
+) as events:
+    async for event in events:
         yield event
 ```
 

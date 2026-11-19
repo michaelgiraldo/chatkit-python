@@ -229,41 +229,66 @@ Respect any `input.inference_options` the client sends (model, tool choice, etc.
 
 #### Using `previous_response_id` (OpenAI Responses API only)
 
-If you are using OpenAI models through the **Responses API**, you can pass `previous_response_id` to `Runner.run_streamed(...)` and (often) send only the *new* user message as model input. This can simplify input construction when the provider can retrieve prior context server-side.
+The OpenAI Responses API can retrieve model-visible history from a stored
+response. If your app permits provider-side storage, pass a saved response ID
+as `previous_response_id` to `Runner.run_streamed()` on the next turn. For
+locally managed history or ChatKit-only items such as widgets, use the
+[thread history approach above](#load-thread-history-recommended-default).
 
-Terminology note: Agents exposes the ID of the most recent model response as `result.last_response_id`. On the *next* turn, you pass that saved value as the `previous_response_id` parameter.
-
-**Important restrictions:**
-
-- **OpenAI Responses API only.** Other model providers won't be able to follow a `previous_response_id`, so you must send thread history yourself.
-- **Only includes model-visible history.** If your integration streams ChatKit-only items (e.g. widgets/workflows emitted directly to the client), the model won't know about them unless you also include them in `input_items`.
-- **Works only while the referenced response is retrievable.** Persist `result.last_response_id` and ensure responses are stored (`store=True` / `ModelSettings(store=True)`); otherwise fall back to rebuilding input from thread items.
-
-Example:
+Use this example inside `respond` in place of the history-only setup and
+streaming example. It enables provider-side storage for the run. ChatKit
+saves the incoming user message before calling `respond`, so the history
+fallback already includes that message.
 
 ```python
-# `ThreadMetadata.metadata` is a free-form dict for integration-specific state.
-# ChatKit does not define a first-class `last_response_id` field on `ThreadMetadata`;
-# your integration can store it under a key and reuse it on the next turn.
-last_response_id = thread.metadata.get("last_response_id")
-last_response_id = last_response_id if isinstance(last_response_id, str) else None
+from contextlib import aclosing
 
-# Often: send only the new message as input when chaining on the server.
-input_items = await simple_to_agent_input(input)
+from agents import ModelSettings, RunConfig, Runner
+
+from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
+from chatkit.types import ErrorEvent
+
+agent_context = AgentContext(thread=thread, store=self.store, request_context=context)
+saved_id = thread.metadata.pop("last_response_id", None)
+if saved_id is not None:
+    # An interrupted turn leaves the next turn free to rebuild from thread history.
+    await self.store.save_thread(thread, context=context)
+
+if isinstance(saved_id, str) and saved_id and input is not None:
+    previous_response_id = saved_id
+    input_items = await simple_to_agent_input([input])
+else:
+    previous_response_id = None
+    items_page = await self.store.load_thread_items(
+        thread.id, after=None, limit=20, order="desc", context=context
+    )
+    input_items = await simple_to_agent_input(list(reversed(items_page.data)))
 
 result = Runner.run_streamed(
     assistant_agent,
     input_items,
     context=agent_context,
-    previous_response_id=last_response_id,
-    auto_previous_response_id=True,
+    previous_response_id=previous_response_id,
+    run_config=RunConfig(model_settings=ModelSettings(store=True)),
 )
 
-# Persist the new response ID so the next turn can chain again.
-if result.last_response_id:
+stream_failed = False
+async with aclosing(stream_agent_response(agent_context, result)) as events:
+    async for event in events:
+        if isinstance(event, ErrorEvent):
+            stream_failed = True
+        yield event
+
+if not stream_failed and result.last_response_id:
     thread.metadata["last_response_id"] = result.last_response_id
     await self.store.save_thread(thread, context=context)
 ```
+
+`result.last_response_id` becomes available as the runner receives model
+responses. Save it only after the stream finishes successfully. If the provider
+reports that the saved response is no longer retrievable, a fresh attempt can
+rebuild its input from thread history. Only retry automatically if nothing has
+been sent to the client and no tools have taken action.
 
 ### Run inference and stream events
 
