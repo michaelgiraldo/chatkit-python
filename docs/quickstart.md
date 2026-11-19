@@ -61,11 +61,11 @@ The chat UI will render, but sending messages will fail until you start the serv
 ## Run your ChatKit server
 
 This fork requires Python 3.14 or newer. From the root of this fork's checkout,
-install the package. Then expose a single `/chatkit` endpoint that forwards
-requests to a `ChatKitServer` instance.
+install the package and FastAPI for the example server. Then expose a single
+`/chatkit` endpoint that forwards requests to a `ChatKitServer` instance.
 
 ```sh
-python -m pip install .
+python -m pip install . fastapi
 ```
 
 Create `main.py` with a minimal server that is hard-coded to always reply “Hello, world!”—you'll replace this with an actual call to a model in [Respond to a user message](guides/respond-to-user-message.md).

@@ -15,7 +15,7 @@ No additional server-side wiring is required beyond calling `stream_agent_respon
 
 ### Customize how citations are converted
 
-Sometimes the default rendering for model-emitted citations is not very helpful. For example, file citations may not include enough metadata for ChatKit to show a meaningful default title or description. You can pass a custom [`ResponseStreamConverter`](../../api/chatkit/agents/#chatkit.agents.ResponseStreamConverter) and override:
+Sometimes the default rendering for model-emitted citations is not very helpful. For example, file citations may not include enough metadata for ChatKit to show a meaningful default title or description. You can pass a custom [`ResponseStreamConverter`](../api/chatkit/agents.md#chatkit.agents.ResponseStreamConverter) and override:
 
 - `file_citation_to_annotation`
 - `container_file_citation_to_annotation`

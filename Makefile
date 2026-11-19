@@ -1,4 +1,4 @@
-.PHONY: sync install format format-check lint mypy pyright test build serve-docs deploy-docs check
+.PHONY: sync install format format-check lint pyright test build serve-docs deploy-docs check
 
 # Pass the version explicitly because uv --no-config skips .python-version.
 UV_ENV := env -i PATH="$(PATH)" HOME="$(HOME)" UV_PYTHON="$(shell cat .python-version)"
@@ -19,9 +19,6 @@ format-check:
 
 lint:
 	$(UV) run $(UV_LOCK_ARGS) ruff check
-
-mypy:
-	$(UV) run $(UV_LOCK_ARGS) mypy .
 
 pyright:
 	$(UV) run $(UV_LOCK_ARGS) pyright
