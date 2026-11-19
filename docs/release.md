@@ -23,6 +23,13 @@ We will increment patch versions for non-breaking changes:
 ### Unreleased fork changes
 
 - The fork now requires Python 3.14 or newer. For Python 3.10 through 3.13, the upstream `v1.6.5` release remains available.
+- Installing the fork requires OpenAI Python 3.56.0 through 3.x, Agents SDK
+  0.25.x, Pydantic 2.14.4 through 2.x, Uvicorn 0.54.0 through 0.x, and Jinja
+  3.1.6 through 3.x. ChatKit uses internal per-request header overrides from
+  Agents SDK 0.25.x. Update any older pins in your app before installing the fork.
+  If your app passes a custom HTTP client to the OpenAI SDK, see the
+  [HTTPX2 migration guide](https://github.com/openai/openai-python/blob/v3.56.0/httpx2.md).
+- The `fastapi` extra installs the FastAPI version used by the quickstart.
 
 ### 1.6.0
 

@@ -2,7 +2,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime
-from importlib import import_module
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
@@ -24,6 +23,7 @@ from agents import (
     StreamEvent,
     ToolCallItem,
 )
+from agents.run_internal.run_steps import QueueCompleteSentinel
 from openai.types.responses import (
     EasyInputMessageParam,
     ResponseFileSearchToolCall,
@@ -120,31 +120,13 @@ mock_store.load_thread_items = AsyncMock(return_value=Page())
 mock_store.add_thread_item = AsyncMock()
 
 
-def make_queue_complete_sentinel():
-    for module_name in (
-        "agents.result",
-        "agents.run_internal.run_steps",
-        "agents._run_impl",
-    ):
-        try:
-            module = import_module(module_name)
-        except ImportError:
-            continue
-
-        sentinel = getattr(module, "QueueCompleteSentinel", None)
-        if sentinel is not None:
-            return sentinel()
-
-    raise ImportError("QueueCompleteSentinel not found in installed agents package")
-
-
 class RunResult(RunResultStreaming):
     def add_event(self, event: StreamEvent):
         self._event_queue.put_nowait(event)
 
     def done(self):
         self.is_complete = True
-        self._event_queue.put_nowait(make_queue_complete_sentinel())
+        self._event_queue.put_nowait(QueueCompleteSentinel())
 
     def throw_input_guardrails(self):
         self._stored_exception = InputGuardrailTripwireTriggered(
@@ -156,8 +138,7 @@ class RunResult(RunResultStreaming):
                 ),
             )
         )
-        self.is_complete = True
-        self._event_queue.put_nowait(make_queue_complete_sentinel())
+        self.done()
 
     def throw_output_guardrails(self):
         self._stored_exception = OutputGuardrailTripwireTriggered(
@@ -171,8 +152,7 @@ class RunResult(RunResultStreaming):
                 agent_output=None,
             )
         )
-        self.is_complete = True
-        self._event_queue.put_nowait(make_queue_complete_sentinel())
+        self.done()
 
 
 def make_result() -> RunResult:
@@ -193,7 +173,6 @@ def make_result() -> RunResult:
         _event_queue=asyncio.Queue(),
         _input_guardrail_queue=asyncio.Queue(),
         _output_guardrails_task=None,
-        _run_impl_task=None,
         _stored_exception=None,
         output_guardrail_results=[],
         input_guardrail_results=[],

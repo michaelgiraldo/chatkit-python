@@ -208,6 +208,11 @@ The raw value is available as `audio_input.mime_type`. Use `audio_input.media_ty
 Example transcription method using the OpenAI Audio API:
 
 ```python
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI()
+
+
 async def transcribe(
     self, audio_input: AudioInput, context: RequestContext
 ) -> TranscriptionResult:
@@ -219,10 +224,9 @@ async def transcribe(
     if not ext:
         raise HTTPException(status_code=400, detail="Unexpected audio format")
 
-    audio_file = io.BytesIO(audio_input.data)
-    audio_file.name = f"audio.{ext}"
-    transcription = client.audio.transcriptions.create(
-        model="gpt-4o-transcribe", file=audio_file
+    transcription = await client.audio.transcriptions.create(
+        model="gpt-transcribe",
+        file=(f"audio.{ext}", audio_input.data, audio_input.media_type),
     )
     return TranscriptionResult(text=transcription.text)
 ```

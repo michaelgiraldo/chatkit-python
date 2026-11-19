@@ -3,6 +3,15 @@ revision = 5
 requires-python = ">=3.14"
 
 [[package]]
+name = "annotated-doc"
+version = "0.0.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0b/7d/bdbf3062e5dae31da8b3de1e3269110beb93d268df4a7f6d22b167c6cee0/annotated_doc-0.0.7.tar.gz", hash = "sha256:0a30ef8f5322a4173720ae6712dc9a5e58f5a19868f3f167b4b5778db066c2b5", size = 10764, upload-time = "2026-11-18T11:06:55.181Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/b1/9530d6bee606979d54501adcc767d958a38929827f11a524b0d93429d2ad/annotated_doc-0.0.7-py3-none-any.whl", hash = "sha256:6bc31bbbec6dfaaedc1676dbc11dbda96fe22a2b5c400e9ebad113fec44a9dc6", size = 5286, upload-time = "2026-11-18T11:06:54.096Z" },
+]
+
+[[package]]
 name = "annotated-types"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -297,6 +306,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bf/8d6ebc7dded797bd0f0160d52188021211f011a2b164ef0ae1dac4587465/cryptography-50.0.2-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:7a8701d6b584d76e909e3d305b7d126b41439876a5aaf76cddc67fc230eafa2e", size = 4897738, upload-time = "2026-09-30T15:29:43.106Z" },
     { url = "https://files.pythonhosted.org/packages/d4/aa/f3f6e0de7e6253b8baa8b2d8fb9d50924fa75cee3d4624bd4bc1208ee923/cryptography-50.0.2-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ce47f66801c20ec6c6632453bb5960fe38939e9306970b48b3a5a26de7745d94", size = 5058280, upload-time = "2026-09-30T15:29:44.827Z" },
     { url = "https://files.pythonhosted.org/packages/f6/b6/a1faf3a27ae9405fb34b1713cc73b2d8a26b04d5c561578fa2e6ef3e5bb9/cryptography-50.0.2-cp39-abi3-win_amd64.whl", hash = "sha256:4e81d95e5bafc2d6e34e4bed780e53e4d5b9a2f928573428aa4d35fbec1eb0de", size = 3854095, upload-time = "2026-09-30T15:29:46.782Z" },
+]
+
+[[package]]
+name = "fastapi"
+version = "0.165.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "anyio" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/f9/e7820ef181026fea100bde02d811445bf8e883362d7092b6928767147056/fastapi-0.165.0.tar.gz", hash = "sha256:dd94d4128319c1e1d50535ab023ab698f850a4d2822f0e181747b46f4ff3c0ab", size = 557984, upload-time = "2026-11-18T19:15:37.076Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/c1/3b74c030262a1b38b1fee180f80b4007bbc11c9ac12028cb18c7bcecaec9/fastapi-0.165.0-py3-none-any.whl", hash = "sha256:896f48462042bb4f162147eb8fac7e858753dc1f486765709baf105d70e4fc5b", size = 159475, upload-time = "2026-11-18T19:15:35.345Z" },
 ]
 
 [[package]]
@@ -801,7 +828,7 @@ wheels = [
 [[package]]
 name = "openai-chatkit"
 version = "1.6.5"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "jinja2" },
     { name = "openai" },
@@ -810,8 +837,15 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+fastapi = [
+    { name = "fastapi" },
+]
+
 [package.dev-dependencies]
 dev = [
+    { name = "anyio" },
+    { name = "httpx2" },
     { name = "mkdocs" },
     { name = "mkdocs-gen-files" },
     { name = "mkdocs-material" },
@@ -829,25 +863,29 @@ lint = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jinja2", specifier = ">=3.1,<4" },
-    { name = "openai" },
-    { name = "openai-agents", specifier = ">=0.3.2" },
-    { name = "pydantic" },
-    { name = "uvicorn" },
+    { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.165.0,<1" },
+    { name = "jinja2", specifier = ">=3.1.6,<4" },
+    { name = "openai", specifier = ">=3.56.0,<4" },
+    { name = "openai-agents", specifier = ">=0.25.0,<0.26" },
+    { name = "pydantic", specifier = ">=2.14.4,<3" },
+    { name = "uvicorn", specifier = ">=0.54.0,<1" },
 ]
+provides-extras = ["fastapi"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "mkdocs", specifier = ">=1.6,<2" },
+    { name = "anyio", specifier = ">=4.16.0,<5" },
+    { name = "httpx2", specifier = ">=2.16.2,<3" },
+    { name = "mkdocs", specifier = ">=1.6.1,<2" },
     { name = "mkdocs-gen-files", specifier = ">=0.6.1,<1" },
     { name = "mkdocs-material", specifier = ">=9.8.2,<10" },
     { name = "mkdocstrings", specifier = ">=1.0.8,<2" },
     { name = "mkdocstrings-python", specifier = ">=2.0.11,<3" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
+    { name = "pyright", specifier = ">=1.1.414,<2" },
+    { name = "pytest", specifier = ">=9.2.0,<10" },
+    { name = "pytest-asyncio", specifier = ">=1.5.0,<2" },
     { name = "ruff", specifier = "==0.17.6" },
-    { name = "starlette" },
+    { name = "starlette", specifier = ">=1.10.0,<2" },
 ]
 lint = [{ name = "ruff", specifier = "==0.17.6" }]
 

@@ -26,10 +26,27 @@ jobs:
         run: make sync
 
       - name: Lint
-        run: make lint
+        run: make format-check lint
 
       - name: Type check
         run: make pyright
 
       - name: Test
         run: make test
+
+      - name: Build docs
+        run: uv run --frozen mkdocs build --strict
+
+      - name: Build distributions
+        run: make build
+
+      - name: Check wheel installs
+        run: |
+          wheel="$(realpath dist/*.whl)"
+          python_version="$(cat .python-version)"
+          uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "$wheel" \
+            python -I -c 'import chatkit.agents, chatkit.server, chatkit.widgets, uvicorn'
+          uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "${wheel}[fastapi]" \
+            python -I -c 'from fastapi import FastAPI; import chatkit.server; FastAPI()'

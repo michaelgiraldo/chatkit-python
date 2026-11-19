@@ -47,15 +47,13 @@ const chatkit = useChatKit({
   composer: {
     models: [
       {
-        id: "gpt-4.1-mini",
-        label: "Fast",
-        description: "Answers right away",
+        id: "gpt-6-luna",
+        label: "GPT-6 Luna",
+        default: true,
       },
       {
-        id: "gpt-4.1",
-        label: "Quality",
-        description: "All rounder"
-        default: true,
+        id: "gpt-6-sol",
+        label: "GPT-6 Sol",
       },
     ],
   },
@@ -69,9 +67,6 @@ The selected model id flows through to your server so you can route requests to 
 On the server, `UserMessageItem.inference_options` carries the tool choice and model id for that turn.
 
 ```python
-from chatkit.types import InferenceOptions
-
-
 class MyChatKitServer(ChatKitServer[RequestContext]):
     async def respond(
         self,
@@ -81,7 +76,7 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
     ) -> AsyncIterator[ThreadStreamEvent]:
         options = input_user_message and input_user_message.inference_options
 
-        model = options.model if options and options.model else "gpt-4.1-mini"
+        model = options.model if options and options.model else "gpt-6-luna"
         tool_choice = (
             options.tool_choice.id if options and options.tool_choice else None
         )
@@ -117,8 +112,6 @@ You control which tools each agent exposes; the composer’s tool menu just lets
 Use the selected model id to pick an underlying model or configuration when you call the OpenAI Responses API (or another provider):
 
 ```python
-model = inference.model if inference and inference.model else "gpt-4.1-mini"
-
 response = await client.responses.create(
     model=model,
     input=...,

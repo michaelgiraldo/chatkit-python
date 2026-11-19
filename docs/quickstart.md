@@ -18,10 +18,11 @@ The sections below explain the core components and steps behind the starter app.
     This section shows the React integration using `@openai/chatkit-react`.  
     If you’re not using React, you can render ChatKit directly with vanilla JavaScript using `@openai/chatkit`. See the [ChatKit.js quick start](https://openai.github.io/chatkit-js/quickstart/) for details.
 
-Install the React bindings:
+Install the React bindings used in this example. This version includes
+`@openai/chatkit` 1.9.0.
 
 ```sh
-npm install @openai/chatkit-react
+npm install @openai/chatkit-react@1.6.1
 ```
 
 In your index.html, load ChatKit.js:
@@ -65,7 +66,7 @@ install the package and FastAPI for the example server. Then expose a single
 `/chatkit` endpoint that forwards requests to a `ChatKitServer` instance.
 
 ```sh
-python -m pip install . fastapi
+python -m pip install '.[fastapi]'
 ```
 
 Save [chatkit_response.py](examples/chatkit_response.py) next to `main.py`. The
@@ -294,7 +295,7 @@ from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_res
 assistant = Agent(
     name="assistant",
     instructions="You are a helpful assistant.",
-    model="gpt-4.1-mini",
+    model="gpt-6-luna",
 )
 
 
