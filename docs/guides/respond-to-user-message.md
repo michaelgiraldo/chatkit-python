@@ -339,6 +339,101 @@ async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
 
 `stream_agent_response` will forward these events alongside any assistant text or tool call updates. Client tool calls are also supported via `ctx.context.client_tool_call` when you register the tool on both client and server.
 
+### Save structured tool results after a turn
+
+Use the same `AgentContext` for the run and the ChatKit stream. Inside a tool,
+`ctx.context.thread.id` gives you the current ChatKit thread ID. Extend the
+context to hold structured output until the turn finishes. The example below
+keeps one feedback record per user message.
+
+```python
+from agents import Agent, RunContextWrapper, Runner, function_tool
+from pydantic import BaseModel
+
+from chatkit.agents import AgentContext
+
+
+class Feedback(BaseModel):
+    summary: str
+
+
+class FeedbackContext(AgentContext[MyRequestContext]):
+    feedback: Feedback | None = None
+
+
+formatter = Agent[FeedbackContext](
+    name="Feedback formatter",
+    instructions="Summarize the user's feedback in one sentence.",
+    output_type=Feedback,
+)
+
+
+@function_tool(failure_error_function=None)
+async def collect_feedback(
+    ctx: RunContextWrapper[FeedbackContext], text: str
+) -> str:
+    """Collect feedback the user shared in this turn."""
+    formatted = await Runner.run(formatter, text, context=ctx.context)
+    ctx.context.feedback = formatted.final_output_as(
+        Feedback, raise_if_incorrect_type=True
+    )
+    return "Feedback collected."
+
+
+feedback_agent = Agent[FeedbackContext](
+    name="Assistant",
+    instructions="Call collect_feedback when the user shares feedback.",
+    tools=[collect_feedback],
+)
+```
+
+In `respond`, build `input_items` from thread history as above and use this
+streaming block. Supply `self.feedback_repository` from your application with
+an async `upsert` method. Use a unique key of user ID, thread ID, and source
+message ID so retrying the same message updates its existing record.
+
+```python
+from contextlib import aclosing
+
+from chatkit.agents import stream_agent_response
+from chatkit.types import ErrorEvent
+
+agent_context = FeedbackContext(
+    thread=thread, store=self.store, request_context=context
+)
+result = Runner.run_streamed(feedback_agent, input_items, context=agent_context)
+
+stream_failed = False
+async with aclosing(stream_agent_response(agent_context, result)) as events:
+    async for event in events:
+        if isinstance(event, ErrorEvent):
+            stream_failed = True
+        yield event
+
+feedback = agent_context.feedback
+if (
+    not stream_failed
+    and result.is_complete
+    and not result.interruptions
+    and result.final_output is not None
+    and input is not None
+    and feedback is not None
+):
+    await self.feedback_repository.upsert(
+        user_id=context.user_id,
+        thread_id=thread.id,
+        source_message_id=input.id,
+        feedback=feedback,
+    )
+```
+
+Keep the upsert after the stream so exceptions, guardrail blocks, and early
+stream closure leave the staged result unwritten. If you use the guardrail
+handlers above, return after yielding the error event.
+Runs without a source user message skip this example's write.
+
+This example builds on Jao Garcia's persistence question. [Upstream issue #120](https://github.com/openai/chatkit-python/issues/120)
+
 ## Next: add features
 
 - [Let users browse past threads](browse-past-threads.md)
