@@ -27,12 +27,10 @@ message_template = WidgetTemplate.from_file("widgets/channel_message.widget")
 
 def build_message_widget(user_name: str, message: str):
     # Replace this helper with whatever your integration uses to build widgets.
-    return message_template.build(
-        {
-            "user_name": user_name,
-            "message": message,
-        }
-    )
+    return message_template.build({
+        "user_name": user_name,
+        "message": message,
+    })
 ```
 
 `WidgetTemplate.build` accepts plain dicts or Pydantic models. Use `.build_basic` if you're working with a `BasicRoot` widget outside of streaming.
@@ -95,9 +93,7 @@ from chatkit.widgets import WidgetRoot
 @function_tool
 async def draft_message_to_harry(ctx: RunContextWrapper[AgentContext]):
     # message_generator is your model/tool function that streams text
-    message_result = Runner.run_streamed(
-        message_generator, "Draft a message to Harry."
-    )
+    message_result = Runner.run_streamed(message_generator, "Draft a message to Harry.")
 
     async def widget_generator() -> AsyncGenerator[WidgetRoot, None]:
         message = ""

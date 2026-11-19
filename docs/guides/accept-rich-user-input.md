@@ -139,8 +139,7 @@ from chatkit.types import ImageAttachment
 from openai.types.responses import ResponseInputFileParam, ResponseInputImageParam
 
 
-async def read_bytes(attachment_id: str) -> bytes:
-    ...  # fetch from your blob store
+async def read_bytes(attachment_id: str) -> bytes: ...  # fetch from your blob store
 
 
 def as_data_url(mime: str, content: bytes) -> str:
@@ -209,22 +208,23 @@ The raw value is available as `audio_input.mime_type`. Use `audio_input.media_ty
 Example transcription method using the OpenAI Audio API:
 
 ```python
-async def transcribe(self, audio_input: AudioInput, context: RequestContext) -> TranscriptionResult:
-  ext = {
-      "audio/webm": "webm",
-      "audio/mp4": "m4a",
-      "audio/ogg": "ogg",
-  }.get(audio_input.media_type)
-  if not ext:
-      raise HTTPException(status_code=400, detail="Unexpected audio format")
+async def transcribe(
+    self, audio_input: AudioInput, context: RequestContext
+) -> TranscriptionResult:
+    ext = {
+        "audio/webm": "webm",
+        "audio/mp4": "m4a",
+        "audio/ogg": "ogg",
+    }.get(audio_input.media_type)
+    if not ext:
+        raise HTTPException(status_code=400, detail="Unexpected audio format")
 
-  audio_file = io.BytesIO(audio_input.data)
-  audio_file.name = f"audio.{ext}"
-  transcription = client.audio.transcriptions.create(
-      model="gpt-4o-transcribe",
-      file=audio_file
-  )
-  return TranscriptionResult(text=transcription.text)
+    audio_file = io.BytesIO(audio_input.data)
+    audio_file.name = f"audio.{ext}"
+    transcription = client.audio.transcriptions.create(
+        model="gpt-4o-transcribe", file=audio_file
+    )
+    return TranscriptionResult(text=transcription.text)
 ```
 
 Return a `TranscriptionResult` that includes the final `text` that should appear in the composer.

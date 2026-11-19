@@ -804,9 +804,7 @@ class ChatKitServer[TContext = Any](ABC):
             raise ValueError(f"Structured input item {item.id} is not pending")
 
         updated_item = item.model_copy(deep=True)
-        questions_by_id = {
-            question.id: question for question in updated_item.inputs
-        }
+        questions_by_id = {question.id: question for question in updated_item.inputs}
         submitted_question_ids = set(submission.answers)
         unknown_question_ids = submitted_question_ids.difference(questions_by_id)
         if unknown_question_ids:
@@ -819,10 +817,10 @@ class ChatKitServer[TContext = Any](ABC):
             answer = submission.answers.get(question.id)
 
             if (
-                submission.status == "skipped" or
-                answer is None or
-                answer.skipped or
-                not answer.values
+                submission.status == "skipped"
+                or answer is None
+                or answer.skipped
+                or not answer.values
             ):
                 question.answer = StructuredInputAnswer(skipped=True)
                 continue
@@ -946,7 +944,7 @@ class ChatKitServer[TContext = Any](ABC):
                     last_thread = thread.model_copy(deep=True)
                     await self.store.save_thread(thread, context=context)
                     yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
-        except (asyncio.CancelledError, GeneratorExit):
+        except asyncio.CancelledError, GeneratorExit:
             await self.handle_stream_cancelled(
                 thread, list(pending_items.values()), context
             )

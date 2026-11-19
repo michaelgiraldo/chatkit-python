@@ -1400,7 +1400,7 @@ async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
         async for event in iterator:
             events.append(event)
         assert False, "Guardrail should have been thrown from stream_agent_response"
-    except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered):
+    except InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered:
         pass
     except Exception as e:
         assert False, f"Unexpected exception: {e}"

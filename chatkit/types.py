@@ -579,6 +579,7 @@ ThreadItemUpdate = (
 
 class SyncCustomActionResponse(BaseModel):
     """Single thread item update returned by a sync custom action."""
+
     updated_item: ThreadItem | None = None
 
 

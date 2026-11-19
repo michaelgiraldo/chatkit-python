@@ -1232,9 +1232,7 @@ async def test_add_structured_input_treats_omitted_answers_as_skipped():
                     input=StructuredInputSubmission(
                         status="answered",
                         answers={
-                            "subject": StructuredInputAnswerSubmission(
-                                values=["Math"]
-                            ),
+                            "subject": StructuredInputAnswerSubmission(values=["Math"]),
                         },
                     ),
                 )

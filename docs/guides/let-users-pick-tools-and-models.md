@@ -82,7 +82,9 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
         options = input_user_message and input_user_message.inference_options
 
         model = options.model if options and options.model else "gpt-4.1-mini"
-        tool_choice = options.tool_choice.id if options and options.tool_choice else None
+        tool_choice = (
+            options.tool_choice.id if options and options.tool_choice else None
+        )
 
         # Use `model` and `tool_choice` when building your model request...
 ```

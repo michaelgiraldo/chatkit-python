@@ -21,6 +21,7 @@ Override the `add_feedback` method on your server to persist the signal anywhere
 from chatkit.server import ChatKitServer
 from chatkit.types import FeedbackKind
 
+
 class MyChatKitServer(ChatKitServer[RequestContext]):
     async def add_feedback(
         self,

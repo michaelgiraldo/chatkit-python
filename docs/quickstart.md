@@ -94,6 +94,7 @@ class MyChatKitServer(ChatKitServer[dict]):
             ),
         )
 
+
 # Create your server by passing a store implementation.
 # MyChatKitStore is defined in the next section.
 server = MyChatKitServer(store=MyChatKitStore())
@@ -141,7 +142,12 @@ class MyChatKitStore(Store[dict]):
     ) -> Page[ThreadMetadata]:
         threads = list(self.threads.values())
         return self._paginate(
-            threads, after, limit, order, sort_key=lambda t: t.created_at, cursor_key=lambda t: t.id
+            threads,
+            after,
+            limit,
+            order,
+            sort_key=lambda t: t.created_at,
+            cursor_key=lambda t: t.id,
         )
 
     async def load_thread_items(
@@ -149,7 +155,12 @@ class MyChatKitStore(Store[dict]):
     ) -> Page[ThreadItem]:
         items = self.items.get(thread_id, [])
         return self._paginate(
-            items, after, limit, order, sort_key=lambda i: i.created_at, cursor_key=lambda i: i.id
+            items,
+            after,
+            limit,
+            order,
+            sort_key=lambda i: i.created_at,
+            cursor_key=lambda i: i.id,
         )
 
     async def add_thread_item(
@@ -157,9 +168,7 @@ class MyChatKitStore(Store[dict]):
     ) -> None:
         self.items[thread_id].append(item)
 
-    async def save_item(
-        self, thread_id: str, item: ThreadItem, context: dict
-    ) -> None:
+    async def save_item(self, thread_id: str, item: ThreadItem, context: dict) -> None:
         items = self.items[thread_id]
         for idx, existing in enumerate(items):
             if existing.id == item.id:
@@ -186,7 +195,15 @@ class MyChatKitStore(Store[dict]):
             item for item in self.items.get(thread_id, []) if item.id != item_id
         ]
 
-    def _paginate(self, rows: list, after: str | None, limit: int, order: str, sort_key, cursor_key):
+    def _paginate(
+        self,
+        rows: list,
+        after: str | None,
+        limit: int,
+        order: str,
+        sort_key,
+        cursor_key,
+    ):
         sorted_rows = sorted(rows, key=sort_key, reverse=order == "desc")
         start = 0
         if after:
@@ -201,19 +218,14 @@ class MyChatKitStore(Store[dict]):
 
     # Attachments are intentionally not implemented for the quickstart
 
-    async def save_attachment(
-        self, attachment: Attachment, context: dict
-    ) -> None:
+    async def save_attachment(self, attachment: Attachment, context: dict) -> None:
         raise NotImplementedError()
 
-    async def load_attachment(
-        self, attachment_id: str, context: dict
-    ) -> Attachment:
+    async def load_attachment(self, attachment_id: str, context: dict) -> Attachment:
         raise NotImplementedError()
 
     async def delete_attachment(self, attachment_id: str, context: dict) -> None:
         raise NotImplementedError()
-
 ```
 
 This store implements only the methods required for basic chat while the server is running; persistence across restarts and attachments are intentionally omitted.
@@ -240,6 +252,7 @@ assistant = Agent(
     model="gpt-4.1-mini",
 )
 
+
 class MyChatKitServer(ChatKitServer[dict]):
     async def respond(
         self,
@@ -258,7 +271,9 @@ class MyChatKitServer(ChatKitServer[dict]):
         input_items = await simple_to_agent_input(items_page.data)
 
         # Stream the run through ChatKit events
-        agent_context = AgentContext(thread=thread, store=self.store, request_context=context)
+        agent_context = AgentContext(
+            thread=thread, store=self.store, request_context=context
+        )
         result = Runner.run_streamed(assistant, input_items, context=agent_context)
         async with aclosing(stream_agent_response(agent_context, result)) as events:
             async for event in events:

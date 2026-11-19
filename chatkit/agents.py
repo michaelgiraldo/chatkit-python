@@ -256,7 +256,7 @@ async def _merge_generators[T1, T2](
                     if not task.cancel():
                         try:
                             yield task.result()
-                        except (asyncio.CancelledError, StopAsyncIteration):
+                        except asyncio.CancelledError, StopAsyncIteration:
                             pass
                 return
 
@@ -518,12 +518,10 @@ async def stream_agent_response(
         cancel_requested = True
         try:
             result.cancel()
-        except (Exception, asyncio.CancelledError):
+        except Exception, asyncio.CancelledError:
             logger.exception("Failed to cancel the Agents SDK run")
 
-    merged_events = _merge_generators(
-        model_events, queue_iterator, on_abort=cancel_run
-    )
+    merged_events = _merge_generators(model_events, queue_iterator, on_abort=cancel_run)
     try:
         async with aclosing(
             _stream_agent_response(context, merged_events, queue_iterator, converter)
@@ -536,7 +534,7 @@ async def stream_agent_response(
             for stream in (merged_events, model_events):
                 try:
                     await _close_stream(stream)
-                except (Exception, asyncio.CancelledError):
+                except Exception, asyncio.CancelledError:
                     logger.exception("Failed to close an agent event stream")
         finally:
             queue_iterator.drain_and_complete()
@@ -846,7 +844,7 @@ async def _stream_agent_response(
 
                     ctx.generated_image_item = None
 
-    except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered):
+    except InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered:
         for item_id in produced_items:
             yield ThreadItemRemovedEvent(item_id=item_id)
 

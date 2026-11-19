@@ -307,7 +307,9 @@ from chatkit.types import ProgressUpdateEvent
 
 @function_tool()
 async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
-    await ctx.context.stream(ProgressUpdateEvent(icon="document", text="Loading document..."))
+    await ctx.context.stream(
+        ProgressUpdateEvent(icon="document", text="Loading document...")
+    )
     return await get_document_by_id(document_id)
 ```
 

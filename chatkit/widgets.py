@@ -1176,7 +1176,9 @@ class WidgetTemplate:
         widget_dict = json.loads(rendered)
         return DynamicWidgetRoot.model_validate(widget_dict)
 
-    @deprecated("WidgetTemplate.build_basic is deprecated. Use WidgetTemplate.build instead.")
+    @deprecated(
+        "WidgetTemplate.build_basic is deprecated. Use WidgetTemplate.build instead."
+    )
     def build_basic(self, data: dict[str, Any] | BaseModel | None = None) -> BasicRoot:
         """Deprecated alias for building Basic root widgets."""
         rendered = self.template.render(**self._normalize_data(data))
