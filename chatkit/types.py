@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Any, Generic, Literal, TypeIs, TypeVar
+from typing import Annotated, Any, Literal, TypeIs
 
 from pydantic import (
     AnyUrl,
@@ -15,10 +15,8 @@ from .actions import Action
 from .icons import IconName
 from .widgets import WidgetComponent, WidgetRoot
 
-T = TypeVar("T")
 
-
-class Page(BaseModel, Generic[T]):
+class Page[T](BaseModel):
     """Paginated collection of records returned from the API."""
 
     data: list[T] = []

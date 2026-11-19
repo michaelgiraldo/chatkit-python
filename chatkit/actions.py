@@ -1,4 +1,4 @@
-from typing import Any, Generic, Literal, TypeVar, get_args, get_origin
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
@@ -17,11 +17,7 @@ class ActionConfig(BaseModel):
     streaming: bool = True
 
 
-TType = TypeVar("TType", bound=str)
-TPayload = TypeVar("TPayload")
-
-
-class Action(BaseModel, Generic[TType, TPayload]):
+class Action[TType: str, TPayload](BaseModel):
     type: TType = Field(default=TType, frozen=True)  # pyright: ignore
     payload: TPayload = None  # pyright: ignore - default to None to allow no-payload actions
 

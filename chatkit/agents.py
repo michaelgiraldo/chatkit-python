@@ -9,9 +9,7 @@ from typing import (
     Annotated,
     Any,
     AsyncGenerator,
-    Generic,
     Sequence,
-    TypeVar,
     assert_never,
     cast,
 )
@@ -106,10 +104,7 @@ class ClientToolCall(BaseModel):
 class _QueueCompleteSentinel: ...
 
 
-TContext = TypeVar("TContext")
-
-
-class AgentContext(BaseModel, Generic[TContext]):
+class AgentContext[TContext](BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     thread: ThreadMetadata
@@ -229,11 +224,7 @@ class AgentContext(BaseModel, Generic[TContext]):
         self._events.put_nowait(_QueueCompleteSentinel())
 
 
-T1 = TypeVar("T1")
-T2 = TypeVar("T2")
-
-
-async def _merge_generators(
+async def _merge_generators[T1, T2](
     a: AsyncIterator[T1],
     b: AsyncIterator[T2],
     *,
@@ -895,10 +886,7 @@ async def _stream_agent_response(
         )
 
 
-TWidget = TypeVar("TWidget", bound=Markdown | Text)
-
-
-async def accumulate_text(
+async def accumulate_text[TWidget: Markdown | Text](
     events: AsyncIterator[StreamEvent],
     base_widget: TWidget,
 ) -> AsyncIterator[TWidget]:

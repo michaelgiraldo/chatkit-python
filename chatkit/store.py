@@ -1,6 +1,6 @@
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Literal
 
 from .types import (
     Attachment,
@@ -9,8 +9,6 @@ from .types import (
     ThreadItem,
     ThreadMetadata,
 )
-
-TContext = TypeVar("TContext", default=Any)
 
 StoreItemType = Literal[
     "thread",
@@ -43,7 +41,7 @@ class NotFoundError(Exception):
     pass
 
 
-class AttachmentStore(ABC, Generic[TContext]):
+class AttachmentStore[TContext = Any](ABC):
     @abstractmethod
     async def delete_attachment(self, attachment_id: str, context: TContext) -> None:
         """Delete an attachment by id."""
@@ -63,7 +61,7 @@ class AttachmentStore(ABC, Generic[TContext]):
         return default_generate_id("attachment")
 
 
-class Store(ABC, Generic[TContext]):
+class Store[TContext = Any](ABC):
     def generate_thread_id(self, context: TContext) -> str:
         """Return a new identifier for a thread. Override this method to customize thread ID generation."""
 

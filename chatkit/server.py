@@ -9,8 +9,6 @@ from typing import (
     AsyncGenerator,
     AsyncIterable,
     Callable,
-    Generic,
-    TypeVar,
     assert_never,
 )
 
@@ -265,9 +263,6 @@ def agents_sdk_user_agent_override():
         yield
 
 
-TEvent = TypeVar("TEvent")
-
-
 async def _close_stream(stream: AsyncIterator[Any]) -> None:
     # The responder contract also accepts custom iterators that have no aclose().
     close = getattr(stream, "aclose", None)
@@ -276,7 +271,7 @@ async def _close_stream(stream: AsyncIterator[Any]) -> None:
 
 
 @asynccontextmanager
-async def _closing_stream(
+async def _closing_stream[TEvent](
     stream: AsyncIterator[TEvent],
 ) -> AsyncIterator[AsyncIterator[TEvent]]:
     try:
@@ -322,10 +317,7 @@ class NonStreamingResult:
         self.json = result
 
 
-TContext = TypeVar("TContext", default=Any)
-
-
-class ChatKitServer(ABC, Generic[TContext]):
+class ChatKitServer[TContext = Any](ABC):
     def __init__(
         self,
         store: Store[TContext],
