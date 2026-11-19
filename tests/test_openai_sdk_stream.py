@@ -1,21 +1,39 @@
 import json
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, Mock
+from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 
 import httpx2
-from agents import Agent, ModelSettings, OpenAIResponsesModel, RunConfig, Runner
+from agents import (
+    Agent,
+    ModelSettings,
+    OpenAIChatCompletionsModel,
+    OpenAIResponsesModel,
+    RunConfig,
+    Runner,
+)
 from openai import AsyncOpenAI
 
-from chatkit.agents import AgentContext, stream_agent_response
-from chatkit.server import agents_sdk_user_agent_override
+from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
 from chatkit.types import (
     AssistantMessageContentPartAnnotationAdded,
-    Page,
+    AssistantMessageItem,
+    InferenceOptions,
+    ThreadAddUserMessageParams,
+    ThreadCreatedEvent,
+    ThreadCreateParams,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
     ThreadMetadata,
+    ThreadsAddUserMessageReq,
+    ThreadsCreateReq,
+    ThreadStreamEvent,
     URLSource,
+    UserMessageInput,
+    UserMessageItem,
+    UserMessageTextContent,
 )
+from tests._types import RequestContext
+from tests.test_chatkit_server import make_server
 
 
 def _responses_stream(turn: int) -> str:
@@ -72,13 +90,34 @@ def _responses_stream(turn: int) -> str:
     )
 
 
-async def test_openai_sdk_stream_decodes_citations_and_chains_completed_turns():
+def _mock_client(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+) -> AsyncOpenAI:
+    return AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+        max_retries=0,
+    )
+
+
+def _message_input(text: str) -> UserMessageInput:
+    return UserMessageInput(
+        content=[UserMessageTextContent(text=text)],
+        attachments=[],
+        inference_options=InferenceOptions(),
+    )
+
+
+async def test_responses_stream_preserves_headers_decodes_citations_and_chains_turns():
     previous_ids: list[str | None] = []
 
     def handle_request(request: httpx2.Request) -> httpx2.Response:
         assert request.method == "POST"
         assert request.url.path == "/v1/responses"
-        assert " ChatKit/Python " in request.headers["User-Agent"]
+        assert request.headers["User-Agent"].startswith("Agents/Python ")
+        assert "ChatKit/Python" not in request.headers["User-Agent"]
+        assert request.headers["X-Example-Route"] == "example"
         body = json.loads(request.content)
         assert body["stream"] is True
         assert body["store"] is True
@@ -89,36 +128,63 @@ async def test_openai_sdk_stream_decodes_citations_and_chains_completed_turns():
             text=_responses_stream(len(previous_ids)),
         )
 
-    thread = ThreadMetadata(id="example", created_at=datetime.now(UTC))
-    store = Mock()
-    store.load_thread_items = AsyncMock(return_value=Page())
-    config = RunConfig(tracing_disabled=True, model_settings=ModelSettings(store=True))
-    transport = httpx2.MockTransport(handle_request)
-
-    async with AsyncOpenAI(
-        api_key="test-key",
-        base_url="https://example.com/v1",
-        http_client=httpx2.AsyncClient(transport=transport),
-        max_retries=0,
-    ) as client:
+    async with _mock_client(handle_request) as client:
         agent = Agent(
-            name="Example agent", model=OpenAIResponsesModel("gpt-6-luna", client)
+            name="Example agent",
+            model=OpenAIResponsesModel("gpt-6-luna", client),
+            model_settings=ModelSettings(
+                store=True,
+                extra_headers={"X-Example-Route": "example"},
+            ),
         )
         response_id = None
-        for turn in (1, 2):
-            context = AgentContext(thread=thread, store=store, request_context=None)
-            with agents_sdk_user_agent_override():
-                result = Runner.run_streamed(
-                    agent,
-                    f"Example question {turn}",
-                    context=context,
-                    run_config=config,
-                    previous_response_id=response_id,
-                )
-                events = [
-                    event async for event in stream_agent_response(context, result)
-                ]
+        completed_ids: list[str | None] = []
 
+        async def respond(
+            thread: ThreadMetadata,
+            message: UserMessageItem | None,
+            request_context: RequestContext,
+        ) -> AsyncIterator[ThreadStreamEvent]:
+            nonlocal response_id
+            assert message is not None
+            context = AgentContext(
+                thread=thread, store=server.store, request_context=request_context
+            )
+            result = Runner.run_streamed(
+                agent,
+                await simple_to_agent_input(message),
+                context=context,
+                run_config=RunConfig(tracing_disabled=True),
+                previous_response_id=response_id,
+            )
+            async with aclosing(stream_agent_response(context, result)) as events:
+                async for event in events:
+                    yield event
+            response_id = result.last_response_id
+            completed_ids.append(response_id)
+
+        with make_server(respond) as server:
+            first_turn = await server.process_streaming(
+                ThreadsCreateReq(
+                    params=ThreadCreateParams(
+                        input=_message_input("Example question 1")
+                    )
+                )
+            )
+            thread_id = next(
+                event.thread.id
+                for event in first_turn
+                if isinstance(event, ThreadCreatedEvent)
+            )
+            second_turn = await server.process_streaming(
+                ThreadsAddUserMessageReq(
+                    params=ThreadAddUserMessageParams(
+                        thread_id=thread_id, input=_message_input("Example question 2")
+                    )
+                )
+            )
+
+        for turn, events in enumerate((first_turn, second_turn), start=1):
             annotations = [
                 event.update
                 for event in events
@@ -130,12 +196,88 @@ async def test_openai_sdk_stream_decodes_citations_and_chains_completed_turns():
             source = annotations[0].annotation.source
             assert isinstance(source, URLSource)
             assert source.url == "https://example.com/source"
-            assert any(
-                isinstance(event, ThreadItemDoneEvent)
-                and event.item.id == f"msg_{turn}"
+            assert [
+                (event.item.id, event.item.content[0].text)
                 for event in events
-            )
-            response_id = result.last_response_id
-            assert response_id == f"resp_{turn}"
+                if isinstance(event, ThreadItemDoneEvent)
+                and isinstance(event.item, AssistantMessageItem)
+            ] == [(f"msg_{turn}", "Example reply")]
 
     assert previous_ids == [None, "resp_1"]
+    assert completed_ids == ["resp_1", "resp_2"]
+
+
+async def test_chat_completions_stream_preserves_application_headers():
+    requested_paths: list[str] = []
+
+    def handle_request(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/chat/completions"
+        assert request.headers["User-Agent"] == "ExampleApp/1.0"
+        assert request.headers["X-Example-Route"] == "example"
+        assert json.loads(request.content)["stream"] is True
+        requested_paths.append(request.url.path)
+        reply = {
+            "id": "chatcmpl_example",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "gpt-6-luna",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "Example reply"},
+                    "finish_reason": "stop",
+                },
+            ],
+        }
+        return httpx2.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            text=f"data: {json.dumps(reply)}\n\ndata: [DONE]\n\n",
+        )
+
+    async with _mock_client(handle_request) as client:
+        agent = Agent(
+            name="Example agent",
+            model=OpenAIChatCompletionsModel("gpt-6-luna", client),
+            model_settings=ModelSettings(
+                extra_headers={
+                    "User-Agent": "ExampleApp/1.0",
+                    "X-Example-Route": "example",
+                }
+            ),
+        )
+
+        async def respond(
+            thread: ThreadMetadata,
+            message: UserMessageItem | None,
+            request_context: RequestContext,
+        ) -> AsyncIterator[ThreadStreamEvent]:
+            assert message is not None
+            context = AgentContext(
+                thread=thread, store=server.store, request_context=request_context
+            )
+            result = Runner.run_streamed(
+                agent,
+                await simple_to_agent_input(message),
+                context=context,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+            async with aclosing(stream_agent_response(context, result)) as events:
+                async for event in events:
+                    yield event
+
+        with make_server(respond) as server:
+            events = await server.process_streaming(
+                ThreadsCreateReq(
+                    params=ThreadCreateParams(input=_message_input("Example question"))
+                )
+            )
+
+    assert requested_paths == ["/v1/chat/completions"]
+    assert [
+        event.item.content[0].text
+        for event in events
+        if isinstance(event, ThreadItemDoneEvent)
+        and isinstance(event.item, AssistantMessageItem)
+    ] == ["Example reply"]

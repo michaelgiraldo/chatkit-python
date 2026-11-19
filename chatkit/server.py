@@ -2,7 +2,7 @@ import asyncio
 import base64
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import (
     Any,
@@ -12,13 +12,6 @@ from typing import (
     assert_never,
 )
 
-import agents
-from agents.models.chatcmpl_helpers import (
-    HEADERS_OVERRIDE as chat_completions_headers_override,
-)
-from agents.models.openai_responses import (
-    _HEADERS_OVERRIDE as responses_headers_override,
-)
 from pydantic import BaseModel, TypeAdapter
 
 from chatkit.errors import CustomStreamError, StreamError
@@ -90,7 +83,6 @@ from .types import (
     WorkflowTaskUpdated,
     is_streaming_req,
 )
-from .version import __version__
 from .widgets import WidgetComponent, WidgetComponentBase, WidgetRoot
 
 DEFAULT_PAGE_SIZE = 20
@@ -256,16 +248,6 @@ async def stream_widget(
     )
 
 
-@contextmanager
-def agents_sdk_user_agent_override():
-    ua = f"Agents/Python {agents.__version__} ChatKit/Python {__version__}"
-    with (
-        chat_completions_headers_override.set({"User-Agent": ua}),
-        responses_headers_override.set({"User-Agent": ua}),
-    ):
-        yield
-
-
 async def _close_stream(stream: AsyncIterator[Any]) -> None:
     # The responder contract also accepts custom iterators that have no aclose().
     close = getattr(stream, "aclose", None)
@@ -287,24 +269,6 @@ async def _closing_stream[TEvent](
         raise
     else:
         await _close_stream(stream)
-
-
-async def _stream_with_user_agent(
-    factory: Callable[[], AsyncIterator[ThreadStreamEvent]],
-) -> AsyncGenerator[ThreadStreamEvent, None]:
-    with agents_sdk_user_agent_override():
-        events = aiter(factory())
-    try:
-        while True:
-            with agents_sdk_user_agent_override():
-                event = await anext(events, None)
-            if event is None:
-                return
-            # The HTTP consumer sees its own headers between reads.
-            yield event
-    finally:
-        with agents_sdk_user_agent_override():
-            await _close_stream(events)
 
 
 class StreamingResult(AsyncIterable[bytes]):
@@ -896,8 +860,8 @@ class ChatKitServer[TContext = Any](ABC):
         pending_items: dict[str, ThreadItem] = {}
 
         try:
-            async with _closing_stream(_stream_with_user_agent(stream)) as events:
-                async for event in events:
+            async with _closing_stream(aiter(stream())) as events:
+                while (event := await anext(events, None)) is not None:
                     if isinstance(event, ThreadItemAddedEvent):
                         # Stash an isolated copy in case we need to persist unfinished items
                         # on cancellation; downstream handlers keep using the original event.item.
@@ -942,11 +906,11 @@ class ChatKitServer[TContext = Any](ABC):
                         yield ThreadUpdatedEvent(
                             thread=self._to_thread_response(thread)
                         )
-                # in case user updated the thread while streaming
-                if thread != last_thread:
-                    last_thread = thread.model_copy(deep=True)
-                    await self.store.save_thread(thread, context=context)
-                    yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
+            # Closing a responder can update the thread.
+            if thread != last_thread:
+                last_thread = thread.model_copy(deep=True)
+                await self.store.save_thread(thread, context=context)
+                yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
         except asyncio.CancelledError, GeneratorExit:
             await self.handle_stream_cancelled(
                 thread, list(pending_items.values()), context

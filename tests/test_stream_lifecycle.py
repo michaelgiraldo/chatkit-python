@@ -6,12 +6,7 @@ from datetime import datetime
 import pytest
 
 from chatkit.errors import ErrorCode
-from chatkit.server import (
-    ChatKitServer,
-    StreamingResult,
-    chat_completions_headers_override,
-    responses_headers_override,
-)
+from chatkit.server import ChatKitServer, StreamingResult
 from chatkit.types import (
     AssistantMessageContent,
     AssistantMessageContentPartTextDelta,
@@ -61,13 +56,6 @@ async def read_turn_prelude(stream: AsyncIterator[bytes]) -> ThreadCreatedEvent:
     return created
 
 
-def assert_agent_headers() -> None:
-    chat_headers = chat_completions_headers_override.get()
-    assert chat_headers is not None
-    assert " ChatKit/Python " in chat_headers["User-Agent"]
-    assert responses_headers_override.get() == chat_headers
-
-
 def partial_message(thread: ThreadMetadata) -> ThreadItemAddedEvent:
     return ThreadItemAddedEvent(
         item=AssistantMessageItem(
@@ -114,7 +102,6 @@ async def test_stream_close_finalizes_responder_and_persists_partial_message(
                 ),
             )
         finally:
-            assert_agent_headers()
             finalized.set()
 
     with make_server(responder) as server:
@@ -144,7 +131,6 @@ async def test_cancelling_stream_read_finalizes_responder_and_persists_partial_m
             waiting.set()
             await asyncio.Event().wait()
         finally:
-            assert_agent_headers()
             finalized.set()
 
     with make_server(responder) as server:
@@ -153,21 +139,8 @@ async def test_cancelling_stream_read_finalizes_responder_and_persists_partial_m
             created = await read_turn_prelude(stream)
             assert isinstance(decode_event(await anext(stream)), ThreadItemAddedEvent)
 
-            async def read_next() -> bytes:
-                chat_headers = {"X-Synthetic-Chat": "cancelled reader"}
-                responses_headers = {"X-Synthetic-Responses": "cancelled reader"}
-                with (
-                    chat_completions_headers_override.set(chat_headers),
-                    responses_headers_override.set(responses_headers),
-                ):
-                    try:
-                        return await anext(stream)
-                    finally:
-                        assert chat_completions_headers_override.get() is chat_headers
-                        assert responses_headers_override.get() is responses_headers
-
             async with asyncio.TaskGroup() as tasks:
-                pull = tasks.create_task(read_next())
+                pull = tasks.create_task(anext(stream))
                 await asyncio.wait_for(waiting.wait(), 5)
                 pull.cancel()
 
@@ -177,15 +150,11 @@ async def test_cancelling_stream_read_finalizes_responder_and_persists_partial_m
 
 
 @pytest.mark.parametrize("responder_fails", [False, True])
-async def test_agent_headers_are_scoped_to_each_stream_read_across_tasks(
-    responder_fails,
-):
+async def test_stream_can_be_read_across_tasks(responder_fails):
     async def responder(
         thread: ThreadMetadata, message: UserMessageItem | None, context: RequestContext
     ) -> AsyncIterator[ThreadStreamEvent]:
-        assert_agent_headers()
         yield ProgressUpdateEvent(text="First")
-        assert_agent_headers()
         if responder_fails:
             raise RuntimeError("Synthetic responder failure")
         yield ProgressUpdateEvent(text="Second")
@@ -195,22 +164,9 @@ async def test_agent_headers_are_scoped_to_each_stream_read_across_tasks(
         async with aclosing(result.__aiter__()) as stream:
             await read_turn_prelude(stream)
 
-            async def read_in_context(marker: str) -> ThreadStreamEvent:
-                chat_headers = {"X-Synthetic-Chat": marker}
-                responses_headers = {"X-Synthetic-Responses": marker}
-                with (
-                    chat_completions_headers_override.set(chat_headers),
-                    responses_headers_override.set(responses_headers),
-                ):
-                    try:
-                        return decode_event(await anext(stream))
-                    finally:
-                        assert chat_completions_headers_override.get() is chat_headers
-                        assert responses_headers_override.get() is responses_headers
-
-            first = await asyncio.create_task(read_in_context("first reader"))
+            first = decode_event(await asyncio.create_task(anext(stream)))
             assert first == ProgressUpdateEvent(text="First")
-            second = await asyncio.create_task(read_in_context("second reader"))
+            second = decode_event(await asyncio.create_task(anext(stream)))
             if responder_fails:
                 assert second == ErrorEvent(
                     code=ErrorCode.STREAM_ERROR, allow_retry=True
@@ -219,7 +175,7 @@ async def test_agent_headers_are_scoped_to_each_stream_read_across_tasks(
                 assert second == ProgressUpdateEvent(text="Second")
 
             with pytest.raises(StopAsyncIteration):
-                await asyncio.create_task(read_in_context("final reader"))
+                await asyncio.create_task(anext(stream))
 
 
 async def test_stream_accepts_responder_without_aclose():
@@ -227,7 +183,6 @@ async def test_stream_accepts_responder_without_aclose():
         sent = False
 
         async def __anext__(self) -> ThreadStreamEvent:
-            assert_agent_headers()
             if self.sent:
                 raise StopAsyncIteration
             self.sent = True

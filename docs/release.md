@@ -21,12 +21,19 @@ We will increment patch versions for non-breaking changes:
 
 ## Breaking change changelog
 
+### Unreleased
+
+- Requests made with the Agents SDK now use the SDK's default User-Agent or the
+  app's configured value. Turnspan no longer adds a `ChatKit/Python` suffix.
+  The dependency range remains at Agents SDK 0.25.x pending tests of the next
+  minor release.
+
 ### Turnspan 1 (`1.6.5+turnspan.1`)
 
 - The fork now requires Python 3.14 or newer. For Python 3.10 through 3.13, the upstream `v1.6.5` release remains available.
 - Installing the fork requires OpenAI Python 3.56.0 through 3.x, Agents SDK
   0.25.x, Pydantic 2.14.4 through 2.x, Uvicorn 0.54.0 through 0.x, and Jinja
-  3.1.6 through 3.x. ChatKit uses internal per-request header overrides from
+  3.1.6 through 3.x. Turnspan 1 uses internal per-request header overrides from
   Agents SDK 0.25.x. Update any older pins in your app before installing the fork.
   If your app passes a custom HTTP client to the OpenAI SDK, see the
   [HTTPX2 migration guide](https://github.com/openai/openai-python/blob/v3.56.0/httpx2.md).

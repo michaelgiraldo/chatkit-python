@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -16,14 +16,11 @@ from agents import (
     OutputGuardrailResult,
     OutputGuardrailTripwireTriggered,
     RawResponsesStreamEvent,
-    RunContextWrapper,
     RunItemStreamEvent,
-    Runner,
     RunResultStreaming,
     StreamEvent,
     ToolCallItem,
 )
-from agents.run_internal.run_steps import QueueCompleteSentinel
 from openai.types.responses import (
     EasyInputMessageParam,
     ResponseFileSearchToolCall,
@@ -121,62 +118,61 @@ mock_store.add_thread_item = AsyncMock()
 
 
 class RunResult(RunResultStreaming):
-    def add_event(self, event: StreamEvent):
-        self._event_queue.put_nowait(event)
+    """Provide the stream methods used by ChatKit with synthetic events."""
 
-    def done(self):
+    def __init__(self) -> None:
+        self.is_complete = False
+        self._test_events: asyncio.Queue[StreamEvent | Exception | None] = (
+            asyncio.Queue()
+        )
+
+    def add_event(self, event: StreamEvent) -> None:
+        self._test_events.put_nowait(event)
+
+    def done(self, error: Exception | None = None) -> None:
         self.is_complete = True
-        self._event_queue.put_nowait(QueueCompleteSentinel())
+        self._test_events.put_nowait(error)
 
-    def throw_input_guardrails(self):
-        self._stored_exception = InputGuardrailTripwireTriggered(
-            InputGuardrailResult(
-                guardrail=Mock(spec=InputGuardrail),
-                output=GuardrailFunctionOutput(
-                    output_info=None,
-                    tripwire_triggered=True,
-                ),
-            )
-        )
+    def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         self.done()
 
-    def throw_output_guardrails(self):
-        self._stored_exception = OutputGuardrailTripwireTriggered(
-            OutputGuardrailResult(
-                guardrail=Mock(spec=OutputGuardrail),
-                output=GuardrailFunctionOutput(
-                    output_info=None,
-                    tripwire_triggered=True,
-                ),
-                agent=Mock(spec=Agent),
-                agent_output=None,
+    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+        while (event := await self._test_events.get()) is not None:
+            if isinstance(event, Exception):
+                raise event
+            yield event
+
+    def throw_input_guardrails(self) -> None:
+        self.done(
+            InputGuardrailTripwireTriggered(
+                InputGuardrailResult(
+                    guardrail=Mock(spec=InputGuardrail),
+                    output=GuardrailFunctionOutput(
+                        output_info=None,
+                        tripwire_triggered=True,
+                    ),
+                )
             )
         )
-        self.done()
+
+    def throw_output_guardrails(self) -> None:
+        self.done(
+            OutputGuardrailTripwireTriggered(
+                OutputGuardrailResult(
+                    guardrail=Mock(spec=OutputGuardrail),
+                    output=GuardrailFunctionOutput(
+                        output_info=None,
+                        tripwire_triggered=True,
+                    ),
+                    agent=Mock(spec=Agent),
+                    agent_output=None,
+                )
+            )
+        )
 
 
 def make_result() -> RunResult:
-    return RunResult(
-        context_wrapper=Mock(spec=RunContextWrapper),
-        input=[],
-        tool_input_guardrail_results=[],
-        tool_output_guardrail_results=[],
-        new_items=[],
-        raw_responses=[],
-        final_output=None,
-        current_agent=Agent(name="test"),
-        current_turn=0,
-        max_turns=10,
-        _current_agent_output_schema=None,
-        trace=None,
-        is_complete=False,
-        _event_queue=asyncio.Queue(),
-        _input_guardrail_queue=asyncio.Queue(),
-        _output_guardrails_task=None,
-        _stored_exception=None,
-        output_guardrail_results=[],
-        input_guardrail_results=[],
-    )
+    return RunResult()
 
 
 async def all_events(
@@ -412,9 +408,6 @@ async def test_accumulate_text():
             ),
         )
 
-    result = Runner.run_streamed(
-        Agent("Assistant", instructions="You are a helpful assistant."), "Say hello!"
-    )
     result = make_result()
     result.add_event(delta("Hello, "))
     result.add_event(delta("world!"))

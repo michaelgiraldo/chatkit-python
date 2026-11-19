@@ -8,7 +8,7 @@ dependencies = [
   "pydantic>=2.14.4,<3",
   "uvicorn>=0.54.0,<1",
   "openai>=3.56.0,<4",
-  # ChatKit uses the SDK's internal per-request header overrides.
+  # Widen after verifying the next Agents SDK minor release.
   "openai-agents>=0.25.0,<0.26",
   "jinja2>=3.1.6,<4",
 ]
