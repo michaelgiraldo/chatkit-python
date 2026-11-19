@@ -957,6 +957,58 @@ async def test_stream_agent_response_maps_events():
     assert future.done() is True
 
 
+async def test_chat_completions_allocates_a_new_id_when_an_output_index_is_reused():
+    store = Mock(
+        generate_item_id=Mock(side_effect=["message_1", "message_2"]),
+        load_thread_items=AsyncMock(return_value=Page()),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    placeholder = ResponseOutputMessage(
+        id="__fake_id__",
+        content=[],
+        role="assistant",
+        status="in_progress",
+        type="message",
+    )
+    for sequence_number in (0, 2):
+        result.add_event(
+            RawResponsesStreamEvent(
+                type="raw_response_event",
+                data=ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    item=placeholder,
+                    output_index=0,
+                    sequence_number=sequence_number,
+                ),
+            )
+        )
+        result.add_event(
+            RawResponsesStreamEvent(
+                type="raw_response_event",
+                data=ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    item=placeholder.model_copy(update={"status": "completed"}),
+                    output_index=0,
+                    sequence_number=sequence_number + 1,
+                ),
+            )
+        )
+    result.done()
+
+    events = await all_events(stream_agent_response(context, result))
+    assert [
+        (event.type, event.item.id)
+        for event in events
+        if isinstance(event, (ThreadItemAddedEvent, ThreadItemDoneEvent))
+    ] == [
+        ("thread.item.added", "message_1"),
+        ("thread.item.done", "message_1"),
+        ("thread.item.added", "message_2"),
+        ("thread.item.done", "message_2"),
+    ]
+
+
 @pytest.mark.parametrize(
     "raw_event,expected_event",
     [

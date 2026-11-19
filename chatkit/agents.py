@@ -91,6 +91,8 @@ from .types import (
 )
 from .widgets import Markdown, Text, WidgetRoot
 
+_CHAT_COMPLETIONS_PLACEHOLDER_ID = "__fake_id__"
+
 
 class ClientToolCall(BaseModel):
     """
@@ -557,6 +559,7 @@ async def _stream_agent_response(
     ctx = context
     thread = context.thread
     produced_items = set()
+    synthetic_message_ids: dict[int, str] = {}
     streaming_thought: None | StreamingThoughtTracker = None
     # item_id -> content_index -> annotation count
     item_annotation_count: defaultdict[str, defaultdict[int, int]] = defaultdict(
@@ -581,6 +584,15 @@ async def _stream_agent_response(
         and second_last_item.type == "workflow"
     ):
         ctx.workflow_item = second_last_item
+
+    def message_id(item_id: str, output_index: int) -> str:
+        # Agents reuses this placeholder in its Responses-shaped Chat Completions
+        # events. Keep one store ID until the message at this index completes.
+        if item_id != _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+            return item_id
+        if output_index not in synthetic_message_ids:
+            synthetic_message_ids[output_index] = ctx.generate_id("message")
+        return synthetic_message_ids[output_index]
 
     def end_workflow(item: WorkflowItem):
         if item == ctx.workflow_item:
@@ -648,7 +660,7 @@ async def _stream_agent_response(
                     continue
                 content = await _convert_content(event.part, converter)
                 yield ThreadItemUpdatedEvent(
-                    item_id=event.item_id,
+                    item_id=message_id(event.item_id, event.output_index),
                     update=AssistantMessageContentPartAdded(
                         content_index=event.content_index,
                         content=content,
@@ -656,7 +668,7 @@ async def _stream_agent_response(
                 )
             elif event.type == "response.output_text.delta":
                 yield ThreadItemUpdatedEvent(
-                    item_id=event.item_id,
+                    item_id=message_id(event.item_id, event.output_index),
                     update=AssistantMessageContentPartTextDelta(
                         content_index=event.content_index,
                         delta=event.delta,
@@ -664,7 +676,7 @@ async def _stream_agent_response(
                 )
             elif event.type == "response.output_text.done":
                 yield ThreadItemUpdatedEvent(
-                    item_id=event.item_id,
+                    item_id=message_id(event.item_id, event.output_index),
                     update=AssistantMessageContentPartDone(
                         content_index=event.content_index,
                         content=AssistantMessageContent(
@@ -676,16 +688,14 @@ async def _stream_agent_response(
             elif event.type == "response.output_text.annotation.added":
                 annotation = await _convert_annotation(event.annotation, converter)
                 if annotation:
+                    item_id = message_id(event.item_id, event.output_index)
                     # Manually track annotation indices per content part in case we drop an annotation that
                     # we can't convert to our internal representation (e.g. missing filename).
-                    annotation_index = item_annotation_count[event.item_id][
-                        event.content_index
-                    ]
-                    item_annotation_count[event.item_id][event.content_index] = (
-                        annotation_index + 1
-                    )
+                    content_counts = item_annotation_count[item_id]
+                    annotation_index = content_counts[event.content_index]
+                    content_counts[event.content_index] += 1
                     yield ThreadItemUpdatedEvent(
-                        item_id=event.item_id,
+                        item_id=item_id,
                         update=AssistantMessageContentPartAnnotationAdded(
                             content_index=event.content_index,
                             annotation_index=annotation_index,
@@ -707,11 +717,11 @@ async def _stream_agent_response(
                 if item.type == "message":
                     if ctx.workflow_item:
                         yield end_workflow(ctx.workflow_item)
-                    produced_items.add(item.id)
+                    item_id = message_id(item.id, event.output_index)
+                    produced_items.add(item_id)
                     yield ThreadItemAddedEvent(
                         item=AssistantMessageItem(
-                            # Reusing the Responses message ID
-                            id=item.id,
+                            id=item_id,
                             thread_id=thread.id,
                             content=[
                                 await _convert_content(c, converter)
@@ -819,11 +829,13 @@ async def _stream_agent_response(
             elif event.type == "response.output_item.done":
                 item = event.item
                 if item.type == "message":
-                    produced_items.add(item.id)
+                    item_id = message_id(item.id, event.output_index)
+                    if item.id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+                        del synthetic_message_ids[event.output_index]
+                    produced_items.add(item_id)
                     yield ThreadItemDoneEvent(
                         item=AssistantMessageItem(
-                            # Reusing the Responses message ID
-                            id=item.id,
+                            id=item_id,
                             thread_id=thread.id,
                             content=[
                                 await _convert_content(c, converter)

@@ -16,16 +16,22 @@ from openai import AsyncOpenAI
 from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
 from chatkit.types import (
     AssistantMessageContentPartAnnotationAdded,
+    AssistantMessageContentPartTextDelta,
     AssistantMessageItem,
+    ErrorEvent,
     InferenceOptions,
+    Thread,
     ThreadAddUserMessageParams,
     ThreadCreatedEvent,
     ThreadCreateParams,
+    ThreadGetByIdParams,
+    ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
     ThreadMetadata,
     ThreadsAddUserMessageReq,
     ThreadsCreateReq,
+    ThreadsGetByIdReq,
     ThreadStreamEvent,
     URLSource,
     UserMessageInput,
@@ -70,6 +76,29 @@ def _responses_stream(turn: int) -> str:
             "output_index": 0,
             "item": {**item, "status": "in_progress", "content": []},
         },
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "item_id": item["id"],
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": item["id"],
+            "content_index": 0,
+            "delta": "Example reply",
+            "logprobs": [],
+        },
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "item_id": item["id"],
+            "content_index": 0,
+            "text": "Example reply",
+            "logprobs": [],
+        },
         *(
             {
                 "type": "response.output_text.annotation.added",
@@ -107,6 +136,28 @@ def _message_input(text: str) -> UserMessageInput:
         attachments=[],
         inference_options=InferenceOptions(),
     )
+
+
+def _completed_reply(events: list[ThreadStreamEvent]) -> AssistantMessageItem:
+    assert not [event for event in events if isinstance(event, ErrorEvent)]
+    added = [
+        event.item.id
+        for event in events
+        if isinstance(event, ThreadItemAddedEvent)
+        and isinstance(event.item, AssistantMessageItem)
+    ]
+    updates = [
+        event.item_id for event in events if isinstance(event, ThreadItemUpdatedEvent)
+    ]
+    (reply,) = [
+        event.item
+        for event in events
+        if isinstance(event, ThreadItemDoneEvent)
+        and isinstance(event.item, AssistantMessageItem)
+    ]
+    assert added == [reply.id]
+    assert updates and set(updates) == {reply.id}
+    return reply
 
 
 async def test_responses_stream_preserves_headers_decodes_citations_and_chains_turns():
@@ -183,6 +234,9 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
                     )
                 )
             )
+            loaded = await server.process_non_streaming(
+                ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
+            )
 
         for turn, events in enumerate((first_turn, second_turn), start=1):
             annotations = [
@@ -196,18 +250,19 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
             source = annotations[0].annotation.source
             assert isinstance(source, URLSource)
             assert source.url == "https://example.com/source"
-            assert [
-                (event.item.id, event.item.content[0].text)
-                for event in events
-                if isinstance(event, ThreadItemDoneEvent)
-                and isinstance(event.item, AssistantMessageItem)
-            ] == [(f"msg_{turn}", "Example reply")]
+            reply = _completed_reply(events)
+            assert (reply.id, reply.content[0].text) == (f"msg_{turn}", "Example reply")
 
     assert previous_ids == [None, "resp_1"]
     assert completed_ids == ["resp_1", "resp_2"]
+    assert [
+        (item.id, item.content[0].text)
+        for item in Thread.model_validate_json(loaded.json).items.data
+        if isinstance(item, AssistantMessageItem)
+    ] == [("msg_1", "Example reply"), ("msg_2", "Example reply")]
 
 
-async def test_chat_completions_stream_preserves_application_headers():
+async def test_chat_completions_stream_preserves_headers_and_persists_distinct_replies():
     requested_paths: list[str] = []
 
     def handle_request(request: httpx2.Request) -> httpx2.Response:
@@ -217,23 +272,30 @@ async def test_chat_completions_stream_preserves_application_headers():
         assert request.headers["X-Example-Route"] == "example"
         assert json.loads(request.content)["stream"] is True
         requested_paths.append(request.url.path)
-        reply = {
-            "id": "chatcmpl_example",
+        turn = len(requested_paths)
+        chunk = {
+            "id": f"chatcmpl_example_{turn}",
             "object": "chat.completion.chunk",
             "created": 1,
             "model": "gpt-6-luna",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": "Example reply"},
-                    "finish_reason": "stop",
-                },
-            ],
         }
+        choices = [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": "Example "},
+                "finish_reason": None,
+            },
+            {"index": 0, "delta": {"content": f"reply {turn}"}, "finish_reason": None},
+            {"index": 0, "delta": {}, "finish_reason": "stop"},
+        ]
         return httpx2.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
-            text=f"data: {json.dumps(reply)}\n\ndata: [DONE]\n\n",
+            text="".join(
+                f"data: {json.dumps(dict(chunk, choices=[choice]))}\n\n"
+                for choice in choices
+            )
+            + "data: [DONE]\n\n",
         )
 
     async with _mock_client(handle_request) as client:
@@ -268,16 +330,43 @@ async def test_chat_completions_stream_preserves_application_headers():
                     yield event
 
         with make_server(respond) as server:
-            events = await server.process_streaming(
+            first_turn = await server.process_streaming(
                 ThreadsCreateReq(
-                    params=ThreadCreateParams(input=_message_input("Example question"))
+                    params=ThreadCreateParams(
+                        input=_message_input("Example question 1")
+                    )
                 )
             )
+            thread_id = next(
+                event.thread.id
+                for event in first_turn
+                if isinstance(event, ThreadCreatedEvent)
+            )
+            second_turn = await server.process_streaming(
+                ThreadsAddUserMessageReq(
+                    params=ThreadAddUserMessageParams(
+                        thread_id=thread_id, input=_message_input("Example question 2")
+                    )
+                )
+            )
+            loaded = await server.process_non_streaming(
+                ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
+            )
 
-    assert requested_paths == ["/v1/chat/completions"]
+    assert requested_paths == ["/v1/chat/completions", "/v1/chat/completions"]
+    first_reply = _completed_reply(first_turn)
+    second_reply = _completed_reply(second_turn)
+    assert first_reply.id != second_reply.id
+    assert "__fake_id__" not in {first_reply.id, second_reply.id}
+    for turn, events in enumerate((first_turn, second_turn), start=1):
+        assert [
+            event.update.delta
+            for event in events
+            if isinstance(event, ThreadItemUpdatedEvent)
+            and isinstance(event.update, AssistantMessageContentPartTextDelta)
+        ] == ["Example ", f"reply {turn}"]
     assert [
-        event.item.content[0].text
-        for event in events
-        if isinstance(event, ThreadItemDoneEvent)
-        and isinstance(event.item, AssistantMessageItem)
-    ] == ["Example reply"]
+        (item.id, item.content[0].text)
+        for item in Thread.model_validate_json(loaded.json).items.data
+        if isinstance(item, AssistantMessageItem)
+    ] == [(first_reply.id, "Example reply 1"), (second_reply.id, "Example reply 2")]

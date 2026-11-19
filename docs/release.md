@@ -23,6 +23,9 @@ We will increment patch versions for non-breaking changes:
 
 ### Unreleased
 
+- Chat Completions replies now get distinct message IDs. Each ID follows its
+  reply from streaming through reload. Responses keeps the IDs supplied by
+  OpenAI. Thanks to Jacob Babula for the [upstream fix](https://github.com/openai/chatkit-python/pull/128).
 - Requests made with the Agents SDK now use the SDK's default User-Agent or the
   app's configured value. Turnspan no longer adds a `ChatKit/Python` suffix.
   The dependency range remains at Agents SDK 0.25.x pending tests of the next
