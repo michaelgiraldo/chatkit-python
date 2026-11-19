@@ -33,6 +33,7 @@ from openai.types.responses import (
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
+    ResponseOutputTextAnnotationAddedEvent,
     ResponseReasoningItem,
 )
 from openai.types.responses.response_content_part_added_event import (
@@ -1134,21 +1135,17 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
     result = make_result()
     item_id = "item_123"
 
-    def add_annotation_event(annotation, sequence_number):
-        result.add_event(
-            RawResponsesStreamEvent(
-                type="raw_response_event",
-                data=Mock(
-                    type="response.output_text.annotation.added",
-                    annotation=annotation,
-                    content_index=0,
-                    item_id=item_id,
-                    annotation_index=sequence_number,
-                    output_index=0,
-                    sequence_number=sequence_number,
-                ),
-            )
-        )
+    def add_annotation_event(annotation: dict[str, object], sequence_number: int):
+        event = ResponseOutputTextAnnotationAddedEvent.model_validate({
+            "type": "response.output_text.annotation.added",
+            "annotation": annotation,
+            "content_index": 0,
+            "item_id": item_id,
+            "annotation_index": sequence_number,
+            "output_index": 0,
+            "sequence_number": sequence_number,
+        })
+        result.add_event(RawResponsesStreamEvent(type="raw_response_event", data=event))
 
     # Invalid file citation is dropped (empty filename)
     add_annotation_event(
