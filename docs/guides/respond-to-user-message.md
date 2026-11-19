@@ -369,9 +369,7 @@ formatter = Agent[FeedbackContext](
 
 
 @function_tool(failure_error_function=None)
-async def collect_feedback(
-    ctx: RunContextWrapper[FeedbackContext], text: str
-) -> str:
+async def collect_feedback(ctx: RunContextWrapper[FeedbackContext], text: str) -> str:
     """Collect feedback the user shared in this turn."""
     formatted = await Runner.run(formatter, text, context=ctx.context)
     ctx.context.feedback = formatted.final_output_as(
