@@ -1197,7 +1197,9 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
     result = make_result()
     item_id = "item_123"
 
-    def add_annotation_event(annotation: dict[str, object], sequence_number: int):
+    def add_annotation_event(
+        annotation: dict[str, object] | None, sequence_number: int
+    ):
         event = ResponseOutputTextAnnotationAddedEvent.model_validate({
             "type": "response.output_text.annotation.added",
             "annotation": annotation,
@@ -1220,7 +1222,9 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
         sequence_number=0,
     )
 
-    # Container + URL citations are converted; indices are compacted (0, 1) despite the dropped first event.
+    add_annotation_event(None, sequence_number=1)
+
+    # The next citations still use indices 0 and 1 after the dropped events.
     add_annotation_event(
         {
             "type": "container_file_citation",
@@ -1230,7 +1234,7 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
             "start_index": 0,
             "end_index": 3,
         },
-        sequence_number=1,
+        sequence_number=2,
     )
     add_annotation_event(
         {
@@ -1240,7 +1244,7 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
             "start_index": 1,
             "end_index": 5,
         },
-        sequence_number=2,
+        sequence_number=3,
     )
 
     result.done()

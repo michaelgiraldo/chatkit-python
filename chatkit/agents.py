@@ -448,6 +448,9 @@ async def _convert_content(
 async def _convert_annotation(
     raw_annotation: object, converter: ResponseStreamConverter
 ) -> Annotation | None:
+    if raw_annotation is None:
+        return None
+
     # Stream events can use different model classes than completed response content.
     if isinstance(raw_annotation, BaseModel):
         raw_annotation = raw_annotation.model_dump()
