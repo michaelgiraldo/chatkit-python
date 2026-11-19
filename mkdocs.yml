@@ -46,6 +46,7 @@ nav:
       - Actions: concepts/actions.md
       - Entities: concepts/entities.md
   - Guides:
+      - Pin an app to the fork: guides/pin-the-fork.md
       - Respond to a user message: guides/respond-to-user-message.md
       - Let users browse past threads: guides/browse-past-threads.md
       - Accept rich user input: guides/accept-rich-user-input.md
