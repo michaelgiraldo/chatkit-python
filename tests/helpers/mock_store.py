@@ -13,9 +13,7 @@ from chatkit.types import (
 )
 from tests._types import RequestContext
 
-from .mock_widget import SampleWidget
-
-SCHEMA_VERSION = 5  # Bump every time the schema changes
+SCHEMA_VERSION = 6  # Bump every time the schema changes
 
 
 class ThreadData(BaseModel):
@@ -28,10 +26,6 @@ class ItemData(BaseModel):
 
 class AttachmentData(BaseModel):
     attachment: Attachment
-
-
-class SampleWidgetData(BaseModel):
-    widget: SampleWidget
 
 
 class SQLiteStore(Store[RequestContext]):
@@ -67,14 +61,6 @@ class SQLiteStore(Store[RequestContext]):
 
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS files (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                data TEXT NOT NULL
-                )"""
-            )
-
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS sample_widgets (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 data TEXT NOT NULL
@@ -303,32 +289,3 @@ class SQLiteStore(Store[RequestContext]):
                 (item_id, thread_id, context.user_id),
             )
             conn.commit()
-
-    async def save_sample_widget(
-        self,
-        widget: SampleWidget,
-        context: RequestContext,
-    ) -> None:
-        with self._create_connection() as conn:
-            data = SampleWidgetData(widget=widget).model_dump_json()
-            conn.execute(
-                "INSERT OR REPLACE INTO sample_widgets (id, user_id, data) VALUES (?, ?, ?)",
-                (
-                    widget.id,
-                    context.user_id,
-                    data,
-                ),
-            )
-            conn.commit()
-
-    async def load_sample_widget(
-        self, widget_id: str, context: RequestContext
-    ) -> SampleWidget:
-        with self._create_connection() as conn:
-            cursor = conn.execute(
-                "SELECT data FROM sample_widgets WHERE id = ? AND user_id = ?",
-                (widget_id, context.user_id),
-            ).fetchone()
-            if cursor is None:
-                raise NotFoundError(f"SampleWidget {widget_id} not found.")
-            return SampleWidgetData.model_validate_json(cursor[0]).widget
