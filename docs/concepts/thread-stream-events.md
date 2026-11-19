@@ -43,10 +43,15 @@ See [Trigger client-side effects without blocking](../guides/update-client-durin
 
 ## Closing a stream
 
-When the HTTP transport stops sending a response early, have it cancel the task
-reading the stream or close the iterator it owns. `aiter(result)` and
-`result.json_events` expose the same iterator on a `StreamingResult`. Closing an
-active stream releases the responder and runs the server's cancellation hook.
+Close the ChatKit iterator when the HTTP response exits. A client can disconnect
+while the transport is sending an event, between reads from the ChatKit stream.
+`aiter(result)` and `result.json_events` expose the same iterator on a
+`StreamingResult`. Closing an active stream releases the responder and runs the
+server's cancellation hook, which saves partial assistant replies by default.
+
+For FastAPI or Starlette, use [the quickstart response helper](../examples/chatkit_response.py).
+It keeps the iterator open for the lifetime of the HTTP response and closes it
+when the framework reports a disconnect.
 
 When your own `respond` or `action` generator forwards another async generator,
 wrap the inner generator in `contextlib.aclosing`. This carries early closure

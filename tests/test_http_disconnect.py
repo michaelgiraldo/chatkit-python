@@ -1,11 +1,11 @@
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import aclosing
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Literal
 
 import pytest
-from starlette.responses import StreamingResponse
+from starlette.requests import ClientDisconnect
 from starlette.types import Message, Scope
 
 from chatkit.server import NonStreamingResult, StreamingResult
@@ -19,6 +19,7 @@ from chatkit.types import (
     ThreadCreatedEvent,
     ThreadCreateParams,
     ThreadGetByIdParams,
+    ThreadItem,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
@@ -31,13 +32,19 @@ from chatkit.types import (
     UserMessageItem,
     UserMessageTextContent,
 )
+from docs.examples.chatkit_response import ChatKitStreamingResponse
 from tests._types import RequestContext
 from tests.test_chatkit_server import DEFAULT_CONTEXT, decode_event, make_server
 
 
-@pytest.mark.parametrize("disconnect_at", ["read", "send"])
+@pytest.mark.parametrize(
+    ("asgi_version", "disconnect_at"),
+    [("2.3", "read"), ("2.3", "send"), ("2.4", "send")],
+)
 async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
+    asgi_version: str,
     disconnect_at: Literal["read", "send"],
+    monkeypatch: pytest.MonkeyPatch,
 ):
     disconnect = asyncio.Event()
     stalled = asyncio.Event()
@@ -78,6 +85,7 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
                 disconnect.set()
             await stalled.wait()
         finally:
+            await asyncio.sleep(0)
             finalized.set()
 
     async def receive() -> Message:
@@ -91,6 +99,8 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
             event = decode_event(message["body"])
             streamed.append(event)
             if disconnect_at == "send" and isinstance(event, ThreadItemUpdatedEvent):
+                if asgi_version == "2.4":
+                    raise BrokenPipeError("Synthetic client disconnect")
                 disconnect.set()
                 await stalled.wait()
 
@@ -102,20 +112,33 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
         )
 
     with make_server(respond) as server:
+        add_thread_item = server.store.add_thread_item
+
+        async def add_thread_item_with_io(
+            thread_id: str, item: ThreadItem, context: RequestContext
+        ) -> None:
+            # The in-memory SQLite fixture does not suspend during a write.
+            await asyncio.sleep(0)
+            await add_thread_item(thread_id, item, context)
+
+        monkeypatch.setattr(server.store, "add_thread_item", add_thread_item_with_io)
         request = ThreadsCreateReq(
             params=ThreadCreateParams(input=message_input("Start"))
         )
         result = await server.process(request.model_dump_json(), DEFAULT_CONTEXT)
         assert isinstance(result, StreamingResult)
 
-        # In ASGI 2.3, the HTTP server reports a disconnected client via receive().
         scope: Scope = {
             "type": "http",
-            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "asgi": {"version": "3.0", "spec_version": asgi_version},
         }
-        async with asyncio.timeout(5), aclosing(result.__aiter__()) as body:
-            response = StreamingResponse(body, media_type="text/event-stream")
-            await response(scope, receive, send)
+        response = ChatKitStreamingResponse(result)
+        expected_exit = (
+            pytest.raises(ClientDisconnect) if asgi_version == "2.4" else nullcontext()
+        )
+        async with asyncio.timeout(5):
+            with expected_exit:
+                await response(scope, receive, send)
 
         finalized_at_disconnect = finalized.is_set()
         assert any(isinstance(event, ThreadItemUpdatedEvent) for event in streamed)

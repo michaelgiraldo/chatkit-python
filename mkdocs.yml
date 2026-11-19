@@ -15,6 +15,9 @@ theme:
 repo_name: chatkit-python
 repo_url: https://github.com/openai/chatkit-python
 
+exclude_docs: |
+  **/__pycache__/
+
 plugins:
   - search
   - mkdocstrings:

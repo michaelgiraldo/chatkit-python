@@ -68,14 +68,19 @@ install the package and FastAPI for the example server. Then expose a single
 python -m pip install . fastapi
 ```
 
-Create `main.py` with a minimal server that is hard-coded to always reply “Hello, world!”—you'll replace this with an actual call to a model in [Respond to a user message](guides/respond-to-user-message.md).
+Save [chatkit_response.py](examples/chatkit_response.py) next to `main.py`. The
+helper closes the ChatKit stream when the HTTP response ends, so ChatKit can
+save a partial reply if the client disconnects.
+
+Create `main.py` with a minimal server that replies “Hello, world!” You can
+add a model call in [Respond to a user message](guides/respond-to-user-message.md).
 
 ```python
 from collections.abc import AsyncIterator
 from datetime import datetime
 
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 
 from chatkit.server import ChatKitServer, StreamingResult
 from chatkit.types import (
@@ -86,6 +91,7 @@ from chatkit.types import (
     ThreadStreamEvent,
     UserMessageItem,
 )
+from chatkit_response import ChatKitStreamingResponse
 
 app = FastAPI()
 
@@ -116,7 +122,7 @@ server = MyChatKitServer(store=MyChatKitStore())
 async def chatkit(request: Request):
     result = await server.process(await request.body(), context={})
     if isinstance(result, StreamingResult):
-        return StreamingResponse(result, media_type="text/event-stream")
+        return ChatKitStreamingResponse(result)
     return Response(content=result.json, media_type="application/json")
 ```
 

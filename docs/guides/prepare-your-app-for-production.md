@@ -186,13 +186,14 @@ The Python SDK expects your own app to handle authentication; `ChatKitServer` wo
 2. Build a `RequestContext` that includes the authenticated user id, org/tenant, and any roles or scopes.
 3. Pass that context into `server.process`.
 
-For example:
+This FastAPI example uses [chatkit_response.py](../examples/chatkit_response.py)
+from the quickstart. Save it alongside your endpoint module.
 
 ```python
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
 
-from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.server import StreamingResult
+from chatkit_response import ChatKitStreamingResponse
 
 
 def get_current_user(request: Request) -> str:
@@ -216,7 +217,7 @@ async def chatkit_endpoint(
     context = RequestContext(user_id=user_id, locale="en")
     result = await server.process(await request.body(), context)
     if isinstance(result, StreamingResult):
-        return StreamingResponse(result, media_type="text/event-stream")
+        return ChatKitStreamingResponse(result)
     return Response(content=result.json, media_type="application/json")
 ```
 

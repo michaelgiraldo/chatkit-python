@@ -4,11 +4,8 @@ This guide covers how to implement and run a ChatKit server that responds to use
 
 ## Install ChatKit
 
-Install the SDK from PyPI:
-
-```bash
-pip install openai-chatkit
-```
+Follow the [quickstart installation instructions](../quickstart.md#run-your-chatkit-server)
+to install the fork and FastAPI for this example.
 
 ## Build and run your ChatKit server
 
@@ -70,13 +67,15 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
 
 ### Wire ChatKit to your web framework
 
-Expose a single `/chatkit` endpoint that forwards requests to your `MyChatKitServer` instance. For example, with FastAPI:
+Expose a single `/chatkit` endpoint that forwards requests to your
+`MyChatKitServer` instance. For this FastAPI example, save
+[chatkit_response.py](../examples/chatkit_response.py) alongside your endpoint module.
 
 ```python
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
 
-from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.server import StreamingResult
+from chatkit_response import ChatKitStreamingResponse
 
 app = FastAPI()
 store = MyPostgresStore(conn_info)
@@ -91,7 +90,7 @@ async def chatkit_endpoint(request: Request):
     # Let ChatKit handle the request and return either a streaming or JSON result.
     result = await server.process(await request.body(), context)
     if isinstance(result, StreamingResult):
-        return StreamingResponse(result, media_type="text/event-stream")
+        return ChatKitStreamingResponse(result)
     return Response(content=result.json, media_type="application/json")
 ```
 
