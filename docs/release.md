@@ -23,6 +23,8 @@ We will increment patch versions for non-breaking changes:
 
 ### Unreleased
 
+- Lists inside cards now parse as typed `ListView` widgets, including their rows
+  and click actions. Thanks to Saloni Garg for the [upstream fix](https://github.com/openai/chatkit-python/pull/137).
 - Chat Completions replies now get distinct message IDs. Each ID follows its
   reply from streaming through reload. Responses keeps the IDs supplied by
   OpenAI. Thanks to Jacob Babula for the [upstream fix](https://github.com/openai/chatkit-python/pull/128).

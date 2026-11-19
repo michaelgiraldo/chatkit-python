@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 import pytest
+from pydantic import TypeAdapter
 
 from chatkit.server import diff_widget
 from chatkit.types import WidgetItem, WidgetRootUpdated
@@ -11,11 +12,47 @@ from chatkit.widgets import (
     Card,
     DynamicWidgetComponent,
     DynamicWidgetRoot,
+    ListView,
+    ListViewItem,
     Markdown,
+    StrictWidgetComponent,
     Text,
     WidgetRoot,
     WidgetTemplate,
 )
+
+
+def test_nested_list_view_preserves_typed_rows_and_click_actions():
+    nested_list = {
+        "type": "ListView",
+        "id": "nested_list",
+        "children": [
+            {
+                "type": "ListViewItem",
+                "id": "blue_row",
+                "onClickAction": {
+                    "type": "line.select",
+                    "payload": {"value": "blue"},
+                },
+                "children": [{"type": "Text", "value": "Blue line"}],
+            },
+        ],
+    }
+    adapter = TypeAdapter(WidgetRoot)
+    card = adapter.validate_python({"type": "Card", "children": [nested_list]})
+    assert isinstance(card, Card)
+    (child,) = card.children
+    assert isinstance(child, ListView)
+    assert child.id == "nested_list"
+    (row,) = child.children
+    assert isinstance(row, ListViewItem)
+    assert row.id == "blue_row"
+    assert row.onClickAction is not None
+    assert row.onClickAction.type == "line.select"
+    assert row.onClickAction.payload == {"value": "blue"}
+    assert row.onClickAction.handler == "server"
+    assert TypeAdapter(StrictWidgetComponent).validate_python(nested_list) == child
+    assert adapter.validate_json(adapter.dump_json(card, exclude_none=True)) == card
 
 
 @pytest.mark.parametrize("component", [Text, Markdown])
