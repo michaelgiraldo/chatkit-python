@@ -105,6 +105,12 @@ from .turns import (
 DEFAULT_PAGE_SIZE = 20
 
 
+def _stream_error_event(error: CustomStreamError | StreamError) -> ErrorEvent:
+    if isinstance(error, CustomStreamError):
+        return ErrorEvent(message=error.message, allow_retry=error.allow_retry)
+    return ErrorEvent(code=error.code, allow_retry=error.allow_retry)
+
+
 class StreamingResult(AsyncIterator[ThreadStreamEvent]):
     """A single-owner event stream. Close it when consumption ends early."""
 
@@ -167,6 +173,22 @@ class ChatKitServer[TContext = Any](ABC):
     def respond(self, turn: Turn[TContext]) -> AsyncIterator[ThreadStreamEvent]:
         """Stream events for a new message, a resumed turn, or a retry."""
         pass
+
+    async def prepare_user_message(
+        self, thread: ThreadMetadata, item: UserMessageItem, context: TContext
+    ) -> UserMessageItem:
+        """Validate or enrich a new user message before the server saves it.
+
+        The thread snapshot and resolved attachments are available. For a new
+        thread, the snapshot has an ID and has yet to be saved. Return the item
+        with its original ID, thread ID, and creation time.
+
+        Raise `InvalidOperationError` for a request error (HTTP 422 with the
+        FastAPI adapter), or `CustomStreamError` for a user-facing error event.
+        A rejected message produces no thread, attachment, or message writes.
+        Retries and continuations use their stored inputs.
+        """
+        return item
 
     async def on_turn_finished(  # noqa: B027
         self, turn: Turn[TContext], outcome: TurnOutcome
@@ -296,9 +318,18 @@ class ChatKitServer[TContext = Any](ABC):
     ) -> StreamingResult | ImmediateResult:
         """Process a validated request. Resolve streaming inputs before returning."""
         logger.info("Received request op: %s", request.type)
-        if is_streaming_req(request):
-            return StreamingResult(await self._prepare_streaming(request, context))
-        return await self._process_non_streaming(request, context)
+        if not is_streaming_req(request):
+            return await self._process_non_streaming(request, context)
+        try:
+            events = await self._prepare_streaming(request, context)
+        except (CustomStreamError, StreamError) as error:
+            event = _stream_error_event(error)
+
+            async def rejection() -> AsyncIterator[ThreadStreamEvent]:
+                yield event
+
+            events = rejection()
+        return StreamingResult(events)
 
     async def _process_non_streaming(
         self, request: NonStreamingReq, context: TContext
@@ -480,7 +511,7 @@ class ChatKitServer[TContext = Any](ABC):
                     request.params.thread_id, context=context
                 )
 
-                user_message_item, _ = await self.store.truncate_after(
+                user_message_item = await self.store.truncate_after(
                     thread_metadata.id, request.params.item_id, context
                 )
                 return self._process_turn(
@@ -760,17 +791,8 @@ class ChatKitServer[TContext = Any](ABC):
                 thread, list(pending_items.values()), context
             )
             raise
-        except CustomStreamError as e:
-            yield ErrorEvent(
-                code="custom",
-                message=e.message,
-                allow_retry=e.allow_retry,
-            )
-        except StreamError as e:
-            yield ErrorEvent(
-                code=e.code,
-                allow_retry=e.allow_retry,
-            )
+        except (CustomStreamError, StreamError) as error:
+            yield _stream_error_event(error)
         except Exception as e:
             yield ErrorEvent(
                 code=ErrorCode.STREAM_ERROR,
@@ -842,7 +864,7 @@ class ChatKitServer[TContext = Any](ABC):
     async def _build_user_message_item(
         self, input: UserMessageInput, thread: ThreadMetadata, context: TContext
     ) -> UserMessageItem:
-        return UserMessageItem(
+        item = UserMessageItem(
             id=self.store.generate_item_id("message", thread, context),
             content=input.content,
             thread_id=thread.id,
@@ -858,6 +880,11 @@ class ChatKitServer[TContext = Any](ABC):
             inference_options=input.inference_options,
             created_at=datetime.now(UTC),
         )
+        identity = (item.id, item.thread_id, item.created_at)
+        prepared = await self.prepare_user_message(thread, item, context)
+        if (prepared.id, prepared.thread_id, prepared.created_at) != identity:
+            raise ValueError("prepare_user_message must preserve message identity")
+        return prepared
 
     async def _load_full_thread(self, thread_id: str, context: TContext) -> Thread:
         thread_meta = await self.store.load_thread(thread_id, context=context)

@@ -234,12 +234,16 @@ class ThreadStore[TContext = Any](ABC):
     @abstractmethod
     async def truncate_after(
         self, thread_id: str, item_id: str, context: TContext
-    ) -> tuple[UserMessageItem, list[str]]:
-        """Atomically delete the history after a stored user message.
+    ) -> UserMessageItem:
+        """Atomically truncate the active history after a stored user message.
 
-        Use the same stable order as `load_thread_items`. Return the target and
-        the IDs actually removed, newest first. Raise `NotFoundError` for an
-        unavailable target and `ConflictError` when the target is not a user message.
+        Use the stable order of `load_thread_items` and return the retained
+        user message. Later items must disappear from pagination and direct
+        reads before returning. A store can commit a visibility boundary and
+        reclaim the inactive records separately.
+
+        Raise `NotFoundError` for an unavailable target and `ConflictError`
+        when the target is not a user message.
         """
         pass
 

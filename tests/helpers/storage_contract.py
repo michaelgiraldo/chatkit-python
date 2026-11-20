@@ -275,11 +275,9 @@ class ThreadStoreContract(ABC):
             await self.store.truncate_after(thread.id, "a", DEFAULT_CONTEXT)
         with pytest.raises(NotFoundError):
             await self.store.truncate_after(thread.id, target.id, ALTERNATIVE_CONTEXT)
-        assert await self.store.truncate_after(
-            thread.id, target.id, DEFAULT_CONTEXT
-        ) == (
-            target,
-            ["d", "c"],
+        assert (
+            await self.store.truncate_after(thread.id, target.id, DEFAULT_CONTEXT)
+            == target
         )
         surviving_items = await self.store.load_thread_items(
             thread.id,

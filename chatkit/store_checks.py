@@ -159,16 +159,24 @@ async def check_thread_store[TContext](
             saved = await peer.load_item(thread.id, pending.id, context)
             _require(saved == winner, f"The winning {pending.type} claim must be saved")
 
-        target, removed = await store.truncate_after(
-            thread.id, ascending_ids[0], context
-        )
+        target = await store.truncate_after(thread.id, ascending_ids[0], context)
         remaining = await load_page(None, 10, "asc")
         _require(
             target.id == ascending_ids[0]
-            and removed == [tool.id, form.id, *ascending_ids[:0:-1]]
-            and [item.id for item in remaining.data] == [target.id],
-            "Retry must remove every item after the target in newest-first order",
+            and [item.id for item in remaining.data] == [target.id]
+            and not remaining.has_more
+            and remaining.after is None,
+            "Retry must remove every later item from paginated history",
         )
+        for later_id in [*ascending_ids[1:], form.id, tool.id]:
+            try:
+                await peer.load_item(thread.id, later_id, context)
+            except NotFoundError:
+                continue
+            raise AssertionError(
+                "Retry must hide each truncated item from direct reads"
+            )
+
         hidden = SDKHiddenContextItem(
             id=store.generate_item_id("sdk_hidden_context", thread, context),
             thread_id=thread.id,

@@ -36,8 +36,7 @@ your build so it installs the reviewed dependency graph.
 ## Verify the installed build
 
 Replace `COMMIT_SHA` with the same SHA and run this from the app directory with
-the interpreter that runs the app. If checking a container image, run the
-Python snippet with the app's interpreter inside that image.
+the interpreter that runs the app.
 
 ```sh
 uv run --locked --no-sync python - <<'PY'
@@ -59,8 +58,24 @@ print(f"openai-chatkit {package.version} installed from {installed}")
 PY
 ```
 
-To roll back, restore the previous app manifest and lockfile, then rebuild
-using that lockfile.
+## Verify what serves live traffic
+
+1. Follow the live route or alias to each serving revision. Record the
+   resolved artifact, such as the image digest.
+2. Run the verification snippet with the app's Python interpreter inside
+   that exact artifact. You can inspect a matching container image offline
+   without starting the service. Compare the installed version and recorded
+   source URL with the release you intended to deploy. If the package was
+   installed from a wheel or an index, look for the source commit in the
+   build provenance tied to the resolved artifact.
+3. Record the revision, artifact digest, package version, and source commit
+   together. A lockfile records the intended build input. An image tag can
+   move. The resolved artifact and its installed metadata establish what is
+   serving traffic.
+
+To roll back, switch traffic to the previous verified artifact if your
+platform supports it. For a rebuild, restore the previous manifest and
+lockfile. Verify the serving revision again after switching traffic.
 
 [uv URL dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/#url) ·
 [Python direct URL metadata](https://packaging.python.org/en/latest/specifications/direct-url-data-structure/)

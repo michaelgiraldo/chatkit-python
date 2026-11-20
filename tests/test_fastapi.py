@@ -6,10 +6,10 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from chatkit.events import ProgressUpdateEvent, ThreadCreatedEvent
-from chatkit.fastapi import process_request
+from chatkit.fastapi import ChatKitStreamingResponse, process_request
 from chatkit.models import ThreadMetadata
 from chatkit.protocol import encode_sse
-from chatkit.server import ChatKitServer
+from chatkit.server import ChatKitServer, StreamingResult
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
@@ -70,6 +70,57 @@ def test_process_request_rejects_malformed_json(client: TestClient):
     assert response.status_code == 400
     assert response.json()["detail"]
     assert "example-private-input" not in response.text
+
+
+def test_process_request_uses_app_response_for_streaming_only():
+    app = FastAPI()
+
+    def streaming_response(result: StreamingResult) -> Response:
+        response = ChatKitStreamingResponse(result)
+        response.headers["cache-control"] = "no-store"
+        return response
+
+    with make_server() as server:
+
+        @app.post("/chatkit")
+        async def chatkit(request: Request) -> Response:
+            return await process_request(
+                server, request, DEFAULT_CONTEXT, streaming_response=streaming_response
+            )
+
+        with TestClient(app) as client:
+            streamed = client.post(
+                "/chatkit",
+                json={
+                    "type": "threads.create",
+                    "params": {
+                        "input": {
+                            "content": [{"type": "input_text", "text": "Hello"}],
+                            "attachments": [],
+                            "inference_options": {},
+                        }
+                    },
+                },
+            )
+            assert streamed.status_code == 200
+            assert streamed.headers["cache-control"] == "no-store"
+            event = decode_event(streamed.content.splitlines()[0])
+            assert isinstance(event, ThreadCreatedEvent)
+
+            loaded = client.post(
+                "/chatkit",
+                json={
+                    "type": "threads.get_by_id",
+                    "params": {"thread_id": event.thread.id},
+                },
+            )
+            assert loaded.status_code == 200
+            assert "cache-control" not in loaded.headers
+            assert loaded.json()["id"] == event.thread.id
+
+            invalid = client.post("/chatkit", content="{")
+            assert invalid.status_code == 400
+            assert "cache-control" not in invalid.headers
 
 
 def test_sse_frame_decoder_keeps_data_prefix_inside_event_text():

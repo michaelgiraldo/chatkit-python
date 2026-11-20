@@ -37,15 +37,29 @@ Yield the events that make up the response.
 
 ```python
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 
+from chatkit.errors import InvalidOperationError
+from chatkit.events import ThreadItemDoneEvent, ThreadStreamEvent
+from chatkit.models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    ThreadMetadata,
+    UserMessageItem,
+)
 from chatkit.server import ChatKitServer
 from chatkit.turns import Turn
-from chatkit.events import ThreadItemDoneEvent, ThreadStreamEvent
-from chatkit.models import AssistantMessageContent, AssistantMessageItem
 
 
 class MyChatKitServer(ChatKitServer[MyRequestContext]):
+    async def prepare_user_message(
+        self, thread: ThreadMetadata, item: UserMessageItem, context: MyRequestContext
+    ) -> UserMessageItem:
+        attachment_ids = {attachment.id for attachment in item.attachments}
+        if len(attachment_ids) != len(item.attachments):
+            raise InvalidOperationError("Attach each file only once.")
+        return item
+
     async def respond(
         self, turn: Turn[MyRequestContext]
     ) -> AsyncIterator[ThreadStreamEvent]:
@@ -54,7 +68,7 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
             item=AssistantMessageItem(
                 thread_id=turn.thread.id,
                 id=self.store.generate_item_id("message", turn.thread, turn.context),
-                created_at=datetime.now(),
+                created_at=datetime.now(UTC),
                 content=[AssistantMessageContent(text="Hi there!")],
             )
         )
@@ -69,9 +83,26 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
 | `StructuredInputTurn` | The answered or skipped structured input `.item`. |
 | `RetryTurn` | The existing user `.message` that starts the retry. |
 
+### Prepare new messages before saving them
+
+Override `prepare_user_message` to check or enrich new user messages. ChatKit
+calls it for thread creation and message append after resolving attachments,
+before saving the thread, attachment metadata, or message. The thread
+snapshot already has an ID, including for a new thread. Return a
+`UserMessageItem` with the original ID, thread ID, and creation time. Retries
+and continuations use their stored inputs.
+
+Raise `InvalidOperationError` with a client-safe message to return HTTP 422
+from the FastAPI adapter before opening an event stream. Raise
+`CustomStreamError` with a user-facing message to send an SSE error event.
+In either case, ChatKit performs no writes for the rejected message and
+reports no turn outcome.
+
+### Observe the turn outcome
+
 Use `on_turn_finished(turn, outcome)` for app work that depends on the
-result. ChatKit calls it when the responder finishes, fails, or is
-cancelled. The outcome reports one of four states.
+result. Once a turn starts, ChatKit calls the hook after server persistence
+or cancellation cleanup. The outcome reports one of four states.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -84,6 +115,13 @@ Stage app data in the request context and commit it on the outcome your app
 expects. See the examples for [response IDs](#using-previous_response_id-openai-responses-api-only)
 and [structured results](#save-structured-tool-results-after-a-turn).
 [Turn types](../api/chatkit/turns.md)
+
+An HTTP request can end before the turn starts. Attach request-scoped
+resources, such as a lease, to the response lifetime and release them when
+the response closes. Track delivery to the browser separately from turn
+completion. ChatKit logs exceptions from `on_turn_finished`. If a write
+failure needs to reach the browser, make that write in `respond` before
+completing the turn.
 
 ### Wire ChatKit to your web framework
 
@@ -114,6 +152,19 @@ JSON, HTTP 422 for an invalid or unsupported operation, HTTP 404 for a
 missing resource, and HTTP 409 for a conflict with the current thread state.
 Once streaming starts, ChatKit sends error events in the SSE response.
 [FastAPI adapter reference](../api/chatkit/fastapi.md)
+
+For custom buffering or send deadlines, pass
+`streaming_response=your_response_factory`. ChatKit validates and prepares
+the typed request before calling the factory with a `StreamingResult`,
+including committing any pending-item claim or retry truncation.
+Immediate results and HTTP errors use the adapter's regular responses.
+
+Use `ChatKitStreamingResponse(result)` for the SDK's framing and disconnect
+handling. If you supply your own streaming response, it owns the result.
+Use `encode_sse` for each event and await `result.aclose()` when the response
+ends, fails, or disconnects. Stop and await any active reader before closing
+the result. Protect cleanup from cancellation so pending store writes can
+finish.
 
 ### How request context flows into ChatKit
 
@@ -146,6 +197,14 @@ thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `ChatKitServer.update_thread` when a connected client should see an edit.
 For `load_thread_items(..., include_hidden=False)`, filter the model-only items
 before computing the page and its cursor.
+
+For a retry, `truncate_after` returns the retained `UserMessageItem`. Before
+returning, atomically make later items disappear from pagination and direct
+`load_item` reads using the same stable order as `load_thread_items`. For
+stores with a bounded transaction size, commit the visibility change in one
+operation and reclaim inactive records separately under your retention
+policy. Test retrying a history larger than a single write batch.
+
 To support uploads, supply an
 `AttachmentMetadataStore` for records and an `AttachmentStore` for file
 operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-strategy)

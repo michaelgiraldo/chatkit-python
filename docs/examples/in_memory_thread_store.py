@@ -109,7 +109,7 @@ class InMemoryThreadStore(ThreadStore[Context]):
 
     async def truncate_after(
         self, thread_id: str, item_id: str, context: Context
-    ) -> tuple[UserMessageItem, list[str]]:
+    ) -> UserMessageItem:
         if thread_id not in self.threads:
             raise NotFoundError(f"Thread {thread_id} not found")
         items = self.items.get(thread_id, {})
@@ -119,14 +119,10 @@ class InMemoryThreadStore(ThreadStore[Context]):
         if not isinstance(item, UserMessageItem):
             raise ConflictError("A retry must start from a user message")
         target = self._sort_key(item)
-        later = sorted(
-            (row for row in items.values() if self._sort_key(row) > target),
-            key=self._sort_key,
-            reverse=True,
-        )
-        for row in later:
-            del items[row.id]
-        return item.model_copy(deep=True), [row.id for row in later]
+        later = [row.id for row in items.values() if self._sort_key(row) > target]
+        for later_id in later:
+            del items[later_id]
+        return item.model_copy(deep=True)
 
     async def load_item(
         self, thread_id: str, item_id: str, context: Context

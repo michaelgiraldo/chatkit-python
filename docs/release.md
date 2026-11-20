@@ -25,6 +25,9 @@ The `openai-chatkit` package on PyPI tracks the
 - The [FastAPI adapter](quickstart.md) returns clear HTTP errors for invalid
   requests and closes event producers when the client disconnects. The
   browser demo runs locally with `make demo`.
+- Use `prepare_user_message` to validate or enrich new messages before ChatKit
+  writes them. FastAPI integrations can supply a `streaming_response` factory
+  for custom streaming and cleanup. [Server lifecycle](guides/respond-to-user-message.md)
 - Streamed and reloaded widgets share a lossless representation. Card borders
   survive reload, empty widget streams complete cleanly, and a disconnect
   closes the widget producer.
@@ -40,6 +43,8 @@ The `openai-chatkit` package on PyPI tracks the
   [reporting the import problem](https://github.com/openai/chatkit-python/pull/122).
 - The docs now build with Zensical and publish to
   [GitHub Pages](https://michaelgiraldo.github.io/chatkit-python/).
+- The [pinning guide](guides/pin-the-fork.md#verify-what-serves-live-traffic)
+  shows how to verify the installed package in the artifact serving traffic.
 
 ### Upgrade from Turnspan 2
 
@@ -75,9 +80,11 @@ The `openai-chatkit` package on PyPI tracks the
   pass the typed request to `ChatKitServer.process`, and serialize the typed
   response or closeable event stream with the protocol helpers.
 - Thread stores implement atomic `claim_pending_item`, `patch_thread`, and
-  `truncate_after` operations. Inside a responder, yield the event from
-  `ChatKitServer.update_thread` to persist a display change and show it to
-  the client. Use `ThreadStore.patch_thread` for metadata-only writes.
+  `truncate_after` operations. Return the retained user message from
+  `truncate_after` after later items disappear from pagination and direct
+  reads. The store checks cover both read paths. In a responder, yield the
+  event from `ChatKitServer.update_thread` to persist a display change and
+  show it to the client. Use `ThreadStore.patch_thread` for metadata-only writes.
 - Typed widget builders use `.build()` to produce a canonical widget tree
   for direct item or update construction. Use `WidgetTemplate.build()` for
   every template root, including entity previews.

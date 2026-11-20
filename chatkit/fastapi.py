@@ -1,7 +1,7 @@
 """HTTP responses for FastAPI apps using ChatKit."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 
 from anyio import CancelScope
@@ -50,12 +50,22 @@ class ChatKitStreamingResponse(StreamingResponse):
 
 
 async def process_request[TContext](
-    server: ChatKitServer[TContext], request: Request, context: TContext
+    server: ChatKitServer[TContext],
+    request: Request,
+    context: TContext,
+    *,
+    streaming_response: Callable[
+        [StreamingResult], Response
+    ] = ChatKitStreamingResponse,
 ) -> Response:
     """Process a ChatKit endpoint request with context supplied by the app.
 
-    Return 400 for malformed JSON, 422 for an invalid or unsupported request,
-    and 404 for a missing resource. Close the event stream on disconnect.
+    Return 400 for malformed JSON, 404 for a missing resource, 409 for a
+    thread-state conflict, and 422 for an invalid or unsupported request.
+    Close the event stream on disconnect.
+
+    An app-supplied streaming response takes ownership of its result. It must
+    await `result.aclose()` when the response ends or the client disconnects.
     """
     try:
         operation = parse_request(await request.body())
@@ -109,5 +119,9 @@ async def process_request[TContext](
         return JSONResponse({"detail": str(error)}, status_code=422)
 
     if isinstance(result, StreamingResult):
-        return ChatKitStreamingResponse(result)
+        try:
+            return streaming_response(result)
+        except BaseException:
+            await result.aclose()
+            raise
     return Response(content=encode_message(result), media_type="application/json")

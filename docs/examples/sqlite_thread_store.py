@@ -329,7 +329,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
 
     async def truncate_after(
         self, thread_id: str, item_id: str, context: TContext
-    ) -> tuple[UserMessageItem, list[str]]:
+    ) -> UserMessageItem:
         with closing(self._create_connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             scope = (thread_id, context.user_id)
@@ -344,19 +344,12 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             item = ItemData.model_validate_json(row[0]).item
             if not isinstance(item, UserMessageItem):
                 raise ConflictError("A retry must start from a user message")
-            params = (*scope, row[1], item_id)
-            later_items = (
-                "WHERE thread_id = ? AND user_id = ? AND (created_at, id) > (?, ?)"
+            conn.execute(
+                """DELETE FROM items
+                WHERE thread_id = ? AND user_id = ? AND (created_at, id) > (?, ?)""",
+                (*scope, row[1], item_id),
             )
-            removed = [
-                later[0]
-                for later in conn.execute(
-                    f"SELECT id FROM items {later_items} ORDER BY created_at DESC, id DESC",
-                    params,
-                )
-            ]
-            conn.execute(f"DELETE FROM items {later_items}", params)
-        return item, removed
+        return item
 
     @staticmethod
     def _require_thread(conn: sqlite3.Connection, thread_id: str, user_id: str) -> None:
