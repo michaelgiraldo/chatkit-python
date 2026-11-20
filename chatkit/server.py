@@ -17,11 +17,13 @@ from pydantic import BaseModel
 
 from chatkit.errors import (
     CustomStreamError,
+    ErrorCode,
     InvalidOperationError,
     StreamError,
     UnsupportedOperationError,
 )
 
+from .actions import Action
 from .logger import logger
 from .store import (
     AttachmentMetadataStore,
@@ -41,7 +43,6 @@ from .turns import (
     UserMessageTurn,
 )
 from .types import (
-    Action,
     AssistantMessageContent,
     AssistantMessageContentPartAdded,
     AssistantMessageContentPartAnnotationAdded,
@@ -54,7 +55,6 @@ from .types import (
     AudioInput,
     ChatKitReq,
     ClientToolCallItem,
-    ErrorCode,
     ErrorEvent,
     FeedbackKind,
     HiddenContextItem,

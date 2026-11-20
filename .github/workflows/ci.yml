@@ -56,6 +56,9 @@ jobs:
               assert find_spec(dependency) is None, dependency
           PY
           uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "$wheel" \
+            python -I tests/check_wheel_types.py .venv/bin/pyright
+          uv --no-config run --no-project --isolated --python "$python_version" \
             --default-index https://pypi.org/simple --with "${wheel}[fastapi]" \
             python -I - <<'PY'
           from importlib.util import find_spec

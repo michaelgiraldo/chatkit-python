@@ -324,8 +324,9 @@ On the server, read the form values from the action payload. Any action originat
 from collections.abc import AsyncIterator
 from typing import Any
 
+from chatkit.actions import Action
 from chatkit.server import ChatKitServer
-from chatkit.types import Action, ThreadMetadata, ThreadStreamEvent, WidgetItem
+from chatkit.types import ThreadMetadata, ThreadStreamEvent, WidgetItem
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):

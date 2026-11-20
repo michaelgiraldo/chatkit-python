@@ -66,6 +66,7 @@ nav:
   - API Reference:
       - Overview: api/chatkit/index.md
       - Modules:
+          - actions: api/chatkit/actions.md
           - agents: api/chatkit/agents.md
           - errors: api/chatkit/errors.md
           - fastapi: api/chatkit/fastapi.md

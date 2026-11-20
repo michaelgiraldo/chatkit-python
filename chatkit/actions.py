@@ -10,6 +10,8 @@ DEFAULT_LOADING_BEHAVIOR: LoadingBehavior = "auto"
 
 
 class ActionConfig(BaseModel):
+    """Configure a widget action and how the browser dispatches it."""
+
     type: str
     payload: Any = None
     handler: Handler = DEFAULT_HANDLER
@@ -18,6 +20,8 @@ class ActionConfig(BaseModel):
 
 
 class Action[TType: str, TPayload](BaseModel):
+    """Describe an action received from the client, with an optional typed payload."""
+
     type: TType = Field(default=TType, frozen=True)  # pyright: ignore
     payload: TPayload = None  # pyright: ignore - default to None to allow no-payload actions
 

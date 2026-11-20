@@ -9,11 +9,7 @@ from pydantic import (
     model_serializer,
 )
 
-from chatkit.errors import ErrorCode
-
-from .actions import Action
-from .icons import IconName
-from .widgets import WidgetComponent, WidgetRoot
+from . import actions, errors, icons, widgets
 
 
 class Page[T](BaseModel):
@@ -155,7 +151,7 @@ class ThreadCustomActionParams(BaseModel):
 
     thread_id: str
     item_id: str | None = None
-    action: Action[str, Any]
+    action: actions.Action[str, Any]
 
 
 class ThreadsRetryAfterItemReq(BaseReq):
@@ -418,7 +414,7 @@ class ProgressUpdateEvent(BaseModel):
     """Event providing incremental progress from the assistant."""
 
     type: Literal["progress_update"] = "progress_update"
-    icon: IconName | None = None
+    icon: icons.IconName | None = None
     text: str
 
 
@@ -434,7 +430,7 @@ class ErrorEvent(BaseModel):
     """Event indicating an error occurred while processing a thread."""
 
     type: Literal["error"] = "error"
-    code: ErrorCode | Literal["custom"] = Field(default="custom")
+    code: errors.ErrorCode | Literal["custom"] = Field(default="custom")
     message: str | None = None
     allow_retry: bool = Field(default=False)
 
@@ -527,7 +523,7 @@ class WidgetRootUpdated(BaseModel):
     """Event published when the widget root changes."""
 
     type: Literal["widget.root.updated"] = "widget.root.updated"
-    widget: WidgetRoot
+    widget: widgets.WidgetRoot
 
 
 class WidgetComponentUpdated(BaseModel):
@@ -535,7 +531,7 @@ class WidgetComponentUpdated(BaseModel):
 
     type: Literal["widget.component.updated"] = "widget.component.updated"
     component_id: str
-    component: WidgetComponent
+    component: widgets.WidgetComponent
 
 
 class WorkflowTaskAdded(BaseModel):
@@ -673,7 +669,7 @@ class WidgetItem(ThreadItemBase):
     """Thread item containing widget content."""
 
     type: Literal["widget"] = "widget"
-    widget: WidgetRoot
+    widget: widgets.WidgetRoot
     copy_text: str | None = None
 
 
@@ -954,7 +950,7 @@ class CustomSummary(BaseModel):
     """Custom summary for a workflow."""
 
     title: str
-    icon: IconName | None = None
+    icon: icons.IconName | None = None
 
 
 class DurationSummary(BaseModel):
@@ -982,7 +978,7 @@ class CustomTask(BaseTask):
 
     type: Literal["custom"] = "custom"
     title: str | None = None
-    icon: IconName | None = None
+    icon: icons.IconName | None = None
     content: str | None = None
 
 
@@ -1058,7 +1054,7 @@ class EntitySource(SourceBase):
 
     type: Literal["entity"] = "entity"
     id: str
-    icon: IconName | None = None
+    icon: icons.IconName | None = None
     label: str | None = None
     """Optional label shown with the icon in the default entity hover header
     when no preview callback is provided.

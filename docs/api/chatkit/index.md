@@ -3,6 +3,7 @@
 What you'll find here:
 
 - **Core server API**: [`chatkit.server`](server.md) – `ChatKitServer` and related helpers for receiving messages, streaming responses, and wiring up tools and widgets.
+- **Actions**: [`chatkit.actions`](actions.md) – `Action` and `ActionConfig` for widget callbacks.
 - **FastAPI adapter**: [`chatkit.fastapi`](fastapi.md) – HTTP request handling and disconnect cleanup for the optional `fastapi` extra.
 - **Protocol**: [`chatkit.protocol`](protocol.md) – JSON request parsing and encoding for transport adapters.
 - **Turns**: [`chatkit.turns`](turns.md) – typed triggers, request context, and response outcomes.
