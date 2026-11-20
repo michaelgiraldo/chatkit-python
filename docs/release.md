@@ -2,8 +2,8 @@
 
 The project follows a slightly modified version of [semantic versioning](https://semver.org/spec/v2.0.0.html). The SDK is still evolving and certain backwards-incompatible changes may be released as minor versions.
 
-See OpenAI's [ChatKit release notes](https://github.com/openai/chatkit-python/releases)
-for the original releases.
+See [Turnspan's GitHub releases](https://github.com/michaelgiraldo/chatkit-python/releases)
+and the original [OpenAI ChatKit releases](https://github.com/openai/chatkit-python/releases).
 
 ## Minor versions
 
@@ -21,7 +21,7 @@ We will increment patch versions for non-breaking changes:
 
 ## Breaking change changelog
 
-### Unreleased
+### Turnspan 2 (`1.6.5+turnspan.2`)
 
 - Lists inside cards now parse as typed `ListView` widgets, including their rows
   and click actions. Thanks to Saloni Garg for the [upstream fix](https://github.com/openai/chatkit-python/pull/137).
@@ -32,6 +32,13 @@ We will increment patch versions for non-breaking changes:
   app's configured value. Turnspan no longer adds a `ChatKit/Python` suffix.
   The dependency range remains at Agents SDK 0.25.x pending tests of the next
   minor release.
+- Plain `pytest` works in a clean checkout with `PYTHONPATH` unset, using the
+  same configuration as `make test`. Thanks to Mark Zhang for
+  [reporting the test import problem](https://github.com/openai/chatkit-python/pull/122).
+- The [structured feedback example](guides/respond-to-user-message.md#save-structured-tool-results-after-a-turn)
+  shows how tools can access the thread ID and how the app can save feedback
+  after a successful stream. Thanks to Jao Garcia for the
+  [persistence question](https://github.com/openai/chatkit-python/issues/120).
 
 ### Turnspan 1 (`1.6.5+turnspan.1`)
 

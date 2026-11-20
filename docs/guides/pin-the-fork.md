@@ -2,12 +2,12 @@
 
 Pin a full GitHub commit SHA to install the same tested ChatKit code whenever
 you build your app. The installed package's source URL identifies the commit,
-and Turnspan 1 reports the version `1.6.5+turnspan.1`.
+and Turnspan 2 reports the version `1.6.5+turnspan.2`.
 
 ## Lock the fork as an app dependency
 
 From your app's repository, keep `openai-chatkit` in the `dependencies` list in
-`pyproject.toml`. For Turnspan 1, use `openai-chatkit==1.6.5+turnspan.1`. Add
+`pyproject.toml`. For Turnspan 2, use `openai-chatkit==1.6.5+turnspan.2`. Add
 this entry to the app's uv sources, replacing `COMMIT_SHA` with the full SHA
 for the release or commit you tested.
 
