@@ -89,10 +89,11 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 
 from agents import Agent, Runner
-from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import AgentContext, stream_agent_response
 from chatkit.server import ChatKitServer
 from chatkit.turns import Turn
-from chatkit.types import ThreadStreamEvent
+from chatkit.events import ThreadStreamEvent
 
 assistant = Agent(
     name="assistant",

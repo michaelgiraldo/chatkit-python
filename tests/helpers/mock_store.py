@@ -3,8 +3,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from chatkit.models import Attachment
 from chatkit.store import AttachmentMetadataStore, NotFoundError
-from chatkit.types import Attachment
 from docs.examples.sqlite_thread_store import SQLiteThreadStore
 from tests._types import RequestContext
 

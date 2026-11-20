@@ -19,7 +19,7 @@ Inside a tool, use `AgentContext.stream` to enqueue progress events. They are de
 ```python
 from agents import RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
-from chatkit.types import ProgressUpdateEvent
+from chatkit.events import ProgressUpdateEvent
 
 
 @function_tool()
@@ -47,7 +47,7 @@ Custom pipelines can yield `ProgressUpdateEvent` directly from `respond` or
 from collections.abc import AsyncIterator
 
 from chatkit.turns import Turn
-from chatkit.types import ProgressUpdateEvent, ThreadStreamEvent
+from chatkit.events import ProgressUpdateEvent, ThreadStreamEvent
 
 
 async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
@@ -75,7 +75,7 @@ Yield client effects directly from the `respond` or `action` method:
 from collections.abc import AsyncIterator
 
 from chatkit.turns import Turn
-from chatkit.types import ClientEffectEvent, ThreadStreamEvent
+from chatkit.events import ClientEffectEvent, ThreadStreamEvent
 
 
 async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
@@ -90,7 +90,7 @@ Or from tools, through `AgentContext`:
 ```python
 from agents import RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
-from chatkit.types import ClientEffectEvent
+from chatkit.events import ClientEffectEvent
 
 
 @function_tool()

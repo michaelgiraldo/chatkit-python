@@ -5,20 +5,18 @@ from typing import Any, AsyncIterator, Callable
 from pydantic import TypeAdapter
 
 from chatkit.actions import Action
-from chatkit.server import ChatKitServer, StreamingResult
-from chatkit.store import AttachmentStore
-from chatkit.turns import Turn
-from chatkit.types import (
+from chatkit.events import SyncCustomActionResponse, ThreadStreamEvent
+from chatkit.models import (
     AudioInput,
     FeedbackKind,
-    NonStreamingReq,
-    StreamingReq,
-    SyncCustomActionResponse,
     ThreadMetadata,
-    ThreadStreamEvent,
     TranscriptionResult,
     WidgetItem,
 )
+from chatkit.requests import NonStreamingReq, StreamingReq
+from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.store import AttachmentStore
+from chatkit.turns import Turn
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
 
@@ -29,7 +27,7 @@ DEFAULT_CONTEXT = RequestContext(user_id="test_user")
 
 
 def decode_event(event: bytes) -> ThreadStreamEvent:
-    return TypeAdapter(ThreadStreamEvent).validate_json(event.split(b"data: ")[1])
+    return TypeAdapter(ThreadStreamEvent).validate_json(event.split(b"data: ", 1)[1])
 
 
 @contextmanager

@@ -1,15 +1,10 @@
 import asyncio
 import base64
-import binascii
-import json
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from datetime import datetime
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from typing import (
     Any,
-    AsyncGenerator,
-    Callable,
     assert_never,
 )
 
@@ -23,64 +18,60 @@ from chatkit.errors import (
     UnsupportedOperationError,
 )
 
+from ._stream import _close_stream, _closing_stream
 from .actions import Action
-from .logger import logger
-from .store import (
-    AttachmentMetadataStore,
-    AttachmentStore,
-    ConflictError,
-    StoreItemType,
-    ThreadPatch,
-    ThreadStore,
-    default_generate_id,
-)
-from .turns import (
-    ClientToolTurn,
-    RetryTurn,
-    StructuredInputTurn,
-    Turn,
-    TurnOutcome,
-    UserMessageTurn,
-)
-from .types import (
-    AssistantMessageContent,
+from .events import (
     AssistantMessageContentPartAdded,
     AssistantMessageContentPartAnnotationAdded,
     AssistantMessageContentPartDone,
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
-    Attachment,
-    AttachmentsCreateReq,
-    AttachmentsDeleteReq,
-    AudioInput,
-    ChatKitReq,
-    ClientToolCallItem,
     ErrorEvent,
-    FeedbackKind,
-    HiddenContextItem,
-    InputTranscribeReq,
-    ItemsFeedbackReq,
-    ItemsListReq,
-    NonStreamingReq,
-    Page,
-    SDKHiddenContextItem,
-    StreamingReq,
     StreamOptions,
     StreamOptionsEvent,
-    StructuredInputAnswer,
-    StructuredInputItem,
-    StructuredInputMultipleChoice,
-    StructuredInputSubmission,
     SyncCustomActionResponse,
-    Thread,
     ThreadCreatedEvent,
-    ThreadItem,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemRemovedEvent,
     ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
+    ThreadStreamEvent,
+    ThreadUpdatedEvent,
+    WorkflowTaskAdded,
+    WorkflowTaskUpdated,
+)
+from .logger import logger
+from .models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    Attachment,
+    AudioInput,
+    ClientToolCallItem,
+    FeedbackKind,
+    Page,
+    SDKHiddenContextItem,
+    StructuredInputAnswer,
+    StructuredInputItem,
+    StructuredInputMultipleChoice,
+    Thread,
+    ThreadItem,
     ThreadMetadata,
+    TranscriptionResult,
+    UserMessageInput,
+    UserMessageItem,
+    WidgetItem,
+    WorkflowItem,
+)
+from .requests import (
+    AttachmentsCreateReq,
+    AttachmentsDeleteReq,
+    ChatKitReq,
+    InputTranscribeReq,
+    ItemsFeedbackReq,
+    ItemsListReq,
+    NonStreamingReq,
+    StreamingReq,
+    StructuredInputSubmission,
     ThreadsAddClientToolOutputReq,
     ThreadsAddStructuredInputReq,
     ThreadsAddUserMessageReq,
@@ -91,163 +82,27 @@ from .types import (
     ThreadsListReq,
     ThreadsRetryAfterItemReq,
     ThreadsSyncCustomActionReq,
-    ThreadStreamEvent,
     ThreadsUpdateReq,
-    ThreadUpdatedEvent,
-    TranscriptionResult,
-    UserMessageInput,
-    UserMessageItem,
-    WidgetItem,
-    WidgetRootUpdated,
-    WidgetStreamingTextValueDelta,
-    WorkflowItem,
-    WorkflowTaskAdded,
-    WorkflowTaskUpdated,
     is_streaming_req,
 )
-from .widgets import WidgetRoot, WidgetRootInput
+from .store import (
+    HIDDEN_ITEM_TYPES,
+    AttachmentMetadataStore,
+    AttachmentStore,
+    ConflictError,
+    ThreadPatch,
+    ThreadStore,
+)
+from .turns import (
+    ClientToolTurn,
+    RetryTurn,
+    StructuredInputTurn,
+    Turn,
+    TurnOutcome,
+    UserMessageTurn,
+)
 
 DEFAULT_PAGE_SIZE = 20
-DEFAULT_ERROR_MESSAGE = "An error occurred when generating a response."
-_HIDDEN_ITEMS = (HiddenContextItem, SDKHiddenContextItem)
-
-
-def _widget_state(widget: WidgetRootInput) -> WidgetRoot:
-    return widget if isinstance(widget, WidgetRoot) else widget.build()
-
-
-def diff_widget(
-    before: WidgetRootInput, after: WidgetRootInput
-) -> list[WidgetStreamingTextValueDelta | WidgetRootUpdated]:
-    """Emit unambiguous text appends, or replace the widget for other changes."""
-    before_payload = _widget_state(before).model_dump(mode="json")
-    after_widget = _widget_state(after)
-    after_payload = after_widget.model_dump(mode="json")
-
-    def index_components(root: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-        by_id: dict[str, list[dict[str, Any]]] = {}
-
-        def visit(node: dict[str, Any]) -> None:
-            if component_id := node.get("id"):
-                by_id.setdefault(component_id, []).append(node)
-            children = node.get("children")
-            if isinstance(children, dict):
-                visit(children)
-            elif isinstance(children, list):
-                for child in children:
-                    visit(child)
-
-        visit(root)
-        return by_id
-
-    before_index = index_components(before_payload)
-    deltas: list[WidgetStreamingTextValueDelta | WidgetRootUpdated] = []
-    for component_id, new_nodes in index_components(after_payload).items():
-        old_nodes = before_index.get(component_id, [])
-        if len(old_nodes) != 1 or len(new_nodes) != 1:
-            continue
-        old_node, new_node = old_nodes[0], new_nodes[0]
-        old_value, new_value = old_node.get("value"), new_node.get("value")
-        if (
-            old_node["type"] in {"Text", "Markdown"}
-            and old_node["type"] == new_node["type"]
-            and isinstance(old_value, str)
-            and isinstance(new_value, str)
-            and new_value != old_value
-            and new_value.startswith(old_value)
-        ):
-            old_node["value"] = new_value
-            deltas.append(
-                WidgetStreamingTextValueDelta(
-                    component_id=component_id,
-                    delta=new_value[len(old_value) :],
-                    done=not new_node.get("streaming", False),
-                )
-            )
-
-    # Once appends are applied, compare the remaining JSON, including extensions
-    # and explicit nulls. JSON equality distinguishes boolean and numeric props.
-    if json.dumps(before_payload, sort_keys=True) != json.dumps(
-        after_payload, sort_keys=True
-    ):
-        return [WidgetRootUpdated(widget=after_widget)]
-    return deltas
-
-
-async def stream_widget(
-    thread: ThreadMetadata,
-    widget: WidgetRootInput | AsyncGenerator[WidgetRootInput, None],
-    copy_text: str | None = None,
-    generate_id: Callable[[StoreItemType], str] = default_generate_id,
-) -> AsyncGenerator[ThreadStreamEvent, None]:
-    """Stream a widget root or successive root states.
-
-    An empty producer emits no events. Closing the returned stream also closes
-    its producer.
-    """
-
-    if not isinstance(widget, AsyncGenerator):
-        yield ThreadItemDoneEvent(
-            item=WidgetItem(
-                id=generate_id("message"),
-                thread_id=thread.id,
-                created_at=datetime.now(),
-                widget=_widget_state(widget),
-                copy_text=copy_text,
-            ),
-        )
-        return
-
-    async with _closing_stream(widget) as states:
-        try:
-            last_state = _widget_state(await anext(states)).model_copy(deep=True)
-        except StopAsyncIteration:
-            return
-
-        item = WidgetItem(
-            id=generate_id("message"),
-            created_at=datetime.now(),
-            widget=last_state,
-            copy_text=copy_text,
-            thread_id=thread.id,
-        )
-        yield ThreadItemAddedEvent(item=item)
-
-        async for state in states:
-            new_state = _widget_state(state).model_copy(deep=True)
-            for update in diff_widget(last_state, new_state):
-                yield ThreadItemUpdatedEvent(
-                    item_id=item.id,
-                    update=update,
-                )
-            last_state = new_state
-
-    yield ThreadItemDoneEvent(
-        item=item.model_copy(update={"widget": last_state}),
-    )
-
-
-async def _close_stream(stream: AsyncIterator[Any]) -> None:
-    # The responder contract also accepts custom iterators that have no aclose().
-    close = getattr(stream, "aclose", None)
-    if close is not None:
-        await close()
-
-
-@asynccontextmanager
-async def _closing_stream[TEvent](
-    stream: AsyncIterator[TEvent],
-) -> AsyncIterator[AsyncIterator[TEvent]]:
-    try:
-        yield stream
-    except BaseException:
-        try:
-            await _close_stream(stream)
-        except Exception:
-            logger.exception("Error while closing interrupted stream")
-        raise
-    else:
-        await _close_stream(stream)
 
 
 class StreamingResult(AsyncIterator[ThreadStreamEvent]):
@@ -429,7 +284,7 @@ class ChatKitServer[TContext = Any](ABC):
             thread.id,
             SDKHiddenContextItem(
                 thread_id=thread.id,
-                created_at=datetime.now(),
+                created_at=datetime.now(UTC),
                 id=self.store.generate_item_id("sdk_hidden_context", thread, context),
                 content="The user cancelled the stream. Stop responding to the prior request.",
             ),
@@ -500,7 +355,7 @@ class ChatKitServer[TContext = Any](ABC):
                     audio_bytes = base64.b64decode(
                         request.params.audio_base64, validate=True
                     )
-                except (binascii.Error, ValueError) as error:
+                except ValueError as error:
                     raise InvalidOperationError(
                         "Audio must be Base64 encoded."
                     ) from error
@@ -510,18 +365,14 @@ class ChatKitServer[TContext = Any](ABC):
                 )
             case ItemsListReq():
                 items_list_params = request.params
-                items = await self.store.load_thread_items(
+                return await self.store.load_thread_items(
                     items_list_params.thread_id,
                     limit=items_list_params.limit or DEFAULT_PAGE_SIZE,
                     order=items_list_params.order,
                     after=items_list_params.after,
                     context=context,
+                    include_hidden=False,
                 )
-                # filter out hidden context items
-                items.data = [
-                    item for item in items.data if not isinstance(item, _HIDDEN_ITEMS)
-                ]
-                return items
             case ThreadsUpdateReq():
                 updated = await self.update_thread(
                     request.params.thread_id, {"title": request.params.title}, context
@@ -544,7 +395,7 @@ class ChatKitServer[TContext = Any](ABC):
             case ThreadsCreateReq():
                 thread = ThreadMetadata(
                     id=self.store.generate_thread_id(context),
-                    created_at=datetime.now(),
+                    created_at=datetime.now(UTC),
                 )
                 user_message = await self._build_user_message_item(
                     request.params.input, thread, context
@@ -879,19 +730,22 @@ class ChatKitServer[TContext = Any](ABC):
                         hidden_item_ids.update(
                             item.id
                             for item in event.thread.items.data
-                            if isinstance(item, _HIDDEN_ITEMS)
+                            if item.type in HIDDEN_ITEM_TYPES
                         )
                         yield event.model_copy(
                             update={"thread": self._to_thread_response(event.thread)}
                         )
-                    elif isinstance(
-                        event,
-                        (
-                            ThreadItemAddedEvent,
-                            ThreadItemDoneEvent,
-                            ThreadItemReplacedEvent,
-                        ),
-                    ) and isinstance(event.item, _HIDDEN_ITEMS):
+                    elif (
+                        isinstance(
+                            event,
+                            (
+                                ThreadItemAddedEvent,
+                                ThreadItemDoneEvent,
+                                ThreadItemReplacedEvent,
+                            ),
+                        )
+                        and event.item.type in HIDDEN_ITEM_TYPES
+                    ):
                         hidden_item_ids.add(event.item.id)
                     elif not (
                         isinstance(
@@ -1002,7 +856,7 @@ class ChatKitServer[TContext = Any](ABC):
             ],
             quoted_text=input.quoted_text,
             inference_options=input.inference_options,
-            created_at=datetime.now(),
+            created_at=datetime.now(UTC),
         )
 
     async def _load_full_thread(self, thread_id: str, context: TContext) -> Thread:
@@ -1013,6 +867,7 @@ class ChatKitServer[TContext = Any](ABC):
             limit=DEFAULT_PAGE_SIZE,
             order="asc",
             context=context,
+            include_hidden=False,
         )
         return Thread(**thread_meta.model_dump(), items=thread_items)
 
@@ -1023,7 +878,7 @@ class ChatKitServer[TContext = Any](ABC):
                     "data": [
                         item
                         for item in thread.items.data
-                        if not isinstance(item, _HIDDEN_ITEMS)
+                        if item.type not in HIDDEN_ITEM_TYPES
                     ]
                 }
             )

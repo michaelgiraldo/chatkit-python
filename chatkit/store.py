@@ -2,9 +2,8 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Literal, TypedDict
 
-from .types import (
+from .models import (
     Attachment,
-    AttachmentCreateParams,
     ClientToolCallItem,
     Page,
     StructuredInputItem,
@@ -13,6 +12,7 @@ from .types import (
     ThreadStatus,
     UserMessageItem,
 )
+from .requests import AttachmentCreateParams
 
 StoreItemType = Literal[
     "thread",
@@ -38,7 +38,10 @@ _ID_PREFIXES: dict[StoreItemType, str] = {
 
 def default_generate_id(item_type: StoreItemType) -> str:
     prefix = _ID_PREFIXES[item_type]
-    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+HIDDEN_ITEM_TYPES = ("hidden_context_item", "sdk_hidden_context")
 
 
 class NotFoundError(Exception):
@@ -168,12 +171,16 @@ class ThreadStore[TContext = Any](ABC):
         limit: int,
         order: str,
         context: TContext,
+        *,
+        include_hidden: bool = True,
     ) -> Page[ThreadItem]:
         """Load up to `limit` items in creation order, starting after `after`.
 
         Use a stable order for items with the same timestamp. Accept `"asc"`
         for oldest first and `"desc"` for newest first. If more items exist,
         set `has_more=True` and return a cursor in `Page.after` for the next page.
+        When `include_hidden=False`, exclude `HIDDEN_ITEM_TYPES` before applying
+        the cursor and limit. Derive pagination metadata from the visible rows.
         """
         pass
 

@@ -4,17 +4,18 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-from .store import ConflictError, NotFoundError, PendingTurnItem, ThreadStore
-from .types import (
+from .models import (
     ClientToolCallItem,
     InferenceOptions,
     Page,
+    SDKHiddenContextItem,
     StructuredInputItem,
     ThreadItem,
     ThreadMetadata,
     UserMessageItem,
     UserMessageTextContent,
 )
+from .store import ConflictError, NotFoundError, PendingTurnItem, ThreadStore
 
 
 def _require(condition: bool, message: str) -> None:
@@ -167,6 +168,22 @@ async def check_thread_store[TContext](
             and removed == [tool.id, form.id, *ascending_ids[:0:-1]]
             and [item.id for item in remaining.data] == [target.id],
             "Retry must remove every item after the target in newest-first order",
+        )
+        hidden = SDKHiddenContextItem(
+            id=store.generate_item_id("sdk_hidden_context", thread, context),
+            thread_id=thread.id,
+            created_at=created_at + timedelta(seconds=3),
+            content="Internal store check",
+        )
+        await store.add_thread_item(thread.id, hidden, context)
+        visible = await peer.load_thread_items(
+            thread.id, None, 1, "desc", context, include_hidden=False
+        )
+        _require(
+            [item.id for item in visible.data] == [target.id]
+            and not visible.has_more
+            and visible.after is None,
+            "Visible history must exclude hidden items before applying the page limit",
         )
     finally:
         await store.delete_thread(thread.id, context)

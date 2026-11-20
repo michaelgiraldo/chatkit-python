@@ -17,12 +17,20 @@ When the layout and bindings look correct, click **Export** to download the gene
 
 ## Build widgets with `WidgetTemplate`
 
-Load the `.widget` file with `WidgetTemplate.from_file` and hydrate it with runtime data. Placeholders inside the `.widget` template (Jinja-style `{{ }}` expressions) are rendered before the widget is streamed.
+Add the `templates` extra to your Turnspan installation to render exported
+`.widget` files. Load the file with `WidgetTemplate.from_file` and pass your
+runtime data to `.build()`.
+Relative paths resolve from the working directory. Use an explicit path based
+on `__file__` for templates stored beside your Python module.
 
 ```python
-from chatkit.widgets import WidgetTemplate
+from pathlib import Path
 
-message_template = WidgetTemplate.from_file("widgets/channel_message.widget")
+from chatkit.templates import WidgetTemplate
+
+message_template = WidgetTemplate.from_file(
+    Path(__file__).parent / "widgets" / "channel_message.widget"
+)
 
 
 def build_message_widget(user_name: str, message: str):
@@ -60,9 +68,9 @@ generator. Add this method to your server subclass using your app's
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
-from chatkit.server import stream_widget
 from chatkit.turns import Turn
-from chatkit.types import ThreadStreamEvent
+from chatkit.events import ThreadStreamEvent
+from chatkit.widget_stream import stream_widget
 
 
 async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
@@ -115,7 +123,7 @@ from typing import AsyncGenerator
 
 from agents import RunContextWrapper, Runner, function_tool
 from chatkit.agents import AgentContext
-from chatkit.widgets import WidgetRoot
+from chatkit.widget_models import WidgetRoot
 
 
 @function_tool
@@ -191,8 +199,9 @@ from contextlib import aclosing
 from datetime import datetime
 
 from chatkit.errors import CustomStreamError
-from chatkit.server import ChatKitServer, stream_widget
-from chatkit.types import HiddenContextItem
+from chatkit.server import ChatKitServer
+from chatkit.widget_stream import stream_widget
+from chatkit.models import HiddenContextItem
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
@@ -326,7 +335,8 @@ from typing import Any
 
 from chatkit.actions import Action
 from chatkit.server import ChatKitServer
-from chatkit.types import ThreadMetadata, ThreadStreamEvent, WidgetItem
+from chatkit.events import ThreadStreamEvent
+from chatkit.models import ThreadMetadata, WidgetItem
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):

@@ -1,24 +1,25 @@
 from collections.abc import AsyncIterator
 from datetime import datetime
 
-from chatkit.turns import Turn, UserMessageTurn
-from chatkit.types import (
+from chatkit.events import (
+    ThreadItemAddedEvent,
+    ThreadItemDoneEvent,
+    ThreadItemRemovedEvent,
+    ThreadItemReplacedEvent,
+    ThreadStreamEvent,
+    ThreadUpdatedEvent,
+)
+from chatkit.models import (
     HiddenContextItem,
     InferenceOptions,
     Page,
     SDKHiddenContextItem,
     Thread,
-    ThreadCreateParams,
-    ThreadItemAddedEvent,
-    ThreadItemDoneEvent,
-    ThreadItemRemovedEvent,
-    ThreadItemReplacedEvent,
-    ThreadsCreateReq,
-    ThreadStreamEvent,
-    ThreadUpdatedEvent,
     UserMessageInput,
     UserMessageTextContent,
 )
+from chatkit.requests import ThreadCreateParams, ThreadsCreateReq
+from chatkit.turns import Turn, UserMessageTurn
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, make_server
 

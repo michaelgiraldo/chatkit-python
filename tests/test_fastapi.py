@@ -5,9 +5,11 @@ from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from chatkit.events import ProgressUpdateEvent, ThreadCreatedEvent
 from chatkit.fastapi import process_request
+from chatkit.models import ThreadMetadata
+from chatkit.protocol import encode_sse
 from chatkit.server import ChatKitServer
-from chatkit.types import ThreadCreatedEvent, ThreadMetadata
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
@@ -70,6 +72,11 @@ def test_process_request_rejects_malformed_json(client: TestClient):
     assert "example-private-input" not in response.text
 
 
+def test_sse_frame_decoder_keeps_data_prefix_inside_event_text():
+    event = ProgressUpdateEvent(text="Received data: example")
+    assert decode_event(encode_sse(event)) == event
+
+
 def test_process_request_reports_invalid_fields_without_echoing_values(
     client: TestClient,
 ):
@@ -109,6 +116,26 @@ def test_process_request_reports_missing_operation(client: TestClient):
     (issue,) = response.json()["detail"]
     assert issue["location"] == ["type"]
     assert issue["type"] == "union_tag_not_found"
+
+
+@pytest.mark.parametrize(
+    "operation", ["threads.custom_action", "threads.sync_custom_action"]
+)
+def test_process_request_rejects_missing_action_name(
+    client: TestClient, operation: str
+):
+    response = client.post(
+        "/chatkit",
+        json={
+            "type": operation,
+            "params": {"thread_id": "example-thread", "action": {}},
+        },
+    )
+
+    assert response.status_code == 422
+    (issue,) = response.json()["detail"]
+    assert issue["location"][-3:] == ["params", "action", "type"]
+    assert issue["type"] == "missing"
 
 
 def test_process_request_keeps_invalid_answer_keys_out_of_response(client: TestClient):

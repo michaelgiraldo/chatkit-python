@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .types import (
+from .models import (
     ClientToolCallItem,
     StructuredInputItem,
     ThreadMetadata,

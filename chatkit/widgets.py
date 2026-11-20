@@ -1,24 +1,16 @@
-import inspect
-import json
 from datetime import datetime
-from pathlib import Path
-from typing import Annotated, Any, Literal, NotRequired, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
-from jinja2 import Environment, StrictUndefined, Template
 from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
     Field,
-    JsonValue,
     SerializeAsAny,
     model_serializer,
 )
 
-from .actions import ActionConfig
-from .icons import IconName
-
-_jinja_env = Environment(undefined=StrictUndefined)
+from . import actions, icons, widget_models
 
 
 class ThemeColor(TypedDict):
@@ -156,9 +148,9 @@ class WidgetComponentBase(BaseModel):
     id: str | None = None
     type: str = Field(...)
 
-    def build(self) -> "WidgetComponent":
+    def build(self) -> widget_models.WidgetComponent:
         """Build the widget node used for events and storage."""
-        return WidgetComponent.model_validate(
+        return widget_models.WidgetComponent.model_validate(
             self.model_dump(mode="json", exclude_none=True)
         )
 
@@ -171,48 +163,24 @@ class WidgetComponentBase(BaseModel):
         return fields
 
 
-class WidgetComponent(BaseModel):
-    """A widget node whose JSON properties survive streaming and storage."""
-
-    model_config = ConfigDict(extra="allow")
-    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)  # pyright: ignore[reportIncompatibleVariableOverride]
-
-    type: str
-    id: str | None = None
-    key: str | None = None
-    children: "WidgetComponent | list[WidgetComponent] | None" = None
-
-    @model_serializer
-    def _serialize(self) -> dict[str, Any]:
-        # Preserve explicit JSON nulls even when the enclosing event uses
-        # exclude_none. Only unset optional node fields are absent on the wire.
-        data = {"type": self.type, **(self.model_extra or {})}
-        for field in ("id", "key", "children"):
-            if field in self.model_fields_set:
-                data[field] = getattr(self, field)
-        return data
-
-
-class WidgetRoot(WidgetComponent):
-    """The canonical layout used by widget events and saved thread items."""
-
-    type: Literal["Card", "ListView", "Basic"]  # pyright: ignore
-
-
 def _parse_widget_child(value: object) -> object:
-    return WidgetComponent.model_validate(value) if isinstance(value, dict) else value
+    return (
+        widget_models.WidgetComponent.model_validate(value)
+        if isinstance(value, dict)
+        else value
+    )
 
 
 _WidgetChild = Annotated[
-    SerializeAsAny[WidgetComponent | WidgetComponentBase],
+    SerializeAsAny[widget_models.WidgetComponent | WidgetComponentBase],
     BeforeValidator(_parse_widget_child),
 ]
 
 
 class _WidgetRootBuilder(WidgetComponentBase):
-    def build(self) -> WidgetRoot:
+    def build(self) -> widget_models.WidgetRoot:
         """Build the widget tree used for events and storage."""
-        return WidgetRoot.model_validate(
+        return widget_models.WidgetRoot.model_validate(
             self.model_dump(mode="json", exclude_none=True)
         )
 
@@ -233,7 +201,7 @@ class WidgetStatusWithIcon(TypedDict):
 
     text: str
     """Status text to display."""
-    icon: NotRequired[WidgetIcon]
+    icon: NotRequired[icons.IconName]
     """Icon to render at the start of the status."""
 
 
@@ -247,7 +215,7 @@ class ListViewItem(WidgetComponentBase):
     type: Literal["ListViewItem"] = Field(default="ListViewItem", frozen=True)  # pyright: ignore
     children: list[_WidgetChild]
     """Content for the list item."""
-    onClickAction: ActionConfig | None = None
+    onClickAction: actions.ActionConfig | None = None
     """Optional action triggered when the list item is clicked."""
     gap: int | str | None = None
     """Gap between children within the list item; spacing unit or CSS string."""
@@ -274,7 +242,7 @@ class CardAction(TypedDict):
 
     label: str
     """Button label shown in the card footer."""
-    action: ActionConfig
+    action: actions.ActionConfig
     """Declarative action dispatched to the host application."""
 
 
@@ -505,7 +473,7 @@ class Form(WidgetComponentBase, BoxBase):
     """Form wrapper capable of submitting ``onSubmitAction``."""
 
     type: Literal["Form"] = Field(default="Form", frozen=True)  # pyright: ignore
-    onSubmitAction: ActionConfig | None = None
+    onSubmitAction: actions.ActionConfig | None = None
     """Action dispatched when the form is submitted."""
     direction: Literal["row", "col"] | None = None
     """Flex direction for laying out form children."""
@@ -534,7 +502,7 @@ class Icon(WidgetComponentBase):
     """Icon component referencing a built-in icon name."""
 
     type: Literal["Icon"] = Field(default="Icon", frozen=True)  # pyright: ignore
-    name: WidgetIcon
+    name: icons.IconName
     """Name of the icon to display."""
     color: str | ThemeColor | None = None
     """
@@ -620,11 +588,11 @@ class Button(WidgetComponentBase):
     """Configure the button as a submit button for the nearest form."""
     label: str | None = None
     """Text to display inside the button."""
-    onClickAction: ActionConfig | None = None
+    onClickAction: actions.ActionConfig | None = None
     """Action dispatched on click."""
-    iconStart: WidgetIcon | None = None
+    iconStart: icons.IconName | None = None
     """Icon shown before the label; can be used for icon-only buttons."""
-    iconEnd: WidgetIcon | None = None
+    iconEnd: icons.IconName | None = None
     """Optional icon shown after the label."""
     style: Literal["primary", "secondary"] | None = None
     """Convenience preset for button style."""
@@ -687,7 +655,7 @@ class Select(WidgetComponentBase):
     """The name of the form control field used when submitting forms."""
     options: list[SelectOption]
     """List of selectable options."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the value changes."""
     placeholder: str | None = None
     """Placeholder text shown when no value is selected."""
@@ -715,7 +683,7 @@ class DatePicker(WidgetComponentBase):
     type: Literal["DatePicker"] = Field(default="DatePicker", frozen=True)  # pyright: ignore
     name: str
     """The name of the form control field used when submitting forms."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the date value changes."""
     placeholder: str | None = None
     """Placeholder text shown when no date is selected."""
@@ -753,7 +721,7 @@ class Checkbox(WidgetComponentBase):
     """Optional label text rendered next to the checkbox."""
     defaultChecked: bool | None = None
     """The initial checked state of the checkbox."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the checked state changes."""
     disabled: bool | None = None
     """Disable interactions and apply disabled styles."""
@@ -842,7 +810,7 @@ class RadioGroup(WidgetComponentBase):
     """Array of options to render as radio items."""
     ariaLabel: str | None = None
     """Accessible label for the radio group; falls back to `name`."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the selected value changes."""
     defaultValue: str | None = None
     """Initial selected value of the radio group."""
@@ -1048,64 +1016,5 @@ Series = Annotated[
 """Union of all supported chart series types."""
 
 
-type WidgetRootInput = WidgetRoot | Card | ListView
+type WidgetRootInput = widget_models.WidgetRoot | Card | ListView
 """Canonical widget or typed builder accepted by streaming helpers."""
-
-WidgetIcon = IconName
-"""Icon names accepted by widgets that render icons."""
-
-
-class WidgetTemplate:
-    """
-    Utility for loading and building widgets from a .widget file.
-
-    Example using .widget file on disc:
-    ```python
-    template = WidgetTemplate.from_file("path/to/my_widget.widget")
-    widget = template.build({"name": "Harry Potter"})
-    ```
-
-    Example using already parsed widget definition:
-    ```python
-    template = WidgetTemplate(definition={"version": "1.0", "name": "...", "template": Template(...), "jsonSchema": {...}})
-    widget = template.build({"name": "Harry Potter"})
-    ```
-    """
-
-    def __init__(self, definition: dict[str, Any]):
-        self.version = definition["version"]
-        if self.version != "1.0":
-            raise ValueError(f"Unsupported widget spec version: {self.version}")
-
-        self.name = definition["name"]
-        template = definition["template"]
-        if isinstance(template, Template):
-            self.template = template
-        else:
-            self.template = _jinja_env.from_string(template)
-        self.data_schema = definition.get("jsonSchema", {})
-
-    @classmethod
-    def from_file(cls, file_path: str) -> WidgetTemplate:
-        path = Path(file_path)
-        if not path.is_absolute():
-            caller_frame = inspect.stack()[1]
-            caller_path = Path(caller_frame.filename).resolve()
-            path = caller_path.parent / path
-
-        with path.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
-
-        return cls(payload)
-
-    def build(self, data: dict[str, Any] | BaseModel | None = None) -> WidgetRoot:
-        """Render template data into a Card, ListView, or Basic widget tree."""
-        rendered = self.template.render(**self._normalize_data(data))
-        return WidgetRoot.model_validate_json(rendered)
-
-    def _normalize_data(
-        self, data: dict[str, Any] | BaseModel | None
-    ) -> dict[str, Any]:
-        if data is None:
-            return {}
-        return data.model_dump() if isinstance(data, BaseModel) else data

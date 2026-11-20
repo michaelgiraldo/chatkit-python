@@ -1,7 +1,15 @@
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 
+from chatkit.models import (
+    ClientToolCallItem,
+    Page,
+    ThreadItem,
+    ThreadMetadata,
+    UserMessageItem,
+)
 from chatkit.store import (
+    HIDDEN_ITEM_TYPES,
     ConflictError,
     NotFoundError,
     PendingTurnItem,
@@ -9,13 +17,6 @@ from chatkit.store import (
     ThreadStore,
     apply_thread_patch,
     validate_pending_claim,
-)
-from chatkit.types import (
-    ClientToolCallItem,
-    Page,
-    ThreadItem,
-    ThreadMetadata,
-    UserMessageItem,
 )
 
 type Context = dict[str, object]
@@ -61,8 +62,16 @@ class InMemoryThreadStore(ThreadStore[Context]):
         limit: int,
         order: str,
         context: Context,
+        *,
+        include_hidden: bool = True,
     ) -> Page[ThreadItem]:
-        return self._page(self.items.get(thread_id, {}).values(), after, limit, order)
+        items = self.items.get(thread_id, {}).values()
+        rows = (
+            items
+            if include_hidden
+            else (item for item in items if item.type not in HIDDEN_ITEM_TYPES)
+        )
+        return self._page(rows, after, limit, order)
 
     async def add_thread_item(
         self, thread_id: str, item: ThreadItem, context: Context
@@ -138,7 +147,7 @@ class InMemoryThreadStore(ThreadStore[Context]):
 
     @staticmethod
     def _sort_key(row: ThreadMetadata | ThreadItem) -> tuple[datetime, str]:
-        return row.created_at, row.id
+        return row.created_at.astimezone(UTC), row.id
 
     def _page[T: ThreadMetadata | ThreadItem](
         self, rows: Iterable[T], after: str | None, limit: int, order: str

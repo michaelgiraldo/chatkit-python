@@ -3,7 +3,8 @@
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .errors import InvalidRequestError
-from .types import ChatKitReq, ThreadStreamEvent
+from .events import ThreadStreamEvent
+from .requests import ChatKitReq
 
 _request_adapter = TypeAdapter[ChatKitReq](ChatKitReq)
 

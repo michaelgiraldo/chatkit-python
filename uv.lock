@@ -830,7 +830,6 @@ name = "openai-chatkit"
 version = "1.6.5+turnspan.2"
 source = { editable = "." }
 dependencies = [
-    { name = "jinja2" },
     { name = "pydantic" },
 ]
 
@@ -844,6 +843,9 @@ fastapi = [
     { name = "fastapi" },
     { name = "starlette" },
     { name = "uvicorn" },
+]
+templates = [
+    { name = "jinja2" },
 ]
 
 [package.dev-dependencies]
@@ -869,14 +871,14 @@ lint = [
 requires-dist = [
     { name = "anyio", marker = "extra == 'fastapi'", specifier = ">=4.16.0,<5" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.165.0,<1" },
-    { name = "jinja2", specifier = ">=3.1.6,<4" },
+    { name = "jinja2", marker = "extra == 'templates'", specifier = ">=3.1.6,<4" },
     { name = "openai", marker = "extra == 'agents'", specifier = ">=3.56.0,<4" },
     { name = "openai-agents", marker = "extra == 'agents'", specifier = ">=0.25.0,<0.26" },
     { name = "pydantic", specifier = ">=2.14.4,<3" },
     { name = "starlette", marker = "extra == 'fastapi'", specifier = ">=1.10.0,<2" },
     { name = "uvicorn", marker = "extra == 'fastapi'", specifier = ">=0.54.0,<1" },
 ]
-provides-extras = ["agents", "fastapi"]
+provides-extras = ["agents", "fastapi", "templates"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -3,25 +3,26 @@ from pathlib import Path
 
 import pytest
 
-from chatkit.server import ChatKitServer, EmptyResult, StreamingResult
-from chatkit.store import AttachmentStore, NotFoundError
-from chatkit.turns import Turn
-from chatkit.types import (
+from chatkit.events import ThreadCreatedEvent, ThreadStreamEvent
+from chatkit.models import (
     Attachment,
-    AttachmentCreateParams,
-    AttachmentDeleteParams,
-    AttachmentsCreateReq,
-    AttachmentsDeleteReq,
     FileAttachment,
     InferenceOptions,
-    ThreadCreatedEvent,
-    ThreadCreateParams,
-    ThreadsCreateReq,
-    ThreadStreamEvent,
     UserMessageInput,
     UserMessageItem,
     UserMessageTextContent,
 )
+from chatkit.requests import (
+    AttachmentCreateParams,
+    AttachmentDeleteParams,
+    AttachmentsCreateReq,
+    AttachmentsDeleteReq,
+    ThreadCreateParams,
+    ThreadsCreateReq,
+)
+from chatkit.server import ChatKitServer, EmptyResult, StreamingResult
+from chatkit.store import AttachmentStore, NotFoundError
+from chatkit.turns import Turn
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
 from tests.helpers.server import DEFAULT_CONTEXT

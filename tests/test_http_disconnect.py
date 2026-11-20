@@ -9,32 +9,36 @@ from fastapi import FastAPI
 from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message, Scope
 
-from chatkit.fastapi import process_request
-from chatkit.server import stream_widget
-from chatkit.turns import Turn, UserMessageTurn
-from chatkit.types import (
-    AssistantMessageContent,
+from chatkit.events import (
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
-    InferenceOptions,
-    Thread,
-    ThreadAddUserMessageParams,
     ThreadCreatedEvent,
-    ThreadCreateParams,
-    ThreadGetByIdParams,
-    ThreadItem,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
-    ThreadsAddUserMessageReq,
-    ThreadsCreateReq,
-    ThreadsGetByIdReq,
     ThreadStreamEvent,
+)
+from chatkit.fastapi import process_request
+from chatkit.models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    InferenceOptions,
+    Thread,
+    ThreadItem,
     UserMessageInput,
     UserMessageTextContent,
     WidgetItem,
 )
-from chatkit.widgets import WidgetRoot
+from chatkit.requests import (
+    ThreadAddUserMessageParams,
+    ThreadCreateParams,
+    ThreadGetByIdParams,
+    ThreadsAddUserMessageReq,
+    ThreadsCreateReq,
+    ThreadsGetByIdReq,
+)
+from chatkit.turns import Turn, UserMessageTurn
+from chatkit.widget_models import WidgetRoot
+from chatkit.widget_stream import stream_widget
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 

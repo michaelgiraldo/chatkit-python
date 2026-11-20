@@ -25,7 +25,7 @@ Here is a minimal example that enriches file citations with a more helpful title
 
 ```python
 from chatkit.agents import ResponseStreamConverter, stream_agent_response
-from chatkit.types import Annotation, FileSource
+from chatkit.models import Annotation, FileSource
 
 
 class MyResponseStreamConverter(ResponseStreamConverter):
@@ -67,12 +67,12 @@ If you build assistant messages yourself, include annotations on each `Assistant
 
 ```python
 from datetime import datetime
-from chatkit.types import (
+from chatkit.events import ThreadItemDoneEvent
+from chatkit.models import (
     Annotation,
     AssistantMessageContent,
     AssistantMessageItem,
     FileSource,
-    ThreadItemDoneEvent,
     URLSource,
 )
 
@@ -116,12 +116,12 @@ Entity annotations support a few UI-focused fields:
 
 ```python
 from datetime import datetime
-from chatkit.types import (
+from chatkit.events import ThreadItemDoneEvent
+from chatkit.models import (
     Annotation,
     AssistantMessageContent,
     AssistantMessageItem,
     EntitySource,
-    ThreadItemDoneEvent,
 )
 
 text = "Here are the ACME account details for reference."

@@ -126,8 +126,8 @@ import base64
 from openai.types.responses import ResponseInputImageParam, ResponseInputTextParam
 from openai.types.responses.response_input_item_param import Message
 
-from chatkit.agents import ThreadItemConverter
-from chatkit.types import GeneratedImageItem
+from chatkit.agent_input import ThreadItemConverter
+from chatkit.models import GeneratedImageItem
 
 
 class MyThreadItemConverter(ThreadItemConverter):

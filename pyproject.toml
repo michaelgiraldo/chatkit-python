@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
   "pydantic>=2.14.4,<3",
-  "jinja2>=3.1.6,<4",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +19,9 @@ fastapi = [
   "fastapi>=0.165.0,<1",
   "starlette>=1.10.0,<2",
   "uvicorn>=0.54.0,<1",
+]
+templates = [
+  "jinja2>=3.1.6,<4",
 ]
 
 [build-system]
@@ -66,7 +68,7 @@ select = [
     "COM818", "COM819",
     "PYI016", "PYI018", "PYI025", "PYI030",
     "PERF102",
-    "UP001", "UP003", "UP004", "UP006", "UP007", "UP028", "UP034", "UP045",
+    "UP001", "UP003", "UP004", "UP006", "UP007", "UP028", "UP034", "UP037", "UP042", "UP043", "UP045",
     "FURB132", "FURB148", "FURB163", "FURB181",
     # "ASYNC",
     "ASYNC251",
@@ -104,7 +106,6 @@ ignore = [
     "ASYNC109",  # not convinced of the value
     "ASYNC230",  # this is annoying, SSDs are fast
 ]
-extend-safe-fixes = ["ALL"]
 preview = true
 
 [tool.pytest.ini_options]

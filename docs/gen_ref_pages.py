@@ -26,7 +26,7 @@ else:
 for path in SRC_ROOT.rglob("*.py"):
     if path.name.startswith("_"):
         continue
-    if path.name in {"version.py", "logger.py"}:
+    if path.name == "logger.py":
         continue
 
     module_path = path.with_suffix("").relative_to(SRC_ROOT)
@@ -48,12 +48,11 @@ for path in SRC_ROOT.rglob("*.py"):
             f.write("    options:\n")
             f.write("      members:\n")
             for symbol in (
-                "WidgetTemplate",
-                "WidgetRoot",
-                "WidgetComponent",
                 "Card",
                 "ListView",
                 "ListViewItem",
+                "Text",
+                "Button",
             ):
                 f.write(f"        - {symbol}\n")
         else:

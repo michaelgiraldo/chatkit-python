@@ -2,6 +2,10 @@
 
 ChatKit actions are interaction events triggered by widgets or client code that let the client and server run logic or start a model response independently of user messages.
 
+Every action needs a non-empty `type`. The browser can omit `payload` for an action
+with no arguments. When constructing a typed `Action` in Python, pass the declared
+payload explicitly, including `None` if the action accepts it.
+
 ## Widget actions
 
 Widget actions are specified in the widget definition itself (for example, `Button.onClickAction`), so every interaction carries a typed action payload plus the widget item that fired it. By default actions are routed to the server, but you can set `handler: "client"` when you want to intercept the action in the browser first.

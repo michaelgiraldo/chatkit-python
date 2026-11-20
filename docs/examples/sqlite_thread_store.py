@@ -8,7 +8,15 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from chatkit.models import (
+    ClientToolCallItem,
+    Page,
+    ThreadItem,
+    ThreadMetadata,
+    UserMessageItem,
+)
 from chatkit.store import (
+    HIDDEN_ITEM_TYPES,
     ConflictError,
     NotFoundError,
     PendingTurnItem,
@@ -16,13 +24,6 @@ from chatkit.store import (
     ThreadStore,
     apply_thread_patch,
     validate_pending_claim,
-)
-from chatkit.types import (
-    ClientToolCallItem,
-    Page,
-    ThreadItem,
-    ThreadMetadata,
-    UserMessageItem,
 )
 
 
@@ -146,27 +147,30 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
         limit: int,
         order: str,
         context: TContext,
+        *,
+        include_hidden: bool = True,
     ) -> Page[ThreadItem]:
         if order not in ("asc", "desc"):
             raise ValueError(f"Unsupported sort order: {order}")
         if limit < 1:
             raise ValueError("Page limit must be positive")
         with closing(self._create_connection()) as conn, conn:
+            condition = "thread_id = ? AND user_id = ?"
+            params: list[str | int | None] = [thread_id, context.user_id]
+            if not include_hidden:
+                condition += " AND json_extract(data, '$.item.type') NOT IN (?, ?)"
+                params.extend(HIDDEN_ITEM_TYPES)
             created_after: str | None = None
             if after is not None:
                 cursor_row = conn.execute(
-                    "SELECT created_at FROM items WHERE id = ? AND thread_id = ? AND user_id = ?",
-                    (after, thread_id, context.user_id),
+                    f"SELECT created_at FROM items WHERE {condition} AND id = ?",
+                    (*params, after),
                 ).fetchone()
                 if cursor_row is None:
                     raise NotFoundError(f"Item {after} not found")
                 created_after = cursor_row[0]
 
-            query = """
-                SELECT id, data FROM items
-                WHERE thread_id = ? AND user_id = ?
-            """
-            params: list[str | int | None] = [thread_id, context.user_id]
+            query = f"SELECT data FROM items WHERE {condition}"
             if created_after is not None:
                 comparison = ">" if order == "asc" else "<"
                 query += f" AND (created_at, id) {comparison} (?, ?)"
@@ -177,7 +181,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
 
             items_cursor = conn.execute(query, params)
             items = [
-                ItemData.model_validate_json(item[1]).item for item in items_cursor
+                ItemData.model_validate_json(item[0]).item for item in items_cursor
             ]
             has_more = len(items) > limit
             next_after: str | None = None

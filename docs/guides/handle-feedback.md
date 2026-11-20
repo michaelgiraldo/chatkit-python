@@ -19,7 +19,7 @@ Override the `add_feedback` method on your server to persist the signal anywhere
 
 ```python
 from chatkit.server import ChatKitServer
-from chatkit.types import FeedbackKind
+from chatkit.models import FeedbackKind
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):

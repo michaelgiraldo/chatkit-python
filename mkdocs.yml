@@ -67,15 +67,21 @@ nav:
       - Overview: api/chatkit/index.md
       - Modules:
           - actions: api/chatkit/actions.md
+          - agent input: api/chatkit/agent_input.md
           - agents: api/chatkit/agents.md
           - errors: api/chatkit/errors.md
+          - events: api/chatkit/events.md
           - fastapi: api/chatkit/fastapi.md
+          - models: api/chatkit/models.md
           - protocol: api/chatkit/protocol.md
+          - requests: api/chatkit/requests.md
           - server: api/chatkit/server.md
           - store: api/chatkit/store.md
           - store checks: api/chatkit/store_checks.md
+          - templates: api/chatkit/templates.md
           - turns: api/chatkit/turns.md
-          - types: api/chatkit/types.md
+          - widget models: api/chatkit/widget_models.md
+          - widget stream: api/chatkit/widget_stream.md
           - widgets: api/chatkit/widgets.md
           - icons: api/chatkit/icons.md
   - Release process / changelog: release.md

@@ -18,33 +18,38 @@ from agents import (
 from agents.tool_context import ToolContext
 from openai import AsyncOpenAI
 
-from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
-from chatkit.turns import ClientToolTurn, Turn, UserMessageTurn
-from chatkit.types import (
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import AgentContext, stream_agent_response
+from chatkit.events import (
     AssistantMessageContentPartAnnotationAdded,
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
-    ClientToolCallItem,
     ErrorEvent,
-    InferenceOptions,
-    Thread,
-    ThreadAddClientToolOutputParams,
-    ThreadAddUserMessageParams,
     ThreadCreatedEvent,
-    ThreadCreateParams,
-    ThreadGetByIdParams,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
-    ThreadsAddClientToolOutputReq,
-    ThreadsAddUserMessageReq,
-    ThreadsCreateReq,
-    ThreadsGetByIdReq,
     ThreadStreamEvent,
+)
+from chatkit.models import (
+    AssistantMessageItem,
+    ClientToolCallItem,
+    InferenceOptions,
+    Thread,
     URLSource,
     UserMessageInput,
     UserMessageTextContent,
 )
+from chatkit.requests import (
+    ThreadAddClientToolOutputParams,
+    ThreadAddUserMessageParams,
+    ThreadCreateParams,
+    ThreadGetByIdParams,
+    ThreadsAddClientToolOutputReq,
+    ThreadsAddUserMessageReq,
+    ThreadsCreateReq,
+    ThreadsGetByIdReq,
+)
+from chatkit.turns import ClientToolTurn, Turn, UserMessageTurn
 from tests._types import RequestContext
 from tests.helpers.server import make_server
 

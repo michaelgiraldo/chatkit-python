@@ -6,28 +6,29 @@ from datetime import datetime
 import pytest
 
 from chatkit.errors import ErrorCode
-from chatkit.server import ChatKitServer, StreamingResult
-from chatkit.turns import Turn
-from chatkit.types import (
-    AssistantMessageContent,
+from chatkit.events import (
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
     ErrorEvent,
-    InferenceOptions,
     ProgressUpdateEvent,
     StreamOptionsEvent,
     ThreadCreatedEvent,
-    ThreadCreateParams,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
-    ThreadMetadata,
-    ThreadsCreateReq,
     ThreadStreamEvent,
+)
+from chatkit.models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    InferenceOptions,
+    ThreadMetadata,
     UserMessageInput,
     UserMessageItem,
     UserMessageTextContent,
 )
+from chatkit.requests import ThreadCreateParams, ThreadsCreateReq
+from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.turns import Turn
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, make_server
 

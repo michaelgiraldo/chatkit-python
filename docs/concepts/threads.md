@@ -53,7 +53,7 @@ On the client, ChatKit.js renders items incrementally as they stream in for the 
 
 ### User messages
 
-[`UserMessageItem`](../api/chatkit/types.md#chatkit.types.UserMessageItem)s represent end-user input. They may include:
+[`UserMessageItem`](../api/chatkit/models.md#chatkit.models.UserMessageItem)s represent end-user input. They may include:
 
 - Plain text entered by the user
 - Optional `quoted_text` for reply-style UIs
@@ -65,7 +65,7 @@ User text is not Markdown-rendered, but it may contain [@-mentions](../guides/ac
 
 ### Assistant messages
 
-[`AssistantMessageItem`](../api/chatkit/types.md#chatkit.types.AssistantMessageItem)s represent assistant output. Their content can include:
+[`AssistantMessageItem`](../api/chatkit/models.md#chatkit.models.AssistantMessageItem)s represent assistant output. Their content can include:
 
 - Markdown-rendered text
 - Tool call outputs
@@ -92,9 +92,9 @@ Hidden context items are included in model input but are not rendered in the cha
 
 Typical use cases include recording widget actions, selection state, or system signals.
 
-- **[`HiddenContextItem`](../api/chatkit/types.md#chatkit.types.HiddenContextItem)**: Integration-defined hidden context. You control its schema and how it is converted for the model.
+- **[`HiddenContextItem`](../api/chatkit/models.md#chatkit.models.HiddenContextItem)**: Integration-defined hidden context. You control its schema and how it is converted for the model.
 
-- **[`SDKHiddenContextItem`](../api/chatkit/types.md#chatkit.types.SDKHiddenContextItem)**: Hidden context inserted by the ChatKit Python SDK for its own internal operations. Most applications do not need to modify this unless overriding conversion behavior.
+- **[`SDKHiddenContextItem`](../api/chatkit/models.md#chatkit.models.SDKHiddenContextItem)**: Hidden context inserted by the ChatKit Python SDK for its own internal operations. Most applications do not need to modify this unless overriding conversion behavior.
 
 ## Thread item actions
 
@@ -104,7 +104,7 @@ Actions are configured client-side using the [threadItemActions option](https://
 
 ## Converting items to model input
 
-[`ThreadItemConverter`](../api/chatkit/agents.md#chatkit.agents.ThreadItemConverter) translates stored thread items into model-ready input items. The default converter understands common ChatKit item types such as messages, widgets, workflows, and tasks.
+[`ThreadItemConverter`](../api/chatkit/agent_input.md#chatkit.agent_input.ThreadItemConverter) translates stored thread items into model-ready input items. The default converter understands common ChatKit item types such as messages, widgets, workflows, and tasks.
 
 You can override the converter when you need custom behavior. For example:
 

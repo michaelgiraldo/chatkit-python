@@ -10,11 +10,11 @@ Here’s how a widget is represented from design time through runtime streaming.
 | --- | --- |
 | Working definition | [Widget UI language](#widget-ui-language) plus a schema (Zod/JSON) and example data you author in <https://widgets.chatkit.studio>. |
 | Published definition | The exported [`.widget` file](#widget-files) bundling the layout, schema, and sample data. |
-| Server runtime (definition only) | [`WidgetTemplate`](../api/chatkit/widgets.md#chatkit.widgets.WidgetTemplate) instance loaded from the `.widget` file. |
-| Server runtime (hydrated) | A [`WidgetRoot`](../api/chatkit/widgets.md#chatkit.widgets.WidgetRoot) built from a template or from typed Python builders. |
-| Streamed and saved | The same widget tree is serialized to JSON in streamed and stored [`WidgetItem`](../api/chatkit/types.md#chatkit.types.WidgetItem) records. Reload uses that tree directly and preserves nested properties, including client extension fields. |
+| Server runtime (definition only) | [`WidgetTemplate`](../api/chatkit/templates.md#chatkit.templates.WidgetTemplate) instance loaded from the `.widget` file. |
+| Server runtime (hydrated) | A [`WidgetRoot`](../api/chatkit/widget_models.md#chatkit.widget_models.WidgetRoot) built from a template or from typed Python builders. |
+| Streamed and saved | The same widget tree is serialized to JSON in streamed and stored [`WidgetItem`](../api/chatkit/models.md#chatkit.models.WidgetItem) records. Reload uses that tree directly and preserves nested properties, including client extension fields. |
 | Rendered by the client | ChatKit.js deserializes the JSON into typed widget objects (for example, [`Card`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/card/) or [`ListView`](https://openai.github.io/chatkit-js/api/openai/chatkit/namespaces/widgets/type-aliases/listview/)) and renders them; entity previews use [`BasicRoot`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/basicroot/) returned from [`entities.onRequestPreview`](#entity-previews). |
-| Sent as model input | A Responses API `Message` produced from a [`WidgetItem`](../api/chatkit/types.md#chatkit.types.WidgetItem) via [`ThreadItemConverter.widget_to_input`](../api/chatkit/agents.md#chatkit.agents.ThreadItemConverter.widget_to_input). |
+| Sent as model input | A Responses API `Message` produced from a [`WidgetItem`](../api/chatkit/models.md#chatkit.models.WidgetItem) via [`ThreadItemConverter.widget_to_input`](../api/chatkit/agent_input.md#chatkit.agent_input.ThreadItemConverter.widget_to_input). |
 
 
 ## Widget UI language
@@ -35,7 +35,7 @@ Exported `.widget` files are JSON blobs that include the widget template, the ex
 
 ## WidgetItem
 
-[`WidgetItem`](../api/chatkit/types.md#chatkit.types.WidgetItem) represents a widget rendered as a [thread item](threads.md#what-are-thread-items) in the chat UI. In addition to a reference to the widget instance, it contains a `copy_text` field that represents the text value copied to the clipboard when the user clicks the copy button below the response.
+[`WidgetItem`](../api/chatkit/models.md#chatkit.models.WidgetItem) represents a widget rendered as a [thread item](threads.md#what-are-thread-items) in the chat UI. In addition to a reference to the widget instance, it contains a `copy_text` field that represents the text value copied to the clipboard when the user clicks the copy button below the response.
 
 ## Entity previews
 

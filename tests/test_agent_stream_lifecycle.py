@@ -15,7 +15,8 @@ from chatkit.agents import (
     _merge_generators,
     stream_agent_response,
 )
-from chatkit.types import Page, ThreadMetadata
+from chatkit.events import ProgressUpdateEvent
+from chatkit.models import Page, ThreadMetadata
 from docs.examples.stream_image_previews import stream_image_previews
 
 
@@ -137,6 +138,8 @@ async def test_interrupting_agent_response_cancels_runner_before_closing_events(
 
     result.cancel.assert_called_once_with()
     assert events_closed.is_set()
+    with pytest.raises(asyncio.QueueShutDown):
+        await context.stream(ProgressUpdateEvent(text="Too late"))
     assert not any(
         task.get_name().startswith("chatkit-") for task in asyncio.all_tasks()
     )

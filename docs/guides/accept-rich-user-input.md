@@ -115,12 +115,8 @@ Example two-phase store issuing a multipart upload URL:
 from pydantic import AnyUrl
 
 from chatkit.store import AttachmentStore
-from chatkit.types import (
-    Attachment,
-    AttachmentCreateParams,
-    AttachmentUploadDescriptor,
-    FileAttachment,
-)
+from chatkit.models import Attachment, AttachmentUploadDescriptor, FileAttachment
+from chatkit.requests import AttachmentCreateParams
 
 
 class BlobAttachmentStore(AttachmentStore[RequestContext]):
@@ -159,8 +155,8 @@ import base64
 
 from openai.types.responses import ResponseInputFileParam, ResponseInputImageParam
 
-from chatkit.agents import ThreadItemConverter
-from chatkit.types import Attachment, ImageAttachment
+from chatkit.agent_input import ThreadItemConverter
+from chatkit.models import Attachment, ImageAttachment
 
 
 async def read_bytes(
@@ -265,7 +261,7 @@ Return a `TranscriptionResult` that includes the final `text` that should appear
 
 Structured input lets your assistant ask the user for small, typed follow-up answers as part of the conversation. The prompt takes over the composer with focused controls, plus a skip option. Use structured input when the next step depends on specific choices or short fields, and free-text back-and-forth would be slower or easier to misread.
 
-The server streams a [`StructuredInputItem`](../api/chatkit/types.md#chatkit.types.StructuredInputItem) during `respond`. ChatKit renders the questions in the composer area instead of the normal free-text input, then records the result on the same thread item when the user answers or skips.
+The server streams a [`StructuredInputItem`](../api/chatkit/models.md#chatkit.models.StructuredInputItem) during `respond`. ChatKit renders the questions in the composer area instead of the normal free-text input, then records the result on the same thread item when the user answers or skips.
 
 ### Stream a structured input item
 
@@ -274,12 +270,12 @@ Yield a `StructuredInputItem` from `respond` when you need the user to answer be
 ```python
 from datetime import datetime
 
-from chatkit.types import (
+from chatkit.events import ThreadItemDoneEvent
+from chatkit.models import (
     StructuredInputFreeform,
     StructuredInputItem,
     StructuredInputMultipleChoice,
     StructuredInputMultipleChoiceOption,
-    ThreadItemDoneEvent,
 )
 
 
@@ -309,13 +305,13 @@ yield ThreadItemDoneEvent(
 return
 ```
 
-Use [`StructuredInputMultipleChoice`](../api/chatkit/types.md#chatkit.types.StructuredInputMultipleChoice) for choice prompts and [`StructuredInputFreeform`](../api/chatkit/types.md#chatkit.types.StructuredInputFreeform) for short text answers. Set `multiple=True` on multiple-choice input when the user may submit more than one value.
+Use [`StructuredInputMultipleChoice`](../api/chatkit/models.md#chatkit.models.StructuredInputMultipleChoice) for choice prompts and [`StructuredInputFreeform`](../api/chatkit/models.md#chatkit.models.StructuredInputFreeform) for short text answers. Set `multiple=True` on multiple-choice input when the user may submit more than one value.
 
 After the user submits or skips, ChatKit records the result on the structured input item.
 
 ### Convert structured input submissions into model input
 
-The default [`ThreadItemConverter`](../api/chatkit/agents.md#chatkit.agents.ThreadItemConverter) includes structured input items in model input. It describes the prompt status and each answer as answered, skipped, or unanswered.
+The default [`ThreadItemConverter`](../api/chatkit/agent_input.md#chatkit.agent_input.ThreadItemConverter) includes structured input items in model input. It describes the prompt status and each answer as answered, skipped, or unanswered.
 
 If your model needs a different format, override `ThreadItemConverter.structured_input_to_input` before calling `Runner.run_streamed`.
 
@@ -366,8 +362,8 @@ Mentions arrive server-side as structured tags. Override `ThreadItemConverter.ta
 Example converter method that wraps the tagged entity details in custom markup:
 
 ```python
-from chatkit.agents import ThreadItemConverter
-from chatkit.types import UserMessageTagContent
+from chatkit.agent_input import ThreadItemConverter
+from chatkit.models import UserMessageTagContent
 from openai.types.responses import ResponseInputTextParam
 
 

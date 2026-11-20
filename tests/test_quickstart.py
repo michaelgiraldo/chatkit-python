@@ -1,14 +1,14 @@
 from fastapi.testclient import TestClient
 
-from chatkit.types import (
+from chatkit.events import (
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
     ThreadCreatedEvent,
     ThreadItemDoneEvent,
     ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
     ThreadStreamEvent,
 )
+from chatkit.models import AssistantMessageItem
 from docs.examples import quickstart
 from docs.examples.quickstart import app, server
 from tests.helpers.server import decode_event

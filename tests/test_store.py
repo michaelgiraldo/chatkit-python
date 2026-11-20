@@ -6,9 +6,9 @@ from threading import Barrier
 
 import pytest
 
+from chatkit.models import AssistantMessageItem, StructuredInputItem, ThreadMetadata
 from chatkit.store import ConflictError
 from chatkit.store_checks import check_thread_store
-from chatkit.types import AssistantMessageItem, StructuredInputItem, ThreadMetadata
 from docs.examples.sqlite_thread_store import SQLiteThreadStore
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
@@ -38,6 +38,7 @@ class TestSqliteStore(ThreadStoreContract, AttachmentMetadataStoreContract):
         ctx = DEFAULT_CONTEXT
         thread_id = self.store.generate_thread_id(ctx)
         assert thread_id.startswith("thr_")
+        assert len(thread_id.removeprefix("thr_")) == 32
 
         thread = make_thread(thread_id=thread_id)
         assert self.store.generate_item_id("message", thread, ctx).startswith("msg_")

@@ -8,24 +8,27 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse
 
 from chatkit.actions import Action, ActionConfig
-from chatkit.fastapi import process_request
-from chatkit.server import ChatKitServer
-from chatkit.turns import RetryTurn, Turn, UserMessageTurn
-from chatkit.types import (
-    AssistantMessageContent,
+from chatkit.events import (
     AssistantMessageContentPartAdded,
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
-    ThreadMetadata,
     ThreadStreamEvent,
+)
+from chatkit.fastapi import process_request
+from chatkit.models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    ThreadMetadata,
     UserMessageTextContent,
     WidgetItem,
 )
-from chatkit.widgets import Button, Card, Text, WidgetRoot
+from chatkit.server import ChatKitServer
+from chatkit.turns import RetryTurn, Turn, UserMessageTurn
+from chatkit.widget_models import WidgetRoot
+from chatkit.widgets import Button, Card, Text
 from docs.examples.in_memory_thread_store import Context, InMemoryThreadStore
 
 _DEMO_PAGE = Path(__file__).with_name("quickstart.html")

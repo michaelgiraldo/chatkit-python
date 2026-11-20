@@ -12,7 +12,7 @@ DEFAULT_LOADING_BEHAVIOR: LoadingBehavior = "auto"
 class ActionConfig(BaseModel):
     """Configure a widget action and how the browser dispatches it."""
 
-    type: str
+    type: str = Field(min_length=1)
     payload: Any = None
     handler: Handler = DEFAULT_HANDLER
     loadingBehavior: LoadingBehavior = DEFAULT_LOADING_BEHAVIOR
@@ -20,10 +20,10 @@ class ActionConfig(BaseModel):
 
 
 class Action[TType: str, TPayload](BaseModel):
-    """Describe an action received from the client, with an optional typed payload."""
+    """Describe an action with a required name and an explicitly typed payload."""
 
-    type: TType = Field(default=TType, frozen=True)  # pyright: ignore
-    payload: TPayload = None  # pyright: ignore - default to None to allow no-payload actions
+    type: TType = Field(frozen=True, min_length=1)
+    payload: TPayload
 
     @classmethod
     def create(
@@ -33,22 +33,28 @@ class Action[TType: str, TPayload](BaseModel):
         loading_behavior: LoadingBehavior = DEFAULT_LOADING_BEHAVIOR,
         streaming: bool = True,
     ) -> ActionConfig:
-        actionType: Any = None
+        action_type = None
         anno = cls.model_fields["type"].annotation
         if get_origin(anno) is Literal:
             lits = get_args(anno)
             if len(lits) == 1 and isinstance(lits[0], str):
-                actionType = lits[0]
+                action_type = lits[0]
 
-        if actionType is None:
+        if action_type is None:
             raise TypeError(
                 "Cannot infer 'type' for this Action[...]. Do not call create() on generic Action."
             )
 
         return ActionConfig(
-            type=actionType,
+            type=action_type,
             payload=payload,
             handler=handler,
             loadingBehavior=loading_behavior,
             streaming=streaming,
         )
+
+
+class IncomingAction(Action[str, Any]):
+    """An action from the browser, where an absent payload means no arguments."""
+
+    payload: Any = None

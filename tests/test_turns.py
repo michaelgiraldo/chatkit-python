@@ -6,6 +6,38 @@ from pathlib import Path
 
 import pytest
 
+from chatkit.events import (
+    ErrorEvent,
+    ThreadItemAddedEvent,
+    ThreadItemDoneEvent,
+    ThreadStreamEvent,
+)
+from chatkit.models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    ClientToolCallItem,
+    InferenceOptions,
+    StructuredInputFreeform,
+    StructuredInputItem,
+    ThreadItem,
+    UserMessageInput,
+    UserMessageTextContent,
+)
+from chatkit.requests import (
+    StreamingReq,
+    StructuredInputAnswerSubmission,
+    StructuredInputSubmission,
+    ThreadAddClientToolOutputParams,
+    ThreadAddStructuredInputParams,
+    ThreadCreateParams,
+    ThreadRetryAfterItemParams,
+    ThreadsAddClientToolOutputReq,
+    ThreadsAddStructuredInputReq,
+    ThreadsCreateReq,
+    ThreadsRetryAfterItemReq,
+    ThreadsUpdateReq,
+    ThreadUpdateParams,
+)
 from chatkit.server import ChatKitServer, StreamingResult
 from chatkit.store import ConflictError
 from chatkit.turns import (
@@ -15,34 +47,6 @@ from chatkit.turns import (
     Turn,
     TurnOutcome,
     UserMessageTurn,
-)
-from chatkit.types import (
-    AssistantMessageContent,
-    AssistantMessageItem,
-    ClientToolCallItem,
-    ErrorEvent,
-    InferenceOptions,
-    StreamingReq,
-    StructuredInputAnswerSubmission,
-    StructuredInputFreeform,
-    StructuredInputItem,
-    StructuredInputSubmission,
-    ThreadAddClientToolOutputParams,
-    ThreadAddStructuredInputParams,
-    ThreadCreateParams,
-    ThreadItem,
-    ThreadItemAddedEvent,
-    ThreadItemDoneEvent,
-    ThreadRetryAfterItemParams,
-    ThreadsAddClientToolOutputReq,
-    ThreadsAddStructuredInputReq,
-    ThreadsCreateReq,
-    ThreadsRetryAfterItemReq,
-    ThreadStreamEvent,
-    ThreadsUpdateReq,
-    ThreadUpdateParams,
-    UserMessageInput,
-    UserMessageTextContent,
 )
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore

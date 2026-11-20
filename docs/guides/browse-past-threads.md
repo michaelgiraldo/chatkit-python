@@ -99,7 +99,7 @@ There are two ways to stop new user messages: temporarily lock a thread or perma
 
 
 ```python
-from chatkit.types import ActiveStatus, LockedStatus, ClosedStatus
+from chatkit.models import ActiveStatus, LockedStatus, ClosedStatus
 
 # lock (temporary pause)
 await store.patch_thread(

@@ -6,14 +6,7 @@ from datetime import datetime, timedelta
 import pytest
 from pydantic import AnyUrl
 
-from chatkit.store import (
-    AttachmentMetadataStore,
-    ConflictError,
-    NotFoundError,
-    PendingTurnItem,
-    ThreadStore,
-)
-from chatkit.types import (
+from chatkit.models import (
     AssistantMessageContent,
     AssistantMessageItem,
     ClientToolCallItem,
@@ -28,6 +21,13 @@ from chatkit.types import (
     UserMessageItem,
     UserMessageTextContent,
     WidgetItem,
+)
+from chatkit.store import (
+    AttachmentMetadataStore,
+    ConflictError,
+    NotFoundError,
+    PendingTurnItem,
+    ThreadStore,
 )
 from chatkit.widgets import Card, Col, Text
 from tests._types import RequestContext

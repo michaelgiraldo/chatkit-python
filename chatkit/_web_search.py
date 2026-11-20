@@ -3,16 +3,14 @@ from typing import Literal
 
 from openai.types.responses import ResponseFunctionWebSearch, ResponseStreamEvent
 
-from .types import (
-    SearchTask,
+from .events import (
     ThreadItemAddedEvent,
     ThreadItemUpdatedEvent,
     ThreadStreamEvent,
-    URLSource,
-    WorkflowItem,
     WorkflowTaskAdded,
     WorkflowTaskUpdated,
 )
+from .models import SearchTask, URLSource, WorkflowItem
 
 
 def _search_status(

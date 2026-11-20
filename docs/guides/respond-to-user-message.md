@@ -41,12 +41,8 @@ from datetime import datetime
 
 from chatkit.server import ChatKitServer
 from chatkit.turns import Turn
-from chatkit.types import (
-    AssistantMessageContent,
-    AssistantMessageItem,
-    ThreadItemDoneEvent,
-    ThreadStreamEvent,
-)
+from chatkit.events import ThreadItemDoneEvent, ThreadStreamEvent
+from chatkit.models import AssistantMessageContent, AssistantMessageItem
 
 
 class MyChatKitServer(ChatKitServer[MyRequestContext]):
@@ -148,6 +144,8 @@ thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `truncate_after` as short atomic operations in your database. Use
 `patch_thread` to edit saved fields, and yield the result of
 `ChatKitServer.update_thread` when a connected client should see an edit.
+For `load_thread_items(..., include_hidden=False)`, filter the model-only items
+before computing the page and its cursor.
 To support uploads, supply an
 `AttachmentMetadataStore` for records and an `AttachmentStore` for file
 operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-strategy)
@@ -243,7 +241,8 @@ items = list(reversed(items_page.data))
 ```python
 from agents import Runner
 
-from chatkit.agents import AgentContext, ThreadItemConverter, simple_to_agent_input
+from chatkit.agent_input import ThreadItemConverter, simple_to_agent_input
+from chatkit.agents import AgentContext
 
 
 # Option A (defaults):
@@ -280,7 +279,8 @@ from contextlib import aclosing
 
 from agents import ModelSettings, RunConfig, Runner
 
-from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import AgentContext, stream_agent_response
 from chatkit.turns import Turn, TurnOutcome, UserMessageTurn
 
 
@@ -355,7 +355,7 @@ from agents import (
     Runner,
 )
 from chatkit.agents import stream_agent_response
-from chatkit.types import ErrorEvent
+from chatkit.events import ErrorEvent
 
 result = Runner.run_streamed(
     assistant_agent,
@@ -381,7 +381,7 @@ To stream events from a server tool during the same turn, use `ctx.context.strea
 ```python
 from agents import RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
-from chatkit.types import ProgressUpdateEvent
+from chatkit.events import ProgressUpdateEvent
 
 
 @function_tool()
@@ -453,7 +453,8 @@ retrying the same message updates its existing record.
 ```python
 from contextlib import aclosing
 
-from chatkit.agents import simple_to_agent_input, stream_agent_response
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import stream_agent_response
 from chatkit.turns import RetryTurn, Turn, TurnOutcome, UserMessageTurn
 
 
