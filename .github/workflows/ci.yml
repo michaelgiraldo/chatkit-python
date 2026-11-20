@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   UV_FROZEN: "1"
 
@@ -109,3 +112,31 @@ jobs:
           for dependency in ("agents", "fastapi"):
               assert find_spec(dependency) is None, dependency
           PY
+
+      - name: Upload validated docs
+        if: >-
+          github.repository == 'michaelgiraldo/chatkit-python' &&
+          github.ref == 'refs/heads/codex/python-314-baseline' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy-docs:
+    name: Deploy docs
+    needs: ci
+    if: >-
+      github.repository == 'michaelgiraldo/chatkit-python' &&
+      github.ref == 'refs/heads/codex/python-314-baseline' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy validated docs
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

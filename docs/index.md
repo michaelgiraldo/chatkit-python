@@ -1,6 +1,6 @@
-# ChatKit Python SDK
+# Turnspan for ChatKit
 
-Welcome to the ChatKit Python SDK documentation. This overview page links to the most important places to get started.
+Turnspan is a maintained Python 3.14 fork of the OpenAI ChatKit backend SDK.
 
 - [Quick start](quickstart.md)
 - [Core concepts](concepts/threads.md)
@@ -8,6 +8,5 @@ Welcome to the ChatKit Python SDK documentation. This overview page links to the
 - [Prepare your app for production](guides/prepare-your-app-for-production.md)
 - [API reference](api/chatkit/index.md)
 - [ChatKit JS docs](https://openai.github.io/chatkit-js/)
-- [Release process / changelog](release.md)
-
-Use the navigation on the left to browse the full set of guides and API reference.
+- [Changelog](release.md)
+- [Upstream status](upstream-status.md)

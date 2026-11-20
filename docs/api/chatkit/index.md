@@ -1,4 +1,4 @@
-# Chatkit Python API Reference
+# Turnspan API Reference
 
 What you'll find here:
 

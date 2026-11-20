@@ -28,7 +28,7 @@ chatkit*.db
 
 uploads/
 
-# MkDocs build output
+# Documentation build output
 site/
 
 # Editors & OS
