@@ -19,6 +19,9 @@ The [upstream status page](docs/upstream-status.md) records review decisions.
 
 ## Develop Turnspan
 
+The fork's `main` branch is the maintained Turnspan branch. Its CI workflow
+also publishes the documentation after checks pass.
+
 Run `make sync` to install the locked development environment and `make check`
 to run formatting, lint, type checks, tests, and the strict docs build. Use
 `make test TESTS='tests/test_fastapi.py -k missing_thread'` for a focused run.
