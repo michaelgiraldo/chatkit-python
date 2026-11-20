@@ -238,6 +238,28 @@ async server, use an async driver or run the SQLite transactions in a worker.
 The example persists threads and items. Configure a separate attachment store
 if your app supports uploads.
 
+### Keep old and new timestamps sortable
+
+Turnspan writes timestamps with a UTC offset. Existing records may contain
+timestamps without an offset. Find the timezone used by the old writer and
+use it to interpret those records. For example, if the old writer ran in
+UTC, pass `UTC` as `legacy_timezone`.
+
+```python
+from datetime import UTC, datetime, tzinfo
+
+
+def normalize_created_at(value: datetime, legacy_timezone: tzinfo) -> datetime:
+    if value.utcoffset() is None:
+        value = value.replace(tzinfo=legacy_timezone)
+    return value.astimezone(UTC)
+```
+
+Use the same `(normalized_created_at, id)` ordering for history pages,
+cursor lookups, and retry truncation. If your database stores a separate
+sort key, apply the same normalization to its old and new keys. Check
+pages and retries that cross the boundary between legacy and newer items.
+
 ### Check your app's store
 
 Run `check_thread_store` in your app's test suite with a disposable database
