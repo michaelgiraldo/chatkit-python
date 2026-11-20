@@ -86,6 +86,8 @@ markdown_extensions:
   - codehilite
   - pymdownx.highlight
   - pymdownx.superfences
+  - pymdownx.snippets:
+      check_paths: true
 
 extra_css:
   - stylesheets/extra.css

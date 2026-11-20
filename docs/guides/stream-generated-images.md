@@ -187,14 +187,17 @@ image_tool = ImageGenerationTool(
 
 Pass the same `partial_images` value to `ResponseStreamConverter` (or your subclass). ChatKit uses it to compute a `progress` value (between 0 and 1) for each partial image update.
 
+Use the forwarding block below inside `respond`, with a converter such as
+`MyResponseStreamConverter(partial_images=3)`. The `aclosing` block closes the
+model stream when the user presses Stop or the client disconnects.
+
+<!-- fmt: off -->
+
 ```python
-async for event in stream_agent_response(
-    agent_context,
-    result,
-    converter=MyResponseStreamConverter(partial_images=3),
-):
-    yield event
+--8<-- "docs/examples/stream_image_previews.py"
 ```
+
+<!-- fmt: on -->
 
 During the run, ChatKit will emit:
 

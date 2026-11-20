@@ -9,8 +9,14 @@ import pytest
 from agents import RawResponsesStreamEvent, RunResultStreaming, StreamEvent
 from openai.types.responses import ResponseTextDeltaEvent
 
-from chatkit.agents import AgentContext, _merge_generators, stream_agent_response
+from chatkit.agents import (
+    AgentContext,
+    ResponseStreamConverter,
+    _merge_generators,
+    stream_agent_response,
+)
 from chatkit.types import Page, ThreadMetadata
+from docs.examples.stream_image_previews import stream_image_previews
 
 
 @pytest.mark.parametrize("exit", ["close", "cancel", "error", "exhaustion"])
@@ -71,8 +77,10 @@ def _agent_context() -> AgentContext:
 
 
 @pytest.mark.parametrize("exit", ["close", "cancel"])
+@pytest.mark.parametrize("source", ["adapter", "image_guide"])
 async def test_interrupting_agent_response_cancels_runner_before_closing_events(
     exit: Literal["close", "cancel"],
+    source: Literal["adapter", "image_guide"],
 ):
     entered = asyncio.Event()
     runner_cancelled = asyncio.Event()
@@ -109,10 +117,15 @@ async def test_interrupting_agent_response_cancels_runner_before_closing_events(
             events_closed.set()
 
     result.stream_events.side_effect = model_events
-    async with (
-        asyncio.timeout(2),
-        aclosing(stream_agent_response(_agent_context(), result)) as events,
-    ):
+    context = _agent_context()
+    stream = (
+        stream_agent_response(context, result)
+        if source == "adapter"
+        else stream_image_previews(
+            context, result, ResponseStreamConverter(partial_images=3)
+        )
+    )
+    async with asyncio.timeout(2), aclosing(stream) as events:
         if exit == "close":
             assert (await anext(events)).type == "thread.item.updated"
         else:
