@@ -24,7 +24,7 @@ from chatkit.types import ProgressUpdateEvent
 
 @function_tool()
 async def ingest_files(ctx: RunContextWrapper[AgentContext], paths: list[str]):
-    await ctx.context.stream(ProgressUpdateEvent(icon="upload", text="Uploading..."))
+    await ctx.context.stream(ProgressUpdateEvent(icon="document", text="Uploading..."))
     await upload(paths)
 
     await ctx.context.stream(
@@ -39,15 +39,24 @@ async def ingest_files(ctx: RunContextWrapper[AgentContext], paths: list[str]):
 
 ### From custom pipelines
 
-If you are not using the Agents SDK, yield `ProgressUpdateEvent` directly from your `respond` or `action` methods while your backend works:
+Custom pipelines can yield `ProgressUpdateEvent` directly from `respond` or
+`action`. This example uses your app's `RequestContext`, `search_tickets`, and
+`stream_summary` helpers. `stream_summary` yields ChatKit events.
 
 ```python
-async def respond(...):
-    yield ProgressUpdateEvent(icon="search", text="Searching tickets...")
-    results = await search_tickets()
+from collections.abc import AsyncIterator
 
-    yield ProgressUpdateEvent(icon="code", text="Generating summary...")
-    yield from await stream_summary(results)
+from chatkit.turns import Turn
+from chatkit.types import ProgressUpdateEvent, ThreadStreamEvent
+
+
+async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+    yield ProgressUpdateEvent(icon="search", text="Searching tickets...")
+    results = await search_tickets(turn.context)
+
+    yield ProgressUpdateEvent(icon="square-code", text="Generating summary...")
+    async for event in stream_summary(results):
+        yield event
 ```
 
 Use short, action-oriented messages and throttle updates to meaningful stages instead of every percent to avoid noisy streams.
@@ -63,7 +72,13 @@ Client effects are ephemeral: they stream immediately to ChatKit.js, trigger you
 Yield client effects directly from the `respond` or `action` method:
 
 ```python
-async def respond(...):
+from collections.abc import AsyncIterator
+
+from chatkit.turns import Turn
+from chatkit.types import ClientEffectEvent, ThreadStreamEvent
+
+
+async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
     yield ClientEffectEvent(
         name="highlight_text",
         data={"index": 142, "length": 35},
@@ -157,8 +172,14 @@ const chatkit = useChatKit({
 
 ### Stream and resume
 
-In `respond`, stream via `stream_agent_response` as usual. ChatKit emits a pending client tool call item; the frontend runs your registered client tool, posts the output back, and the server continues the run.
+In `respond(self, turn)`, use `turn.thread` and `turn.context` to construct
+your `AgentContext`, then stream via `stream_agent_response`. ChatKit emits a
+pending client tool call, and the frontend posts the tool's output back.
 
-When the client posts the tool result, ChatKit stores it as a `ClientToolCallItem`. The continued inference after the client tool call handler returns the result feeds both the call and its output back to the model through `ThreadItemConverter.client_tool_call_to_input`, which emits a `function_call` plus matching `function_call_output` so the model sees the browser-provided context.
+ChatKit saves the tool result before calling `respond` again. On that turn,
+`turn.input` is a `ClientToolTurn`, and `turn.input.tool_call.output` holds the
+client's result. When you convert the saved thread history,
+`ThreadItemConverter.client_tool_call_to_input` supplies the model with both
+the call and the matching output.
 
 

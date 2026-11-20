@@ -7,6 +7,7 @@ from pydantic import TypeAdapter
 from chatkit.actions import Action
 from chatkit.server import ChatKitServer, NonStreamingResult, StreamingResult
 from chatkit.store import AttachmentStore
+from chatkit.turns import Turn
 from chatkit.types import (
     AudioInput,
     FeedbackKind,
@@ -14,7 +15,6 @@ from chatkit.types import (
     ThreadMetadata,
     ThreadStreamEvent,
     TranscriptionResult,
-    UserMessageItem,
     WidgetItem,
 )
 from tests._types import RequestContext
@@ -38,9 +38,7 @@ async def decode_streaming_result(
 
 @contextmanager
 def make_server(
-    responder: Callable[
-        [ThreadMetadata, UserMessageItem | None, Any], AsyncIterator[ThreadStreamEvent]
-    ]
+    responder: Callable[[Turn[RequestContext]], AsyncIterator[ThreadStreamEvent]]
     | None = None,
     handle_feedback: Callable[[str, list[str], FeedbackKind, Any], None] | None = None,
     action_callback: Callable[
@@ -53,7 +51,7 @@ def make_server(
         SyncCustomActionResponse,
     ]
     | None = None,
-    file_store: AttachmentStore | None = None,
+    attachment_store: AttachmentStore[RequestContext] | None = None,
     transcribe_callback: Callable[[AudioInput, Any], TranscriptionResult] | None = None,
 ):
     global server_id
@@ -62,9 +60,10 @@ def make_server(
     # Keep the shared in-memory database from being deleted when the last connection is closed
     db = sqlite3.connect(db_path, uri=True)
 
-    class TestChatKitServer(ChatKitServer):
+    class TestChatKitServer(ChatKitServer[RequestContext]):
         def __init__(self):
-            super().__init__(SQLiteStore(db_path), file_store)
+            store = SQLiteStore(db_path)
+            super().__init__(store, attachment_store, attachment_metadata_store=store)
 
         def action(
             self,
@@ -89,14 +88,11 @@ def make_server(
             return sync_action_callback(thread, action, sender, context)
 
         def respond(
-            self,
-            thread: ThreadMetadata,
-            input_user_message: UserMessageItem | None,
-            context: Any,
+            self, turn: Turn[RequestContext]
         ) -> AsyncIterator[ThreadStreamEvent]:
             if responder is None:
                 return self._empty_responder()
-            return responder(thread, input_user_message, context)
+            return responder(turn)
 
         async def _empty_responder(self) -> AsyncIterator[ThreadStreamEvent]:
             return

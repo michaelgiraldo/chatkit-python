@@ -9,6 +9,7 @@ from starlette.requests import ClientDisconnect
 from starlette.types import Message, Scope
 
 from chatkit.server import NonStreamingResult, StreamingResult
+from chatkit.turns import Turn, UserMessageTurn
 from chatkit.types import (
     AssistantMessageContent,
     AssistantMessageContentPartTextDelta,
@@ -23,13 +24,11 @@ from chatkit.types import (
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
-    ThreadMetadata,
     ThreadsAddUserMessageReq,
     ThreadsCreateReq,
     ThreadsGetByIdReq,
     ThreadStreamEvent,
     UserMessageInput,
-    UserMessageItem,
     UserMessageTextContent,
 )
 from docs.examples.chatkit_response import ChatKitStreamingResponse
@@ -51,11 +50,10 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
     finalized = asyncio.Event()
     streamed: list[ThreadStreamEvent] = []
 
-    async def respond(
-        thread: ThreadMetadata, message: UserMessageItem | None, context: RequestContext
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        assert message is not None
-        if message.content == [UserMessageTextContent(text="Continue")]:
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        assert isinstance(turn.input, UserMessageTurn)
+        if turn.input.message.content == [UserMessageTextContent(text="Continue")]:
             yield ThreadItemDoneEvent(
                 item=AssistantMessageItem(
                     id="next-reply",

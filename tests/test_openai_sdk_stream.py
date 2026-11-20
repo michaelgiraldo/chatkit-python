@@ -14,6 +14,7 @@ from agents import (
 from openai import AsyncOpenAI
 
 from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
+from chatkit.turns import Turn, UserMessageTurn
 from chatkit.types import (
     AssistantMessageContentPartAnnotationAdded,
     AssistantMessageContentPartTextDelta,
@@ -28,14 +29,12 @@ from chatkit.types import (
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
-    ThreadMetadata,
     ThreadsAddUserMessageReq,
     ThreadsCreateReq,
     ThreadsGetByIdReq,
     ThreadStreamEvent,
     URLSource,
     UserMessageInput,
-    UserMessageItem,
     UserMessageTextContent,
 )
 from tests._types import RequestContext
@@ -192,18 +191,16 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
         completed_ids: list[str | None] = []
 
         async def respond(
-            thread: ThreadMetadata,
-            message: UserMessageItem | None,
-            request_context: RequestContext,
+            turn: Turn[RequestContext],
         ) -> AsyncIterator[ThreadStreamEvent]:
             nonlocal response_id
-            assert message is not None
+            assert isinstance(turn.input, UserMessageTurn)
             context = AgentContext(
-                thread=thread, store=server.store, request_context=request_context
+                thread=turn.thread, store=server.store, request_context=turn.context
             )
             result = Runner.run_streamed(
                 agent,
-                await simple_to_agent_input(message),
+                await simple_to_agent_input(turn.input.message),
                 context=context,
                 run_config=RunConfig(tracing_disabled=True),
                 previous_response_id=response_id,
@@ -311,17 +308,15 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         )
 
         async def respond(
-            thread: ThreadMetadata,
-            message: UserMessageItem | None,
-            request_context: RequestContext,
+            turn: Turn[RequestContext],
         ) -> AsyncIterator[ThreadStreamEvent]:
-            assert message is not None
+            assert isinstance(turn.input, UserMessageTurn)
             context = AgentContext(
-                thread=thread, store=server.store, request_context=request_context
+                thread=turn.thread, store=server.store, request_context=turn.context
             )
             result = Runner.run_streamed(
                 agent,
-                await simple_to_agent_input(message),
+                await simple_to_agent_input(turn.input.message),
                 context=context,
                 run_config=RunConfig(tracing_disabled=True),
             )

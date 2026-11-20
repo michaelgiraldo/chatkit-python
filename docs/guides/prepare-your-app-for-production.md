@@ -158,7 +158,7 @@ Separately from your own telemetry, the ChatKit iframe sends **its own outbound 
 On the **backend**, you should still capture basic logs around your ChatKit endpoint so you can correlate client telemetry with server behavior:
 
 - Incoming HTTP request (path, method, user id, thread id).
-- Calls to `ChatKitServer.process` and your `Store` implementation.
+- Calls to `ChatKitServer.process` and your `ThreadStore` implementation.
 - Outbound calls to OpenAI or other model providers.
 - Any errors raised from tools or your own business logic.
 
@@ -186,7 +186,8 @@ The Python SDK expects your own app to handle authentication; `ChatKitServer` wo
 2. Build a `RequestContext` that includes the authenticated user id, org/tenant, and any roles or scopes.
 3. Pass that context into `server.process`.
 
-This FastAPI example uses [chatkit_response.py](../examples/chatkit_response.py)
+This FastAPI example assumes your authentication middleware supplies
+`request.user`. It uses [chatkit_response.py](../examples/chatkit_response.py)
 from the quickstart. Save it alongside your endpoint module.
 
 ```python
@@ -197,15 +198,13 @@ from chatkit_response import ChatKitStreamingResponse
 
 
 def get_current_user(request: Request) -> str:
-    # Replace this with your real auth: session cookies, JWTs, etc.
-    user_id = request.headers.get("x-user-id")
-    if not user_id:
+    if not request.user.is_authenticated:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return user_id
+    return request.user.identity
 
 
 app = FastAPI()
-store = MyStore(...)
+store = MyThreadStore(...)
 server = MyChatKitServer(store)
 
 
@@ -221,13 +220,14 @@ async def chatkit_endpoint(
     return Response(content=result.json, media_type="application/json")
 ```
 
-Inside your `Store` and tools, enforce per‑user or per‑tenant access by checking `context.user_id` (and any other identifiers you include) before returning or mutating data.
+Enforce per-user or per-tenant access in your thread store, attachment stores,
+and tools. Check the authenticated request context before returning or changing data.
 
 ### Handle PII and data retention
 
 Because ChatKit threads and items can contain user text, attachments, and tool output:
 
-- **Decide what you persist** and for how long. Implement retention policies in your `Store` (for example, delete threads older than N days).
+- **Decide what you persist** and for how long. Apply retention policies to threads, items, and attachments.
 - **Avoid storing unnecessary PII** in thread metadata or tool return values.
 - **Encrypt data at rest** using your database’s built‑in features or application‑level encryption where needed.
 

@@ -16,6 +16,13 @@ from chatkit.store import (
     StoreItemType,
     default_generate_id,
 )
+from chatkit.turns import (
+    ClientToolTurn,
+    RetryTurn,
+    StructuredInputTurn,
+    Turn,
+    UserMessageTurn,
+)
 from chatkit.types import (
     AssistantMessageContent,
     AssistantMessageContentPartTextDelta,
@@ -146,9 +153,8 @@ class InMemoryFileStore(AttachmentStore):
 
 
 async def test_stream_cancellation_persists_pending_assistant_message_and_hidden_context():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemAddedEvent(
             item=AssistantMessageItem(
                 id="assistant-message-pending",
@@ -217,9 +223,8 @@ async def test_stream_cancellation_persists_pending_assistant_message_and_hidden
 
 
 async def test_stream_cancellation_does_not_persist_pending_empty_assistant_message():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemAddedEvent(
             item=AssistantMessageItem(
                 id="assistant-message-pending",
@@ -284,9 +289,8 @@ async def test_workflow_task_not_duplicated_on_done_event():
     origin item that was streamed.
     """
 
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         workflow_item = WorkflowItem(
             id="workflow-item",
             created_at=datetime.now(),
@@ -341,11 +345,10 @@ async def test_flows_context_to_responder():
     responder_context = None
     add_feedback_context = None
 
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         nonlocal responder_context
-        responder_context = context
+        responder_context = turn.context
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
                 id="msg_1",
@@ -400,7 +403,7 @@ async def test_flows_context_to_responder():
 
 async def test_creates_thread():
     async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
+        _turn: Turn[RequestContext],
     ) -> AsyncIterator[ThreadStreamEvent]:
         return
         yield
@@ -434,9 +437,8 @@ async def test_creates_thread():
 
 
 async def test_saves_thread_title():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         thread.title = "Updated title"
         return
         yield
@@ -466,9 +468,8 @@ async def test_saves_thread_title():
 
 
 async def test_saves_thread_metadata():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         thread.metadata["test_key"] = "test_value"
         return
         yield
@@ -495,9 +496,8 @@ async def test_saves_thread_metadata():
 
 
 async def test_saves_thread_locked_fields():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         thread.status = LockedStatus(reason="Because")
         return
         yield
@@ -526,9 +526,8 @@ async def test_saves_thread_locked_fields():
 
 
 async def test_saves_allowed_image_domains_and_streams_thread_updated():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         thread.allowed_image_domains = ["example.com", "images.example.com"]
         return
         yield
@@ -558,9 +557,8 @@ async def test_saves_allowed_image_domains_and_streams_thread_updated():
 
 
 async def test_omits_unset_allowed_image_domains_in_created_and_updated_json_events():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         thread.title = "Updated title"
         return
         yield
@@ -598,10 +596,8 @@ async def test_omits_unset_allowed_image_domains_in_created_and_updated_json_eve
 
 
 async def test_emits_thread_updated_mid_stream_and_persists():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        # First assistant message
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
                 id="assistant_a",
@@ -674,10 +670,9 @@ async def test_emits_thread_updated_mid_stream_and_persists():
 
 
 async def test_respond_with_tool_call():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        if isinstance(input, UserMessageItem):
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        if isinstance(turn.input, UserMessageTurn):
             yield ThreadItemDoneEvent(
                 item=ClientToolCallItem(
                     id="msg_1",
@@ -688,7 +683,7 @@ async def test_respond_with_tool_call():
                     thread_id=thread.id,
                 ),
             )
-        elif input is None:
+        elif isinstance(turn.input, ClientToolTurn):
             yield ThreadItemDoneEvent(
                 item=AssistantMessageItem(
                     id="msg_2",
@@ -745,9 +740,8 @@ async def test_respond_with_tool_call():
 
 
 async def test_respond_with_tool_status():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ProgressUpdateEvent(text="Tool status")
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
@@ -814,9 +808,8 @@ async def test_list_threads_response():
 
 
 async def test_list_items_response():
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         for i in range(25):
             yield ThreadItemDoneEvent(
                 item=UserMessageItem(
@@ -867,11 +860,8 @@ async def test_list_items_response():
 async def test_calls_action():
     actions = []
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=WidgetItem(
                 id="widget_1",
@@ -956,12 +946,9 @@ async def test_calls_action():
 
 
 async def test_add_structured_input_replaces_item_with_custom_answer_and_resumes_response():
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        if input is not None:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        if isinstance(turn.input, UserMessageTurn):
             yield ThreadItemDoneEvent(
                 item=StructuredInputItem(
                     id="si_1",
@@ -985,6 +972,7 @@ async def test_add_structured_input_replaces_item_with_custom_answer_and_resumes
             )
             return
 
+        assert isinstance(turn.input, StructuredInputTurn)
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
                 id="msg_after_structured_input",
@@ -1057,12 +1045,9 @@ async def test_add_structured_input_replaces_item_with_custom_answer_and_resumes
 
 
 async def test_add_structured_input_treats_omitted_answers_as_skipped():
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        if input is not None:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        if isinstance(turn.input, UserMessageTurn):
             yield ThreadItemDoneEvent(
                 item=StructuredInputItem(
                     id="si_1",
@@ -1129,12 +1114,9 @@ async def test_add_structured_input_treats_omitted_answers_as_skipped():
 
 
 async def test_add_structured_input_ignores_unknown_answer_ids():
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        if input is not None:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        if isinstance(turn.input, UserMessageTurn):
             yield ThreadItemDoneEvent(
                 item=StructuredInputItem(
                     id="si_1",
@@ -1195,11 +1177,8 @@ async def test_add_structured_input_ignores_unknown_answer_ids():
 
 
 async def test_add_structured_input_truncates_extra_single_choice_values():
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=StructuredInputItem(
                 id="si_1",
@@ -1272,11 +1251,8 @@ async def test_add_structured_input_truncates_extra_single_choice_values():
 async def test_calls_action_sync():
     sync_actions = []
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=WidgetItem(
                 id="widget_1",
@@ -1364,11 +1340,8 @@ async def test_add_feedback():
     def handle_feedback(thread_id, item_ids, feedback, context):
         called.append((thread_id, item_ids, feedback, context))
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
                 id="assistant_msg_1",
@@ -1470,7 +1443,7 @@ async def test_create_file():
     file_name = "test-file-name"
     file_content_type = "text/plain"
 
-    with make_server(file_store=store) as server:
+    with make_server(attachment_store=store) as server:
         result = await server.process_non_streaming(
             AttachmentsCreateReq(
                 params=AttachmentCreateParams(
@@ -1503,7 +1476,7 @@ async def test_create_image_file():
     file_name = "test-file-name"
     file_content_type = "image/png"
 
-    with make_server(file_store=store) as server:
+    with make_server(attachment_store=store) as server:
         result = await server.process_non_streaming(
             AttachmentsCreateReq(
                 params=AttachmentCreateParams(
@@ -1542,7 +1515,9 @@ async def test_user_message_attachment_metadata_not_serialized():
     )
 
     with make_server() as server:
-        await server.store.save_attachment(attachment, DEFAULT_CONTEXT)
+        metadata_store = server.attachment_metadata_store
+        assert metadata_store is not None
+        await metadata_store.save_attachment(attachment, DEFAULT_CONTEXT)
         events = await server.process_streaming(
             ThreadsCreateReq(
                 params=ThreadCreateParams(
@@ -1580,7 +1555,9 @@ async def test_user_message_attachment_thread_id_persisted_on_thread_create():
 
     with make_server() as server:
         # Attachment exists before a thread exists, so it may not have a thread_id yet.
-        await server.store.save_attachment(attachment, DEFAULT_CONTEXT)
+        metadata_store = server.attachment_metadata_store
+        assert metadata_store is not None
+        await metadata_store.save_attachment(attachment, DEFAULT_CONTEXT)
 
         events = await server.process_streaming(
             ThreadsCreateReq(
@@ -1597,7 +1574,7 @@ async def test_user_message_attachment_thread_id_persisted_on_thread_create():
 
         # After the user message is saved, the attachment record should be updated
         # to reflect its thread association.
-        stored = await server.store.load_attachment(attachment.id, DEFAULT_CONTEXT)
+        stored = await metadata_store.load_attachment(attachment.id, DEFAULT_CONTEXT)
         assert stored.thread_id == thread.id
 
 
@@ -1624,7 +1601,9 @@ async def test_user_message_attachment_thread_id_persisted_on_add_user_message()
             name="test.txt",
             thread_id=None,
         )
-        await server.store.save_attachment(attachment, DEFAULT_CONTEXT)
+        metadata_store = server.attachment_metadata_store
+        assert metadata_store is not None
+        await metadata_store.save_attachment(attachment, DEFAULT_CONTEXT)
 
         # Attach the pre-created attachment to a message in an existing thread.
         await server.process_streaming(
@@ -1640,7 +1619,7 @@ async def test_user_message_attachment_thread_id_persisted_on_add_user_message()
             )
         )
 
-        stored = await server.store.load_attachment(attachment.id, DEFAULT_CONTEXT)
+        stored = await metadata_store.load_attachment(attachment.id, DEFAULT_CONTEXT)
         assert stored.thread_id == thread.id
 
 
@@ -1661,7 +1640,7 @@ async def test_create_file_without_filestore():
 async def test_delete_file():
     store = InMemoryFileStore()
     store.files["test-file-id"] = {"id": "test-file-id"}
-    with make_server(file_store=store) as server:
+    with make_server(attachment_store=store) as server:
         await server.process_non_streaming(
             AttachmentsDeleteReq(
                 params=AttachmentDeleteParams(attachment_id="test-file-id")
@@ -1839,11 +1818,8 @@ async def test_delete_thread():
 async def test_thread_item_removed_event_removes_item():
     removed_id = "msg_to_remove"
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=UserMessageItem(
                 id=removed_id,
@@ -1884,9 +1860,7 @@ async def test_thread_item_removed_event_removes_item():
 
 async def test_raising_in_responder_yields_error_event():
     async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
+        _turn: Turn[RequestContext],
     ) -> AsyncIterator[ThreadStreamEvent]:
         raise ValueError("Test error")
         yield
@@ -1928,12 +1902,8 @@ async def test_raising_in_responder_yields_error_event():
 async def test_thread_item_replaced_event_replaces_item():
     original_id = "msg_to_replace"
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        # First add an item
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=UserMessageItem(
                 id=original_id,
@@ -1994,12 +1964,8 @@ async def test_thread_item_replaced_event_with_widget():
     original_widget = Card(children=[Text(value="Original widget content")])
     replacement_widget = Card(children=[Text(value="Replaced widget content")])
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        # First add a widget item
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=WidgetItem(
                 id=widget_id,
@@ -2067,12 +2033,9 @@ async def test_thread_item_replaced_event_with_widget():
 async def test_retry_after_item():
     responder_calls = []
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        responder_calls.append(input)
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        responder_calls.append(turn.input)
 
         if len(responder_calls) == 1:
             # First response - return an assistant message
@@ -2142,11 +2105,11 @@ async def test_retry_after_item():
         assert retry_events[1].item.content[0].type == "output_text"
         assert retry_events[1].item.content[0].text == "Retried response"
 
-        # Verify the responder was called twice with the same user message
-        assert len(responder_calls) == 2
-        assert responder_calls[0] == responder_calls[1]
-        assert responder_calls[0].type == "user_message"
-        assert responder_calls[0].content[0].text == "Hello, world!"
+        first, retried = responder_calls
+        assert isinstance(first, UserMessageTurn)
+        assert isinstance(retried, RetryTurn)
+        assert first.message == retried.message
+        assert first.message.content[0].text == "Hello, world!"
 
         # Verify the assistant response was replaced in storage
         list_result_after = await server.process_non_streaming(
@@ -2164,11 +2127,8 @@ async def test_retry_after_item():
 
 
 async def test_retry_after_item_invalid_item():
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
                 id="assistant_msg_1",
@@ -2214,20 +2174,17 @@ async def test_retry_after_item_invalid_item():
 async def test_retry_after_item_with_multiple_messages():
     responder_calls = []
 
-    async def responder(
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: Any,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        responder_calls.append(input)
-        assert input is not None
-        assert input.type == "user_message"
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        trigger = turn.input
+        assert isinstance(trigger, (UserMessageTurn, RetryTurn))
+        responder_calls.append(trigger)
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
                 id=f"assistant_msg_{len(responder_calls)}",
                 content=[
                     AssistantMessageContent(
-                        text=f"Response to: {input.content[0].text}"
+                        text=f"Response to: {trigger.message.content[0].text}"
                     )
                 ],
                 created_at=datetime.now(),
@@ -2289,8 +2246,9 @@ async def test_retry_after_item_with_multiple_messages():
 
         # Verify retry used the second user message
         assert len(responder_calls) == 3  # Original 2 + 1 retry
-        assert responder_calls[2].type == "user_message"
-        assert responder_calls[2].content[0].text == "Second message"
+        retried = responder_calls[2]
+        assert isinstance(retried, RetryTurn)
+        assert retried.message.content[0].text == "Second message"
 
         # Verify only the last assistant response was removed and regenerated
         list_result_after = await server.process_non_streaming(
@@ -2320,12 +2278,12 @@ async def test_retry_after_item_with_multiple_messages():
 async def test_threads_create_passes_tools_to_responder():
     tool_choice = ToolChoice(id="web_search")
 
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        assert input is not None
-        assert input.inference_options.tool_choice is not None
-        assert input.inference_options.tool_choice.id == tool_choice.id
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        assert isinstance(turn.input, UserMessageTurn)
+        message = turn.input.message
+        assert message.inference_options.tool_choice is not None
+        assert message.inference_options.tool_choice.id == tool_choice.id
 
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
@@ -2391,12 +2349,12 @@ async def test_retry_after_item_passes_tools_to_responder():
 async def test_threads_add_message_passes_tools_to_responder():
     tool_choice = ToolChoice(id="retrieval")
 
-    async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        assert input is not None
-        assert input.inference_options.tool_choice is not None
-        assert input.inference_options.tool_choice.id == tool_choice.id
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        thread = turn.thread
+        assert isinstance(turn.input, UserMessageTurn)
+        message = turn.input.message
+        assert message.inference_options.tool_choice is not None
+        assert message.inference_options.tool_choice.id == tool_choice.id
 
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
@@ -2459,9 +2417,8 @@ async def test_custom_id_generators_on_server():
             return f"{item_type}_custom_{self.counter}_{thread.id}"
 
     async def responder(
-        thread: ThreadMetadata, input: UserMessageItem | None, context: Any
+        _turn: Turn[RequestContext],
     ) -> AsyncIterator[ThreadStreamEvent]:
-        # Emit a tool call to later verify tool_call_output id generation
         return
         yield
 

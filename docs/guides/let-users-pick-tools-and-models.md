@@ -6,7 +6,7 @@ At a high level:
 
 - `composer.tools` controls which tools appear in the composer tool menu (the plus button).
 - `composer.models` controls which models appear in the model picker in the composer below the text input.
-- The selected tool and model arrive as `inference_options` on the `UserMessageItem` in your `respond` method.
+- The selected tool and model arrive on the message in a `UserMessageTurn` or `RetryTurn`.
 
 ## Configure tools in the composer
 
@@ -67,14 +67,16 @@ The selected model id flows through to your server so you can route requests to 
 On the server, `UserMessageItem.inference_options` carries the tool choice and model id for that turn.
 
 ```python
+from chatkit.turns import RetryTurn, Turn, UserMessageTurn
+
+
 class MyChatKitServer(ChatKitServer[RequestContext]):
     async def respond(
-        self,
-        thread: ThreadMetadata,
-        input_user_message: UserMessageItem | None,
-        context: RequestContext,
+        self, turn: Turn[RequestContext]
     ) -> AsyncIterator[ThreadStreamEvent]:
-        options = input_user_message and input_user_message.inference_options
+        options = None
+        if isinstance(turn.input, (UserMessageTurn, RetryTurn)):
+            options = turn.input.message.inference_options
 
         model = options.model if options and options.model else "gpt-6-luna"
         tool_choice = (

@@ -48,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, SkipValidation, TypeAdapter
 
 from .logger import logger
 from .server import _close_stream, stream_widget
-from .store import Store, StoreItemType
+from .store import StoreItemType, ThreadStore
 from .types import (
     Annotation,
     AssistantMessageContent,
@@ -110,7 +110,7 @@ class AgentContext[TContext](BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     thread: ThreadMetadata
-    store: Annotated[Store[TContext], SkipValidation]
+    store: Annotated[ThreadStore[TContext], SkipValidation]
     request_context: TContext
     previous_response_id: str | None = None
     client_tool_call: ClientToolCall | None = None

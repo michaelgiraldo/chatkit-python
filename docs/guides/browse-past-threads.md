@@ -32,54 +32,46 @@ Threads start untitled. Give them short, descriptive titles so the history list 
 
 ### Set a title directly
 
-Set `thread.title` on the server and persist it with your store:
+Set `turn.thread.title` in your responder:
 
 ```python
 from chatkit.server import ChatKitServer
+from chatkit.turns import Turn
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
-    async def respond(...):
+    async def respond(self, turn: Turn[RequestContext]):
         ...
-        if not thread.title:
-            thread.title = "Order #1234"
-            await self.store.save_thread(thread, context=context)
+        if not turn.thread.title:
+            turn.thread.title = "Order #1234"
 ```
 
-ChatKit will emit a `ThreadUpdatedEvent` so connected clients update the title in their history views.
+ChatKit persists the changed thread and emits a `ThreadUpdatedEvent` so connected clients update the title in their history views.
 
 ### Auto-generate a title after the first turn
 
 Generate a concise title after the first assistant turn once you have enough context. Skip if the thread already has a title or if there isn’t enough content to summarize.
 
 ```python
+from contextlib import aclosing
+
+from chatkit.agents import stream_agent_response
+from chatkit.turns import Turn
+
+
 class MyChatKitServer(ChatKitServer[RequestContext]):
-    async def respond(...):
-        updating_thread_title = asyncio.create_task(
-            self._maybe_update_thread_title(thread, context)
-        )
+    async def respond(self, turn: Turn[RequestContext]):
+        agent_context, result = start_agent_run(turn)
 
-        # Stream your main response
-        async for event in stream_agent_response(agent_context, result):
-            yield event
+        async with aclosing(stream_agent_response(agent_context, result)) as events:
+            async for event in events:
+                yield event
 
-        # Await so the title update streams back as a ThreadUpdatedEvent
-        await updating_thread_title
-
-    async def _maybe_update_thread_title(
-        self, thread: ThreadMetadata, context: RequestContext
-    ) -> None:
-        if thread.title is not None:
-            return
-        items = await self.store.load_thread_items(
-            thread.id,
-            after=None,
-            limit=6,
-            order="desc",
-            context=context,
-        )
-        thread.title = await generate_short_title(items.data)  # your model call
-        await self.store.save_thread(thread, context=context)
+        if turn.thread.title is None:
+            items = await self.store.load_thread_items(
+                turn.thread.id, after=None, limit=6, order="desc", context=turn.context
+            )
+            turn.thread.title = await generate_short_title(list(reversed(items.data)))
 ```
 
 Use any model call you like for `generate_short_title`: run a tiny Agent, a simple completion, or your own heuristic. Keep titles brief (for example, 3–6 words).
@@ -125,13 +117,13 @@ You can also update the thread status from a custom client-facing endpoint that 
 Thread status only affects the composer UI; `ChatKitServer` does not automatically reject actions, tool calls, or imperative message adds. Your integration should short-circuit handlers when a thread is disabled:
 
 ```python
-class MyChatKitServer(...):
-    async def respond(thread, input_user_message, context):
-        if thread.status.type in {"locked", "closed"}:
+class MyChatKitServer(ChatKitServer[RequestContext]):
+    async def respond(self, turn: Turn[RequestContext]):
+        if turn.thread.status.type in {"locked", "closed"}:
             return
         # normal processing
 
-    async def action(thread, action, sender, context):
+    async def action(self, thread, action, sender, context):
         if thread.status.type in {"locked", "closed"}:
             return
         # normal processing

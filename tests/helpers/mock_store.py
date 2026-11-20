@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from chatkit.store import NotFoundError, Store
+from chatkit.store import AttachmentMetadataStore, NotFoundError, ThreadStore
 from chatkit.types import (
     Attachment,
     Page,
@@ -28,7 +28,7 @@ class AttachmentData(BaseModel):
     attachment: Attachment
 
 
-class SQLiteStore(Store[RequestContext]):
+class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestContext]):
     def __init__(self, db_path: str | None = None):
         self.db_path = (
             db_path or Path(__file__).parent / f"chatkit_v{SCHEMA_VERSION}.db"
@@ -108,29 +108,30 @@ class SQLiteStore(Store[RequestContext]):
         order: str,
         context: RequestContext,
     ) -> Page[ThreadItem]:
+        if order not in ("asc", "desc"):
+            raise ValueError(f"Unsupported sort order: {order}")
         with self._create_connection() as conn:
             created_after: str | None = None
             if after:
-                created_of_after_thread = conn.execute(
-                    "SELECT created_at FROM items WHERE id = ? AND user_id = ?",
-                    (after, context.user_id),
+                cursor_row = conn.execute(
+                    "SELECT created_at FROM items WHERE id = ? AND thread_id = ? AND user_id = ?",
+                    (after, thread_id, context.user_id),
                 ).fetchone()
-                if created_of_after_thread is None:
+                if cursor_row is None:
                     raise NotFoundError(f"Item {after} not found")
-                created_after = created_of_after_thread[0]
+                created_after = cursor_row[0]
 
             query = """
                 SELECT id, data FROM items
                 WHERE thread_id = ? AND user_id = ?
             """
             params: list[Any] = [thread_id, context.user_id]
-            if created_after:
-                query += (
-                    " AND created_at > ?" if order == "asc" else " AND created_at < ?"
-                )
-                params.append(created_after)
+            if created_after is not None:
+                comparison = ">" if order == "asc" else "<"
+                query += f" AND (created_at, id) {comparison} (?, ?)"
+                params.extend((created_after, after))
 
-            query += f" ORDER BY created_at {order} LIMIT ?"
+            query += f" ORDER BY created_at {order}, id {order} LIMIT ?"
             params.append(limit + 1)
 
             items_cursor = conn.execute(query, params)
@@ -149,7 +150,11 @@ class SQLiteStore(Store[RequestContext]):
     ) -> None:
         with self._create_connection() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO files (id, user_id, data) VALUES (?, ?, ?)",
+                """
+                INSERT INTO files (id, user_id, data) VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET data = excluded.data
+                WHERE files.user_id = excluded.user_id
+                """,
                 (
                     attachment.id,
                     context.user_id,
@@ -163,8 +168,8 @@ class SQLiteStore(Store[RequestContext]):
     ) -> Attachment:
         with self._create_connection() as conn:
             file_cursor = conn.execute(
-                "SELECT data FROM files WHERE id = ?",  # TODO: consider checking user_id
-                (attachment_id,),
+                "SELECT data FROM files WHERE id = ? AND user_id = ?",
+                (attachment_id, context.user_id),
             ).fetchone()
             if file_cursor is None:
                 raise NotFoundError(f"File {attachment_id} not found")
@@ -177,6 +182,8 @@ class SQLiteStore(Store[RequestContext]):
         order: str,
         context: RequestContext,
     ) -> Page[ThreadMetadata]:
+        if order not in ("asc", "desc"):
+            raise ValueError(f"Unsupported sort order: {order}")
         with self._create_connection() as conn:
             created_after: str | None = None
             if after:
@@ -194,12 +201,11 @@ class SQLiteStore(Store[RequestContext]):
                 WHERE user_id = ?
             """
             params: list[Any] = [context.user_id]
-            if created_after:
-                query += (
-                    " AND created_at > ?" if order == "asc" else " AND created_at < ?"
-                )
-                params.append(created_after)
-            query += f" ORDER BY created_at {order} LIMIT ?"
+            if created_after is not None:
+                comparison = ">" if order == "asc" else "<"
+                query += f" AND (created_at, id) {comparison} (?, ?)"
+                params.extend((created_after, after))
+            query += f" ORDER BY created_at {order}, id {order} LIMIT ?"
             params.append(limit + 1)
             threads_cursor = conn.execute(query, params).fetchall()
             result = []
@@ -236,12 +242,21 @@ class SQLiteStore(Store[RequestContext]):
     ) -> None:
         with self._create_connection() as conn:
             conn.execute(
-                "UPDATE items SET data = ? WHERE id = ? AND thread_id = ? AND user_id = ?",
+                """
+                INSERT INTO items (id, thread_id, user_id, created_at, data)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    data = excluded.data
+                WHERE items.thread_id = excluded.thread_id
+                    AND items.user_id = excluded.user_id
+                """,
                 (
-                    ItemData(item=item).model_dump_json(),
                     item.id,
                     thread_id,
                     context.user_id,
+                    item.created_at.isoformat(),
+                    ItemData(item=item).model_dump_json(),
                 ),
             )
             conn.commit()

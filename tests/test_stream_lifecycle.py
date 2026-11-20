@@ -7,6 +7,7 @@ import pytest
 
 from chatkit.errors import ErrorCode
 from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.turns import Turn
 from chatkit.types import (
     AssistantMessageContent,
     AssistantMessageContentPartTextDelta,
@@ -90,11 +91,9 @@ async def test_stream_close_finalizes_responder_and_persists_partial_message(
 ):
     finalized = asyncio.Event()
 
-    async def responder(
-        thread: ThreadMetadata, message: UserMessageItem | None, context: RequestContext
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         try:
-            yield partial_message(thread)
+            yield partial_message(turn.thread)
             yield ThreadItemUpdatedEvent(
                 item_id="partial-answer",
                 update=AssistantMessageContentPartTextDelta(
@@ -123,11 +122,9 @@ async def test_cancelling_stream_read_finalizes_responder_and_persists_partial_m
     waiting = asyncio.Event()
     finalized = asyncio.Event()
 
-    async def responder(
-        thread: ThreadMetadata, message: UserMessageItem | None, context: RequestContext
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         try:
-            yield partial_message(thread)
+            yield partial_message(turn.thread)
             waiting.set()
             await asyncio.Event().wait()
         finally:
@@ -152,7 +149,7 @@ async def test_cancelling_stream_read_finalizes_responder_and_persists_partial_m
 @pytest.mark.parametrize("responder_fails", [False, True])
 async def test_stream_can_be_read_across_tasks(responder_fails):
     async def responder(
-        thread: ThreadMetadata, message: UserMessageItem | None, context: RequestContext
+        _turn: Turn[RequestContext],
     ) -> AsyncIterator[ThreadStreamEvent]:
         yield ProgressUpdateEvent(text="First")
         if responder_fails:
@@ -188,9 +185,7 @@ async def test_stream_accepts_responder_without_aclose():
             self.sent = True
             return ProgressUpdateEvent(text="Ready")
 
-    def responder(
-        thread: ThreadMetadata, message: UserMessageItem | None, context: RequestContext
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    def responder(_turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         return ProgressIterator()
 
     with make_server(responder) as server:

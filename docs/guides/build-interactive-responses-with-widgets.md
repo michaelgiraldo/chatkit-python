@@ -37,22 +37,28 @@ def build_message_widget(user_name: str, message: str):
 
 ## Stream widgets from `respond`
 
-Use `stream_widget` to emit a one-off widget or stream updates from an async generator.
+Use `stream_widget` to emit a one-off widget or stream updates from an async
+generator. Add this method to your server subclass using your app's
+`RequestContext` type.
 
 ```python
+from collections.abc import AsyncIterator
+
 from chatkit.server import stream_widget
+from chatkit.turns import Turn
+from chatkit.types import ThreadStreamEvent
 
 
-async def respond(...):
+async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
     user_name = "Harry Potter"
     message = "Yer a wizard, Harry"
     message_widget = build_message_widget(user_name=user_name, message=message)
     async for event in stream_widget(
-        thread,
+        turn.thread,
         message_widget,
         copy_text=f"Message to {user_name}: {message}",
         generate_id=lambda item_type: self.store.generate_item_id(
-            item_type, thread, context
+            item_type, turn.thread, turn.context
         ),
     ):
         yield event
@@ -71,7 +77,7 @@ from chatkit.agents import AgentContext
 
 @function_tool(description_override="Display a sample widget to the user.")
 async def sample_widget(ctx: RunContextWrapper[AgentContext]):
-    message_widget = build_message_widget(...)
+    message_widget = build_message_widget(user_name="Harry Potter", message="Hello!")
     await ctx.context.stream_widget(message_widget)
 ```
 
@@ -85,8 +91,8 @@ The examples above return a fully completed static widget. You can also stream a
 ```python
 from typing import AsyncGenerator
 
-from agents import RunContextWrapper, function_tool
-from chatkit.agents import AgentContext, Runner
+from agents import RunContextWrapper, Runner, function_tool
+from chatkit.agents import AgentContext
 from chatkit.widgets import WidgetRoot
 
 
@@ -161,28 +167,34 @@ Implement `ChatKitServer.action` to process incoming actions. The `sender` argum
 ```python
 from datetime import datetime
 
+from chatkit.errors import CustomStreamError
 from chatkit.server import ChatKitServer, stream_widget
-from chatkit.types import HiddenContextItem, WidgetItem
+from chatkit.types import HiddenContextItem
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
     async def action(self, thread, action, sender, context):
         if action.type == "send_message":
-            await send_to_chat(action.payload["text"])
+            payload = action.payload
+            if not isinstance(payload, dict) or not isinstance(
+                text := payload.get("text"), str
+            ):
+                raise CustomStreamError("Expected a text message.")
+            await send_to_chat(text)
 
             # Record the user action so the model can see it on the next turn.
             hidden = HiddenContextItem(
-                id="generated-item-id",
+                id=self.store.generate_item_id("message", thread, context),
                 thread_id=thread.id,
                 created_at=datetime.now(),
-                content=f"User sent message: {action.payload['text']}",
+                content=f"User sent message: {text}",
             )
             # HiddenContextItems need to be manually saved because ChatKitServer
             # only auto-saves streamed items, and HiddenContextItem should never be streamed to the client.
             await self.store.add_thread_item(thread.id, hidden, context)
 
             # Stream an updated widget back to the client.
-            updated_widget = build_message_widget(text=action.payload["text"])
+            updated_widget = build_message_widget(user_name="Support", message=text)
             async for event in stream_widget(
                 thread,
                 updated_widget,
@@ -284,6 +296,7 @@ On the server, read the form values from the action payload. Any action originat
 
 ```python
 from collections.abc import AsyncIterator
+from typing import Any
 
 from chatkit.server import ChatKitServer
 from chatkit.types import Action, ThreadMetadata, ThreadStreamEvent, WidgetItem

@@ -70,6 +70,7 @@ nav:
           - errors: api/chatkit/errors.md
           - server: api/chatkit/server.md
           - store: api/chatkit/store.md
+          - turns: api/chatkit/turns.md
           - types: api/chatkit/types.md
           - widgets: api/chatkit/widgets.md
           - icons: api/chatkit/icons.md

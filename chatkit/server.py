@@ -17,7 +17,21 @@ from pydantic import BaseModel, TypeAdapter
 from chatkit.errors import CustomStreamError, StreamError
 
 from .logger import logger
-from .store import AttachmentStore, Store, StoreItemType, default_generate_id
+from .store import (
+    AttachmentMetadataStore,
+    AttachmentStore,
+    StoreItemType,
+    ThreadStore,
+    default_generate_id,
+)
+from .turns import (
+    ClientToolTurn,
+    RetryTurn,
+    StructuredInputTurn,
+    Turn,
+    TurnOutcome,
+    UserMessageTurn,
+)
 from .types import (
     Action,
     AssistantMessageContent,
@@ -287,12 +301,15 @@ class NonStreamingResult:
 class ChatKitServer[TContext = Any](ABC):
     def __init__(
         self,
-        store: Store[TContext],
+        store: ThreadStore[TContext],
         attachment_store: AttachmentStore[TContext] | None = None,
+        *,
+        attachment_metadata_store: AttachmentMetadataStore[TContext] | None = None,
     ):
-        """Create a ChatKitServer with the backing Store and optional AttachmentStore."""
+        """Configure thread persistence and optional attachment capabilities."""
         self.store = store
         self.attachment_store = attachment_store
+        self.attachment_metadata_store = attachment_metadata_store
 
     def _get_attachment_store(self) -> AttachmentStore[TContext]:
         """Return the configured AttachmentStore or raise if missing."""
@@ -302,22 +319,27 @@ class ChatKitServer[TContext = Any](ABC):
             )
         return self.attachment_store
 
+    def _get_attachment_metadata_store(self) -> AttachmentMetadataStore[TContext]:
+        if self.attachment_metadata_store is None:
+            raise RuntimeError(
+                "AttachmentMetadataStore is not configured. Pass "
+                "attachment_metadata_store to ChatKitServer to use attachments."
+            )
+        return self.attachment_metadata_store
+
     @abstractmethod
-    def respond(
-        self,
-        thread: ThreadMetadata,
-        input_user_message: UserMessageItem | None,
-        context: TContext,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        """Stream `ThreadStreamEvent` instances for a new user message.
+    def respond(self, turn: Turn[TContext]) -> AsyncIterator[ThreadStreamEvent]:
+        """Stream events for a new message, a resumed turn, or a retry."""
+        pass
 
-        Args:
-            thread: Metadata for the thread being processed.
-            input_user_message: The incoming message the server should respond to, if any.
-            context: Arbitrary per-request context provided by the caller.
+    async def on_turn_finished(  # noqa: B027
+        self, turn: Turn[TContext], outcome: TurnOutcome
+    ) -> None:
+        """Observe a turn's terminal outcome after server persistence or cleanup.
 
-        Returns:
-            An async iterator that yields events representing the server's response.
+        A waiting turn has emitted a persisted pending tool call or structured input.
+        Completion describes server processing, not delivery to a browser. Exceptions
+        raised by this hook are logged.
         """
         pass
 
@@ -476,17 +498,19 @@ class ChatKitServer[TContext = Any](ABC):
                 return b"{}"
             case AttachmentsCreateReq():
                 attachment_store = self._get_attachment_store()
+                metadata_store = self._get_attachment_metadata_store()
                 attachment = await attachment_store.create_attachment(
                     request.params, context
                 )
-                await self.store.save_attachment(attachment, context=context)
+                await metadata_store.save_attachment(attachment, context=context)
                 return self._serialize(attachment)
             case AttachmentsDeleteReq():
                 attachment_store = self._get_attachment_store()
+                metadata_store = self._get_attachment_metadata_store()
                 await attachment_store.delete_attachment(
                     request.params.attachment_id, context=context
                 )
-                await self.store.delete_attachment(
+                await metadata_store.delete_attachment(
                     request.params.attachment_id, context=context
                 )
                 return b"{}"
@@ -552,6 +576,8 @@ class ChatKitServer[TContext = Any](ABC):
     ) -> AsyncGenerator[ThreadStreamEvent, None]:
         match request:
             case ThreadsCreateReq():
+                if request.params.input.attachments:
+                    self._get_attachment_metadata_store()
                 thread = Thread(
                     id=self.store.generate_thread_id(context),
                     created_at=datetime.now(),
@@ -616,10 +642,8 @@ class ChatKitServer[TContext = Any](ABC):
                 # when creating input response messages.
                 await self._cleanup_pending_client_tool_call(thread, context)
 
-                stream = self._process_events(
-                    thread,
-                    context,
-                    lambda: self.respond(thread, None, context),
+                stream = self._process_turn(
+                    Turn(thread, ClientToolTurn(tool_call), context)
                 )
 
             case ThreadsAddStructuredInputReq():
@@ -641,22 +665,8 @@ class ChatKitServer[TContext = Any](ABC):
                     request.params.input,
                 )
 
-                async def stream_structured_input_response() -> AsyncIterator[
-                    ThreadStreamEvent
-                ]:
-                    # Keep this replacement inside _process_events so it is persisted
-                    # through the same event pipeline as other thread item replacements.
-                    yield ThreadItemReplacedEvent(item=updated_item)
-                    async with _closing_stream(
-                        aiter(self.respond(thread, None, context))
-                    ) as events:
-                        async for event in events:
-                            yield event
-
-                stream = self._process_events(
-                    thread,
-                    context,
-                    stream_structured_input_response,
+                stream = self._process_turn(
+                    Turn(thread, StructuredInputTurn(updated_item), context)
                 )
 
             case ThreadsRetryAfterItemReq():
@@ -686,14 +696,8 @@ class ChatKitServer[TContext = Any](ABC):
                     await self.store.delete_thread_item(
                         request.params.thread_id, item.id, context=context
                     )
-                stream = self._process_events(
-                    thread_metadata,
-                    context,
-                    lambda: self.respond(
-                        thread_metadata,
-                        user_message_item,
-                        context,
-                    ),
+                stream = self._process_turn(
+                    Turn(thread_metadata, RetryTurn(user_message_item), context)
                 )
 
             case ThreadsCustomActionReq():
@@ -827,18 +831,71 @@ class ChatKitServer[TContext = Any](ABC):
     ) -> AsyncIterator[ThreadStreamEvent]:
         # Store the updated attachments (now that they have a thread id).
         for attachment in item.attachments:
-            await self.store.save_attachment(attachment, context=context)
+            await self._get_attachment_metadata_store().save_attachment(
+                attachment, context=context
+            )
 
         await self.store.add_thread_item(thread.id, item, context=context)
-        yield ThreadItemDoneEvent(item=item)
 
         async with _closing_stream(
-            self._process_events(
-                thread, context, lambda: self.respond(thread, item, context)
-            )
+            self._process_turn(Turn(thread, UserMessageTurn(item), context))
         ) as events:
             async for event in events:
                 yield event
+
+    async def _process_turn(
+        self, turn: Turn[TContext]
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        async def respond_events() -> AsyncIterator[ThreadStreamEvent]:
+            if isinstance(turn.input, StructuredInputTurn):
+                # Persist the replacement in the event pipeline before responding.
+                yield ThreadItemReplacedEvent(item=turn.input.item)
+            async with _closing_stream(aiter(self.respond(turn))) as events:
+                async for event in events:
+                    yield event
+
+        outcome = TurnOutcome.COMPLETED
+        pending_inputs: set[str] = set()
+        try:
+            if isinstance(turn.input, UserMessageTurn):
+                # The message is already saved. Closing at this event still finishes the turn.
+                yield ThreadItemDoneEvent(item=turn.input.message)
+            async with _closing_stream(
+                self._process_events(turn.thread, turn.context, respond_events)
+            ) as events:
+                async for event in events:
+                    match event:
+                        case ErrorEvent():
+                            outcome = TurnOutcome.FAILED
+                        case (
+                            ThreadItemDoneEvent(item=item)
+                            | ThreadItemReplacedEvent(item=item)
+                        ):
+                            if (
+                                isinstance(
+                                    item, (ClientToolCallItem, StructuredInputItem)
+                                )
+                                and item.status == "pending"
+                            ):
+                                pending_inputs.add(item.id)
+                            else:
+                                pending_inputs.discard(item.id)
+                        case ThreadItemRemovedEvent(item_id=item_id):
+                            pending_inputs.discard(item_id)
+                    yield event
+            if outcome is TurnOutcome.COMPLETED and pending_inputs:
+                outcome = TurnOutcome.WAITING
+        except asyncio.CancelledError, GeneratorExit:
+            outcome = TurnOutcome.CANCELLED
+            raise
+        except Exception:
+            outcome = TurnOutcome.FAILED
+            raise
+        finally:
+            try:
+                await self.on_turn_finished(turn, outcome)
+            except Exception:
+                logger.exception("Error in on_turn_finished")
 
     async def _process_events(
         self,
@@ -1008,9 +1065,11 @@ class ChatKitServer[TContext = Any](ABC):
             content=input.content,
             thread_id=thread.id,
             attachments=[
-                (await self.store.load_attachment(attachment_id, context)).model_copy(
-                    update={"thread_id": thread.id}
-                )
+                (
+                    await self._get_attachment_metadata_store().load_attachment(
+                        attachment_id, context
+                    )
+                ).model_copy(update={"thread_id": thread.id})
                 for attachment_id in input.attachments
             ],
             quoted_text=input.quoted_text,

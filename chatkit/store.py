@@ -42,6 +42,8 @@ class NotFoundError(Exception):
 
 
 class AttachmentStore[TContext = Any](ABC):
+    """Handle attachment uploads and delete the associated file data."""
+
     @abstractmethod
     async def delete_attachment(self, attachment_id: str, context: TContext) -> None:
         """Delete an attachment by id."""
@@ -61,7 +63,9 @@ class AttachmentStore[TContext = Any](ABC):
         return default_generate_id("attachment")
 
 
-class Store[TContext = Any](ABC):
+class ThreadStore[TContext = Any](ABC):
+    """Persist threads and their items, with access scoped by the request context."""
+
     def generate_thread_id(self, context: TContext) -> str:
         """Return a new identifier for a thread. Override this method to customize thread ID generation."""
 
@@ -76,12 +80,12 @@ class Store[TContext = Any](ABC):
 
     @abstractmethod
     async def load_thread(self, thread_id: str, context: TContext) -> ThreadMetadata:
-        """Load a thread's metadata by id."""
+        """Load thread metadata or raise `NotFoundError` if it is unavailable."""
         pass
 
     @abstractmethod
     async def save_thread(self, thread: ThreadMetadata, context: TContext) -> None:
-        """Persist thread metadata (title, status, etc.)."""
+        """Insert or update thread metadata by id."""
         pass
 
     @abstractmethod
@@ -93,24 +97,12 @@ class Store[TContext = Any](ABC):
         order: str,
         context: TContext,
     ) -> Page[ThreadItem]:
-        """Load a page of thread items with pagination controls."""
-        pass
+        """Load up to `limit` items in creation order, starting after `after`.
 
-    @abstractmethod
-    async def save_attachment(self, attachment: Attachment, context: TContext) -> None:
-        """Upsert attachment metadata."""
-        pass
-
-    @abstractmethod
-    async def load_attachment(
-        self, attachment_id: str, context: TContext
-    ) -> Attachment:
-        """Load attachment metadata by id."""
-        pass
-
-    @abstractmethod
-    async def delete_attachment(self, attachment_id: str, context: TContext) -> None:
-        """Delete attachment metadata by id."""
+        Use a stable order for items with the same timestamp. Accept `"asc"`
+        for oldest first and `"desc"` for newest first. If more items exist,
+        set `has_more=True` and return a cursor in `Page.after` for the next page.
+        """
         pass
 
     @abstractmethod
@@ -121,7 +113,12 @@ class Store[TContext = Any](ABC):
         order: str,
         context: TContext,
     ) -> Page[ThreadMetadata]:
-        """Load a page of threads with pagination controls."""
+        """Load up to `limit` threads in creation order, starting after `after`.
+
+        Use a stable order for threads with the same timestamp. Accept `"asc"`
+        for oldest first and `"desc"` for newest first. If more threads exist,
+        set `has_more=True` and return a cursor in `Page.after` for the next page.
+        """
         pass
 
     @abstractmethod
@@ -142,7 +139,7 @@ class Store[TContext = Any](ABC):
     async def load_item(
         self, thread_id: str, item_id: str, context: TContext
     ) -> ThreadItem:
-        """Load a thread item by id."""
+        """Load an item in the given thread or raise `NotFoundError`."""
         pass
 
     @abstractmethod
@@ -155,4 +152,25 @@ class Store[TContext = Any](ABC):
         self, thread_id: str, item_id: str, context: TContext
     ) -> None:
         """Delete a thread item by id."""
+        pass
+
+
+class AttachmentMetadataStore[TContext = Any](ABC):
+    """Persist attachment records, with access scoped by the request context."""
+
+    @abstractmethod
+    async def save_attachment(self, attachment: Attachment, context: TContext) -> None:
+        """Upsert attachment metadata."""
+        pass
+
+    @abstractmethod
+    async def load_attachment(
+        self, attachment_id: str, context: TContext
+    ) -> Attachment:
+        """Load attachment metadata or raise `NotFoundError`."""
+        pass
+
+    @abstractmethod
+    async def delete_attachment(self, attachment_id: str, context: TContext) -> None:
+        """Delete attachment metadata by id."""
         pass
