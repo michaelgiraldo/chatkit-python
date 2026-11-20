@@ -115,7 +115,6 @@ class AgentContext[TContext](BaseModel):
     previous_response_id: str | None = None
     client_tool_call: ClientToolCall | None = None
     workflow_item: WorkflowItem | None = None
-    generated_image_item: GeneratedImageItem | None = None
     _events: asyncio.Queue[ThreadStreamEvent | _QueueCompleteSentinel] = asyncio.Queue()
 
     def generate_id(
@@ -556,6 +555,7 @@ async def _stream_agent_response(
     thread = context.thread
     produced_items = set()
     synthetic_message_ids: dict[int, str] = {}
+    pending_images: dict[str, GeneratedImageItem] = {}
     streaming_thought: None | StreamingThoughtTracker = None
     # item_id -> content_index -> annotation count
     item_annotation_count: defaultdict[str, defaultdict[int, int]] = defaultdict(
@@ -727,16 +727,18 @@ async def _stream_agent_response(
                         ),
                     )
                 elif item.type == "image_generation_call":
-                    ctx.generated_image_item = GeneratedImageItem(
+                    image_item = GeneratedImageItem(
                         id=ctx.generate_id("message"),
                         thread_id=thread.id,
                         created_at=datetime.now(),
                         image=None,
                     )
-                    produced_items.add(ctx.generated_image_item.id)
-                    yield ThreadItemAddedEvent(item=ctx.generated_image_item)
+                    pending_images[item.id] = image_item
+                    produced_items.add(image_item.id)
+                    yield ThreadItemAddedEvent(item=image_item)
             elif event.type == "response.image_generation_call.partial_image":
-                if not ctx.generated_image_item:
+                image_item = pending_images.get(event.item_id)
+                if image_item is None:
                     continue
 
                 url = await converter.base64_image_to_url(
@@ -748,14 +750,11 @@ async def _stream_agent_response(
                     event.partial_image_index
                 )
 
-                ctx.generated_image_item.image = GeneratedImage(
-                    id=event.item_id, url=url
-                )
-
                 yield ThreadItemUpdatedEvent(
-                    item_id=ctx.generated_image_item.id,
+                    item_id=image_item.id,
                     update=GeneratedImageUpdated(
-                        image=ctx.generated_image_item.image, progress=progress
+                        image=GeneratedImage(id=event.item_id, url=url),
+                        progress=progress,
                     ),
                 )
             elif event.type == "response.reasoning_summary_text.delta":
@@ -840,8 +839,9 @@ async def _stream_agent_response(
                             created_at=datetime.now(),
                         ),
                     )
-                elif item.type == "image_generation_call" and item.result:
-                    if not ctx.generated_image_item:
+                elif item.type == "image_generation_call":
+                    image_item = pending_images.pop(item.id, None)
+                    if image_item is None or not item.result:
                         continue
 
                     url = await converter.base64_image_to_url(
@@ -850,10 +850,9 @@ async def _stream_agent_response(
                     )
                     image = GeneratedImage(id=item.id, url=url)
 
-                    ctx.generated_image_item.image = image
-                    yield ThreadItemDoneEvent(item=ctx.generated_image_item)
-
-                    ctx.generated_image_item = None
+                    yield ThreadItemDoneEvent(
+                        item=image_item.model_copy(update={"image": image})
+                    )
 
     except InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered:
         for item_id in produced_items:

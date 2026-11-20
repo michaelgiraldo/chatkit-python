@@ -25,6 +25,7 @@ from openai.types.responses import (
     EasyInputMessageParam,
     ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
+    ResponseImageGenCallPartialImageEvent,
     ResponseInputContentParam,
     ResponseInputTextParam,
     ResponseOutputItemAddedEvent,
@@ -38,6 +39,7 @@ from openai.types.responses.response_content_part_added_event import (
 )
 from openai.types.responses.response_file_search_tool_call import Result
 from openai.types.responses.response_input_item_param import Message
+from openai.types.responses.response_output_item import ImageGenerationCall
 from openai.types.responses.response_output_text import (
     AnnotationContainerFileCitation as ResponsesAnnotationContainerFileCitation,
 )
@@ -1819,6 +1821,147 @@ async def test_stream_agent_response_image_generation_partial_progress():
     assert done_event.item.image == GeneratedImage(
         id="img_call_1", url="data:image/png;base64,dGVzdA=="
     )
+
+
+async def test_interleaved_image_generation_keeps_each_preview_and_result():
+    store = Mock(
+        generate_item_id=Mock(side_effect=["image_1", "image_2"]),
+        load_thread_items=AsyncMock(return_value=Page()),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    first = ImageGenerationCall(
+        id="img_call_1", status="in_progress", type="image_generation_call"
+    )
+    second = ImageGenerationCall(
+        id="img_call_2", status="in_progress", type="image_generation_call"
+    )
+
+    for event in [
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=first,
+            output_index=0,
+            sequence_number=0,
+        ),
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=second,
+            output_index=1,
+            sequence_number=1,
+        ),
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=first.id,
+            output_index=0,
+            partial_image_index=1,
+            partial_image_b64="MQ==",
+            sequence_number=2,
+        ),
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=second.id,
+            output_index=1,
+            partial_image_index=1,
+            partial_image_b64="Mg==",
+            sequence_number=3,
+        ),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=second.model_copy(update={"status": "completed", "result": "Mw=="}),
+            output_index=1,
+            sequence_number=4,
+        ),
+        # A late preview for the completed call must not update the pending call.
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=second.id,
+            output_index=1,
+            partial_image_index=2,
+            partial_image_b64="MA==",
+            sequence_number=5,
+        ),
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=first.id,
+            output_index=0,
+            partial_image_index=2,
+            partial_image_b64="NA==",
+            sequence_number=6,
+        ),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=first.model_copy(update={"status": "completed", "result": "NQ=="}),
+            output_index=0,
+            sequence_number=7,
+        ),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=ResponseOutputMessage(
+                id="assistant_message",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[],
+            ),
+            output_index=2,
+            sequence_number=8,
+        ),
+    ]:
+        result.add_event(RawResponsesStreamEvent(type="raw_response_event", data=event))
+    result.done()
+
+    events = await all_events(
+        stream_agent_response(
+            context, result, converter=ResponseStreamConverter(partial_images=3)
+        )
+    )
+    assert [event.type for event in events] == [
+        "thread.item.added",
+        "thread.item.added",
+        "thread.item.updated",
+        "thread.item.updated",
+        "thread.item.done",
+        "thread.item.updated",
+        "thread.item.done",
+        "thread.item.done",
+    ]
+    for event, item_id in zip(events[:2], ("image_1", "image_2"), strict=True):
+        assert isinstance(event, ThreadItemAddedEvent)
+        assert isinstance(event.item, GeneratedImageItem)
+        assert event.item.id == item_id
+        assert event.item.image is None
+
+    for index, item_id, provider_id, image_data, progress in (
+        (2, "image_1", first.id, "MQ==", 1 / 3),
+        (3, "image_2", second.id, "Mg==", 1 / 3),
+        (5, "image_1", first.id, "NA==", 2 / 3),
+    ):
+        event = events[index]
+        assert isinstance(event, ThreadItemUpdatedEvent)
+        assert event.item_id == item_id
+        assert isinstance(event.update, GeneratedImageUpdated)
+        assert event.update.image == GeneratedImage(
+            id=provider_id, url=f"data:image/png;base64,{image_data}"
+        )
+        assert event.update.progress == pytest.approx(progress)
+
+    for index, item_id, provider_id, image_data in (
+        (4, "image_2", second.id, "Mw=="),
+        (6, "image_1", first.id, "NQ=="),
+    ):
+        event = events[index]
+        assert isinstance(event, ThreadItemDoneEvent)
+        assert isinstance(event.item, GeneratedImageItem)
+        assert event.item.id == item_id
+        assert event.item.image == GeneratedImage(
+            id=provider_id, url=f"data:image/png;base64,{image_data}"
+        )
+
+    message = events[-1]
+    assert isinstance(message, ThreadItemDoneEvent)
+    assert isinstance(message.item, AssistantMessageItem)
+    assert message.item.id == "assistant_message"
 
 
 async def test_workflow_streams_first_thought():
