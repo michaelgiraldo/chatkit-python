@@ -1,7 +1,8 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from datetime import datetime
+from contextlib import aclosing
+from datetime import UTC, datetime
 from typing import Literal, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -25,6 +26,7 @@ from openai.types.responses import (
     EasyInputMessageParam,
     ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
+    ResponseFunctionWebSearch,
     ResponseImageGenCallPartialImageEvent,
     ResponseInputContentParam,
     ResponseInputTextParam,
@@ -33,11 +35,18 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputTextAnnotationAddedEvent,
     ResponseReasoningItem,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
 )
 from openai.types.responses.response_content_part_added_event import (
     ResponseContentPartAddedEvent,
 )
 from openai.types.responses.response_file_search_tool_call import Result
+from openai.types.responses.response_function_web_search import (
+    ActionSearch,
+    ActionSearchSource,
+)
 from openai.types.responses.response_input_item_param import Message
 from openai.types.responses.response_output_item import ImageGenerationCall
 from openai.types.responses.response_output_text import (
@@ -87,6 +96,7 @@ from chatkit.types import (
     HiddenContextItem,
     InferenceOptions,
     Page,
+    SearchTask,
     StructuredInputAnswer,
     StructuredInputFreeform,
     StructuredInputItem,
@@ -97,6 +107,7 @@ from chatkit.types import (
     Thread,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
+    ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
     ThreadStreamEvent,
     URLSource,
@@ -1962,6 +1973,374 @@ async def test_interleaved_image_generation_keeps_each_preview_and_result():
     assert isinstance(message, ThreadItemDoneEvent)
     assert isinstance(message.item, AssistantMessageItem)
     assert message.item.id == "assistant_message"
+
+
+def _web_search_start(item_id: str, output_index: int) -> ResponseOutputItemAddedEvent:
+    return ResponseOutputItemAddedEvent(
+        type="response.output_item.added",
+        item=ResponseFunctionWebSearch(
+            type="web_search_call",
+            id=item_id,
+            status="in_progress",
+            action=ActionSearch(type="search"),
+        ),
+        output_index=output_index,
+        sequence_number=output_index,
+    )
+
+
+def _web_search_done(
+    item_id: str, output_index: int, sequence_number: int, query: str, url: str
+) -> ResponseOutputItemDoneEvent:
+    return ResponseOutputItemDoneEvent(
+        type="response.output_item.done",
+        item=ResponseFunctionWebSearch(
+            type="web_search_call",
+            id=item_id,
+            status="completed",
+            action=ActionSearch(
+                type="search",
+                queries=[query],
+                sources=[ActionSearchSource(type="url", url=url)],
+            ),
+        ),
+        output_index=output_index,
+        sequence_number=sequence_number,
+    )
+
+
+async def test_interleaved_web_searches_keep_their_task_indices_and_citations():
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    result = make_result()
+    first, second = "search_first", "search_second"
+    first_url, second_url = "https://example.com/first", "https://example.com/second"
+    citation = ResponsesAnnotationURLCitation(
+        type="url_citation",
+        title="Source two",
+        url=second_url,
+        start_index=0,
+        end_index=6,
+    )
+    for event in (
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=ResponseReasoningItem(id="reasoning", summary=[], type="reasoning"),
+            output_index=0,
+            sequence_number=0,
+        ),
+        # Both starts have identical task data. Their provider IDs distinguish them.
+        _web_search_start(first, 1),
+        _web_search_start(second, 2),
+        ResponseWebSearchCallInProgressEvent(
+            type="response.web_search_call.in_progress",
+            item_id=first,
+            output_index=1,
+            sequence_number=3,
+        ),
+        ResponseWebSearchCallSearchingEvent(
+            type="response.web_search_call.searching",
+            item_id=second,
+            output_index=2,
+            sequence_number=4,
+        ),
+        ResponseWebSearchCallCompletedEvent(
+            type="response.web_search_call.completed",
+            item_id=second,
+            output_index=2,
+            sequence_number=5,
+        ),
+        _web_search_done(second, 2, 6, "second query", second_url),
+        # The first call is still active when this stale event for the second arrives.
+        ResponseWebSearchCallSearchingEvent(
+            type="response.web_search_call.searching",
+            item_id=second,
+            output_index=2,
+            sequence_number=7,
+        ),
+        ResponseWebSearchCallSearchingEvent(
+            type="response.web_search_call.searching",
+            item_id=first,
+            output_index=1,
+            sequence_number=8,
+        ),
+        _web_search_done(first, 1, 9, "first query", first_url),
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=ResponseOutputMessage(
+                id="assistant_answer",
+                type="message",
+                role="assistant",
+                status="in_progress",
+                content=[],
+            ),
+            output_index=3,
+            sequence_number=10,
+        ),
+        ResponseOutputTextAnnotationAddedEvent.model_validate({
+            "type": "response.output_text.annotation.added",
+            "annotation": citation.model_dump(),
+            "content_index": 0,
+            "item_id": "assistant_answer",
+            "annotation_index": 0,
+            "output_index": 3,
+            "sequence_number": 11,
+        }),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=ResponseOutputMessage(
+                id="assistant_answer",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[
+                    ResponseOutputText(
+                        type="output_text", text="Answer", annotations=[citation]
+                    )
+                ],
+            ),
+            output_index=3,
+            sequence_number=12,
+        ),
+    ):
+        result.add_event(RawResponsesStreamEvent(data=event))
+    result.done()
+
+    events = await all_events(stream_agent_response(context, result))
+    search_events = [
+        event
+        for event in events
+        if isinstance(event, ThreadItemUpdatedEvent)
+        and isinstance(event.update, (WorkflowTaskAdded, WorkflowTaskUpdated))
+        and isinstance(event.update.task, SearchTask)
+    ]
+    assert [
+        (event.update.task_index, event.update.task.status_indicator)
+        for event in search_events
+        if isinstance(event.update, WorkflowTaskAdded)
+    ] == [(0, "loading"), (1, "loading")]
+    update_states = []
+    for event in search_events:
+        if isinstance(event.update, WorkflowTaskUpdated):
+            update_states.append((
+                event.update.task_index,
+                event.update.task.status_indicator,
+            ))
+    assert [index for index, state in update_states if state == "complete"][-1] == 0
+    assert (1, "complete") in update_states
+    assert (1, "loading") not in update_states[
+        update_states.index((1, "complete")) + 1 :
+    ]
+
+    (workflow,) = [
+        event.item
+        for event in events
+        if isinstance(event, ThreadItemDoneEvent)
+        and isinstance(event.item, WorkflowItem)
+    ]
+    assert all(event.item_id == workflow.id for event in search_events)
+    first_task, second_task = workflow.workflow.tasks
+    for task, query, url in (
+        (first_task, "first query", first_url),
+        (second_task, "second query", second_url),
+    ):
+        assert isinstance(task, SearchTask)
+        assert task.status_indicator == "complete"
+        assert task.queries == [query]
+        assert [source.url for source in task.sources] == [url]
+
+    answers = [
+        event.item
+        for event in events
+        if isinstance(event, ThreadItemDoneEvent)
+        and isinstance(event.item, AssistantMessageItem)
+    ]
+    assert len(answers) == 1
+    answer = answers[0]
+    assert answer.id == "assistant_answer"
+    assert answer.content[0].annotations == [
+        Annotation(source=URLSource(url=second_url, title="Source two"), index=6)
+    ]
+    assert any(
+        isinstance(event, ThreadItemUpdatedEvent)
+        and event.item_id == answer.id
+        and isinstance(event.update, AssistantMessageContentPartAnnotationAdded)
+        and event.update.annotation == answer.content[0].annotations[0]
+        for event in events
+    )
+
+
+async def test_active_web_search_at_end_of_stream_finishes_workflow():
+    store = Mock(
+        generate_item_id=Mock(return_value="search_workflow"),
+        load_thread_items=AsyncMock(return_value=Page()),
+        add_thread_item=AsyncMock(),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    item_id = "search_incomplete"
+    result.add_event(
+        RawResponsesStreamEvent(
+            data=ResponseWebSearchCallInProgressEvent(
+                type="response.web_search_call.in_progress",
+                item_id=item_id,
+                output_index=0,
+                sequence_number=0,
+            )
+        )
+    )
+    async with (
+        asyncio.timeout(2),
+        aclosing(stream_agent_response(context, result)) as events,
+    ):
+        opened = await anext(events)
+        assert isinstance(opened, ThreadItemAddedEvent)
+        assert isinstance(opened.item, WorkflowItem)
+        loading = await anext(events)
+        assert isinstance(loading, ThreadItemUpdatedEvent)
+        assert loading.update == WorkflowTaskAdded(
+            task_index=0, task=SearchTask(status_indicator="loading")
+        )
+
+        result.add_event(
+            RawResponsesStreamEvent(
+                data=ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    item=ResponseFunctionWebSearch(
+                        type="web_search_call",
+                        id=item_id,
+                        status="in_progress",
+                        action=ActionSearch(type="search", query="partial search"),
+                    ),
+                    output_index=0,
+                    sequence_number=1,
+                )
+            )
+        )
+        result.done()
+        update, finished = await all_events(events)
+
+    assert isinstance(update, ThreadItemUpdatedEvent)
+    assert update.item_id == opened.item.id
+    assert isinstance(update.update, WorkflowTaskUpdated)
+    assert update.update.task_index == 0
+    assert isinstance(finished, ThreadItemDoneEvent)
+    assert isinstance(finished.item, WorkflowItem)
+    assert finished.item.id == opened.item.id
+    (task,) = finished.item.workflow.tasks
+    assert isinstance(task, SearchTask)
+    assert task.queries == ["partial search"]
+    assert task.status_indicator == "none"
+    assert context.workflow_item is None
+    store.add_thread_item.assert_not_awaited()
+
+
+async def test_web_search_finishes_resumed_workflow_with_replacement():
+    thought = ThoughtTask(content="Existing reasoning")
+    previous = WorkflowItem(
+        id="saved_workflow",
+        thread_id=thread.id,
+        created_at=datetime.now(UTC),
+        workflow=Workflow(type="reasoning", tasks=[thought]),
+    )
+    store = Mock(
+        load_thread_items=AsyncMock(return_value=Page(data=[previous])),
+        add_thread_item=AsyncMock(),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    url = "https://example.com/resumed"
+    result.add_event(
+        RawResponsesStreamEvent(data=_web_search_start("search_resumed", 0))
+    )
+    result.add_event(
+        RawResponsesStreamEvent(
+            data=_web_search_done("search_resumed", 0, 1, "query", url)
+        )
+    )
+    result.done()
+
+    added, updated, replaced = await all_events(stream_agent_response(context, result))
+    assert isinstance(added, ThreadItemUpdatedEvent)
+    assert added.item_id == previous.id
+    assert added.update == WorkflowTaskAdded(
+        task_index=1, task=SearchTask(status_indicator="loading")
+    )
+    assert isinstance(updated, ThreadItemUpdatedEvent)
+    assert isinstance(updated.update, WorkflowTaskUpdated)
+    assert updated.item_id == previous.id
+    assert updated.update.task_index == 1
+    assert isinstance(replaced, ThreadItemReplacedEvent)
+    assert isinstance(replaced.item, WorkflowItem)
+    assert replaced.item.id == previous.id
+    assert replaced.item.workflow.tasks == [thought, updated.update.task]
+    assert isinstance(updated.update.task, SearchTask)
+    assert updated.update.task.status_indicator == "complete"
+    store.generate_item_id.assert_not_called()
+    store.add_thread_item.assert_not_awaited()
+
+
+async def test_cancelled_web_search_relay_closes_the_pending_model_read():
+    store = Mock()
+    store.generate_item_id.return_value = "workflow"
+    store.load_thread_items = AsyncMock(return_value=Page())
+    store.add_thread_item = AsyncMock()
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = Mock(spec=RunResultStreaming)
+    result.is_complete = False
+    pending_read = asyncio.Event()
+    runner_cancelled = asyncio.Event()
+    source_closed = asyncio.Event()
+    result.cancel.side_effect = runner_cancelled.set
+
+    async def model_events() -> AsyncIterator[StreamEvent]:
+        try:
+            yield RawResponsesStreamEvent(data=_web_search_start("search_first", 0))
+            yield RawResponsesStreamEvent(data=_web_search_start("search_second", 1))
+            pending_read.set()
+            yield await asyncio.Future[StreamEvent]()
+        finally:
+            await runner_cancelled.wait()
+            source_closed.set()
+
+    result.stream_events.side_effect = model_events
+    async with (
+        asyncio.timeout(2),
+        aclosing(stream_agent_response(context, result)) as events,
+    ):
+        tasks: list[SearchTask] = []
+        while len(tasks) < 2:
+            event = await anext(events)
+            if isinstance(event, ThreadItemAddedEvent) and isinstance(
+                event.item, WorkflowItem
+            ):
+                tasks.extend(
+                    task
+                    for task in event.item.workflow.tasks
+                    if isinstance(task, SearchTask)
+                )
+            elif (
+                isinstance(event, ThreadItemUpdatedEvent)
+                and isinstance(event.update, WorkflowTaskAdded)
+                and isinstance(event.update.task, SearchTask)
+            ):
+                tasks.append(event.update.task)
+        assert [task.status_indicator for task in tasks] == ["loading", "loading"]
+
+        read = asyncio.create_task(anext(events))
+        await pending_read.wait()
+        read.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read
+        with pytest.raises(StopAsyncIteration):
+            await anext(events)
+
+    result.cancel.assert_called_once_with()
+    assert source_closed.is_set()
+    assert context.workflow_item is None
+    store.add_thread_item.assert_not_awaited()
+    assert not any(
+        task.get_name().startswith("chatkit-") for task in asyncio.all_tasks()
+    )
 
 
 async def test_workflow_streams_first_thought():

@@ -14,17 +14,17 @@ by CI on Turnspan's maintained Python 3.14 branch after that release.
 
 | Decision | Issues | PRs | Entries | Distinct topics |
 | --- | ---: | ---: | ---: | ---: |
-| Resolved on Turnspan | 4 | 12 | 16 | 12 |
-| Deferred | 3 | 2 | 5 | 4 |
+| Resolved on Turnspan | 5 | 13 | 18 | 13 |
+| Deferred | 2 | 1 | 3 | 3 |
 | Reviewed, no fix needed | 4 | 1 | 5 | 5 |
 | **Total reviewed** | **11** | **15** | **26** | **21** |
 
-The maintained branch resolves **16 of 26 entries (62%)** across **12 of 21
-topics (57%)**. Turnspan 2 shipped fixes for 15 entries across 11 topics. The
-test collection fix for #122 landed after the release. Entries count individual
-GitHub reports and patches. Topics count each underlying behavior once. The
-fixed count includes code, docs, and tooling changes that fully address the
-reported need.
+The maintained branch resolves **18 of 26 entries (69%)** across **13 of 21
+topics (62%)**. Turnspan 2 shipped fixes for 15 entries across 11 topics. The
+test collection and web-search progress fixes landed after the release.
+Entries count individual GitHub reports and patches. Topics count each
+underlying behavior once. The fixed count includes code, docs, and tooling
+changes that fully address the reported need.
 
 ## Resolved in Turnspan 2
 
@@ -47,12 +47,12 @@ reported need.
 | Topic | What we verified on the Python 3.14 branch |
 | --- | --- |
 | Test imports in a clean checkout | **Fixed.** Shared server and stream helpers live in `tests/helpers/`, and plain `pytest` defaults to `importlib` mode. All nine test modules collected individually, and CI passed all 164 tests. Turnspan 2 had already removed the private Agents SDK sentinel import. Thanks to Mark Zhang for reporting the import problem. [PR #122](https://github.com/openai/chatkit-python/pull/122) · [Test setup](https://github.com/michaelgiraldo/chatkit-python/commit/92a1696934836e72469d94e858ee322b58f0415c) · [Passing CI run](https://github.com/michaelgiraldo/chatkit-python/actions/runs/44663927249) · [Fixture cleanup](https://github.com/michaelgiraldo/chatkit-python/commit/58f57af) |
+| Web-search progress | **Fixed.** Each Responses search keeps its own task and completion state by provider item ID. The regressions exercise overlapping searches, cancellation, and final citations. Chrome replay with synthetic Responses events verified independent progress and completion, a working Stop button, and the final citation inline and in the Sources drawer. Thanks to Francis Poisson-Gagnon for the report and proposed patch. [Issue #28](https://github.com/openai/chatkit-python/issues/28) · [PR #29](https://github.com/openai/chatkit-python/pull/29) |
 
 ## Deferred
 
 | Topic | What we verified and why it is deferred |
 | --- | --- |
-| Web-search progress | An offline Responses event replay produced a final answer and zero search progress events. We also reproduced how the proposed change can confuse two searches with identical task values. This is a feature candidate. A patch needs distinct search IDs and tests for overlapping searches, cancellation, final citations, and browser updates. [Issue #28](https://github.com/openai/chatkit-python/issues/28) · [PR #29](https://github.com/openai/chatkit-python/pull/29) |
 | Mypy checks on the SDK source | Mypy 2.4.1 on Python 3.14 reports 27 errors in three Turnspan source files. A smoke check importing public types from an installed Turnspan wheel passes, as does the supported Pyright check. Revisit if an app demonstrates a typing blocker or Turnspan adopts mypy as a supported checker. [PR #7](https://github.com/openai/chatkit-python/pull/7) |
 | Large inline PDF persistence | The mocked transport captured an inline PDF in a request to `/v1/responses` and zero Files API requests. The hosted service's storage behavior and the reported size threshold still need verification on the Responses API side. [Issue #109](https://github.com/openai/chatkit-python/issues/109) |
 | Report without a ChatKit reproduction | The report provides no ChatKit behavior or reproduction steps to test. Revisit when an example identifies a failing SDK operation. [Issue #130](https://github.com/openai/chatkit-python/issues/130) |

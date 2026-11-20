@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import aclosing
 from datetime import datetime
 from inspect import cleandoc
@@ -9,6 +9,7 @@ from typing import (
     Annotated,
     Any,
     AsyncGenerator,
+    Literal,
     Sequence,
     assert_never,
     cast,
@@ -25,6 +26,7 @@ from openai.types.responses import (
     EasyInputMessageParam,
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
+    ResponseFunctionWebSearch,
     ResponseInputContentParam,
     ResponseInputImageParam,
     ResponseInputMessageContentListParam,
@@ -67,6 +69,7 @@ from .types import (
     GeneratedImageUpdated,
     HiddenContextItem,
     SDKHiddenContextItem,
+    SearchTask,
     StructuredInputItem,
     Task,
     TaskItem,
@@ -75,6 +78,7 @@ from .types import (
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemRemovedEvent,
+    ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
     ThreadMetadata,
     ThreadStreamEvent,
@@ -486,6 +490,50 @@ def _function_call_metadata(raw_item: object) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _search_status(
+    call: ResponseFunctionWebSearch,
+) -> Literal["loading", "complete", "none"]:
+    if call.status in ("in_progress", "searching"):
+        return "loading"
+    if call.status == "completed":
+        return "complete"
+    return "none"
+
+
+def _search_task_metadata(
+    task: SearchTask, call: ResponseFunctionWebSearch
+) -> SearchTask:
+    action = getattr(call, "action", None)
+    if action is None:
+        return task
+    queries = list(task.queries)
+    sources = {source.url: source for source in task.sources}
+    title = task.title
+    if action.type == "search":
+        if action.query:
+            queries.append(action.query)
+        queries.extend(action.queries or [])
+        urls = [source.url for source in action.sources or []]
+    elif action.type in ("open_page", "find_in_page"):
+        urls = [action.url] if action.url else []
+        title = title or action.url
+    else:
+        return task
+
+    for url in urls:
+        if url.startswith(("https://", "http://")):
+            sources.setdefault(url, URLSource(url=url, title=url))
+
+    return task.model_copy(
+        update={
+            "title": title,
+            "title_query": queries[0] if queries else task.title_query,
+            "queries": list(dict.fromkeys(queries)),
+            "sources": list(sources.values()),
+        }
+    )
+
+
 async def stream_agent_response(
     context: AgentContext,
     result: RunResultStreaming,
@@ -556,6 +604,7 @@ async def _stream_agent_response(
     produced_items = set()
     synthetic_message_ids: dict[int, str] = {}
     pending_images: dict[str, GeneratedImageItem] = {}
+    search_locations: dict[str, tuple[str, int]] = {}
     streaming_thought: None | StreamingThoughtTracker = None
     # item_id -> content_index -> annotation count
     item_annotation_count: defaultdict[str, defaultdict[int, int]] = defaultdict(
@@ -571,8 +620,10 @@ async def _stream_agent_response(
     last_item = items.data[0] if len(items.data) > 0 else None
     second_last_item = items.data[1] if len(items.data) > 1 else None
 
+    resumed_workflow_id: str | None = None
     if last_item and last_item.type == "workflow":
         ctx.workflow_item = last_item
+        resumed_workflow_id = last_item.id
     elif (
         last_item
         and last_item.type == "client_tool_call"
@@ -580,6 +631,7 @@ async def _stream_agent_response(
         and second_last_item.type == "workflow"
     ):
         ctx.workflow_item = second_last_item
+        resumed_workflow_id = second_last_item.id
 
     def message_id(item_id: str, output_index: int) -> str:
         # Agents reuses this placeholder in its Responses-shaped Chat Completions
@@ -590,10 +642,33 @@ async def _stream_agent_response(
             synthetic_message_ids[output_index] = ctx.generate_id("message")
         return synthetic_message_ids[output_index]
 
+    def is_search_workflow(item: WorkflowItem) -> bool:
+        return any(
+            workflow_id == item.id for workflow_id, _ in search_locations.values()
+        )
+
+    def start_reasoning_workflow() -> WorkflowItem:
+        workflow_item = WorkflowItem(
+            id=ctx.generate_id("workflow"),
+            created_at=datetime.now(),
+            workflow=Workflow(type="reasoning", tasks=[]),
+            thread_id=thread.id,
+        )
+        ctx.workflow_item = workflow_item
+        produced_items.add(workflow_item.id)
+        return workflow_item
+
     def end_workflow(item: WorkflowItem):
         if item == ctx.workflow_item:
             ctx.workflow_item = None
-        delta = datetime.now() - item.created_at
+        for workflow_id, task_index in search_locations.values():
+            if workflow_id == item.id:
+                task = item.workflow.tasks[task_index]
+                if isinstance(task, SearchTask) and task.status_indicator == "loading":
+                    item.workflow.tasks[task_index] = task.model_copy(
+                        update={"status_indicator": "none"}
+                    )
+        delta = datetime.now(item.created_at.tzinfo) - item.created_at
         duration = int(delta.total_seconds())
         if item.workflow.summary is None:
             item.workflow.summary = DurationSummary(duration=duration)
@@ -601,7 +676,58 @@ async def _stream_agent_response(
         # To keep a workflow open on completion, close it explicitly with
         # AgentContext.end_workflow(expanded=True)
         item.workflow.expanded = False
+        if item.id == resumed_workflow_id and is_search_workflow(item):
+            return ThreadItemReplacedEvent(item=item)
         return ThreadItemDoneEvent(item=item)
+
+    def update_search(
+        item_id: str,
+        status: Literal["loading", "complete", "none"],
+        *,
+        call: ResponseFunctionWebSearch | None = None,
+        start: bool = False,
+    ) -> Iterator[ThreadStreamEvent]:
+        location = search_locations.get(item_id)
+        workflow_item = ctx.workflow_item
+        if location is None:
+            if not start:
+                return
+            if workflow_item is None:
+                workflow_item = start_reasoning_workflow()
+                yield ThreadItemAddedEvent(item=workflow_item.model_copy(deep=True))
+            tasks = workflow_item.workflow.tasks
+            task_index = len(tasks)
+            task = SearchTask(status_indicator=status)
+            if call is not None:
+                task = _search_task_metadata(task, call)
+            search_locations[item_id] = (workflow_item.id, task_index)
+            tasks.append(task)
+            yield ThreadItemUpdatedEvent(
+                item_id=workflow_item.id,
+                update=WorkflowTaskAdded(task=task, task_index=task_index),
+            )
+            return
+
+        workflow_id, task_index = location
+        if workflow_item is None or workflow_item.id != workflow_id:
+            return
+        tasks = workflow_item.workflow.tasks
+        previous = tasks[task_index]
+        if not isinstance(previous, SearchTask):
+            return
+        if previous.status_indicator != "loading" and (
+            status == "loading" or call is None
+        ):
+            return
+        task = previous.model_copy(update={"status_indicator": status})
+        if call is not None:
+            task = _search_task_metadata(task, call)
+        if task != previous:
+            tasks[task_index] = task
+            yield ThreadItemUpdatedEvent(
+                item_id=workflow_id,
+                update=WorkflowTaskUpdated(task=task, task_index=task_index),
+            )
 
     try:
         async for event in events:
@@ -702,14 +828,7 @@ async def _stream_agent_response(
             elif event.type == "response.output_item.added":
                 item = event.item
                 if item.type == "reasoning" and not ctx.workflow_item:
-                    ctx.workflow_item = WorkflowItem(
-                        id=ctx.generate_id("workflow"),
-                        created_at=datetime.now(),
-                        workflow=Workflow(type="reasoning", tasks=[]),
-                        thread_id=thread.id,
-                    )
-                    produced_items.add(ctx.workflow_item.id)
-                    yield ThreadItemAddedEvent(item=ctx.workflow_item)
+                    yield ThreadItemAddedEvent(item=start_reasoning_workflow())
                 if item.type == "message":
                     if ctx.workflow_item:
                         yield end_workflow(ctx.workflow_item)
@@ -736,6 +855,23 @@ async def _stream_agent_response(
                     pending_images[item.id] = image_item
                     produced_items.add(image_item.id)
                     yield ThreadItemAddedEvent(item=image_item)
+                elif item.type == "web_search_call":
+                    for search_event in update_search(
+                        item.id,
+                        _search_status(item),
+                        call=item,
+                        start=True,
+                    ):
+                        yield search_event
+            elif (
+                event.type == "response.web_search_call.in_progress"
+                or event.type == "response.web_search_call.searching"
+            ):
+                for search_event in update_search(event.item_id, "loading", start=True):
+                    yield search_event
+            elif event.type == "response.web_search_call.completed":
+                for search_event in update_search(event.item_id, "complete"):
+                    yield search_event
             elif event.type == "response.image_generation_call.partial_image":
                 image_item = pending_images.get(event.item_id)
                 if image_item is None:
@@ -853,26 +989,43 @@ async def _stream_agent_response(
                     yield ThreadItemDoneEvent(
                         item=image_item.model_copy(update={"image": image})
                     )
+                elif item.type == "web_search_call":
+                    for search_event in update_search(
+                        item.id,
+                        "complete" if item.status == "completed" else "none",
+                        call=item,
+                    ):
+                        yield search_event
 
-    except InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered:
-        for item_id in produced_items:
-            yield ThreadItemRemovedEvent(item_id=item_id)
-
-        # Drain remaining events without processing them
-        context._complete()
-        queue_iterator.drain_and_complete()
-
+    except BaseException as error:
+        if ctx.workflow_item and is_search_workflow(ctx.workflow_item):
+            ctx.workflow_item = None
+        if isinstance(
+            error, (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered)
+        ):
+            for item_id in produced_items:
+                yield ThreadItemRemovedEvent(item_id=item_id)
+            # Drain remaining events without processing them
+            context._complete()
+            queue_iterator.drain_and_complete()
         raise
 
     context._complete()
+
+    # Settle native search state before yielding queued events. A disconnect
+    # during the drain must not leave an active search in the agent context.
+    finished_search_workflow = None
+    if ctx.workflow_item and is_search_workflow(ctx.workflow_item):
+        finished_search_workflow = end_workflow(ctx.workflow_item)
 
     # Drain remaining events
     async for event in queue_iterator:
         yield event.event
 
-    # If there is still an active workflow at the end of the run, store
-    # it's current state so that we can continue it in the next turn.
-    if ctx.workflow_item:
+    if finished_search_workflow is not None:
+        yield finished_search_workflow
+    elif ctx.workflow_item:
+        # Other workflows can continue in the next turn.
         await ctx.store.add_thread_item(
             thread.id, ctx.workflow_item, ctx.request_context
         )
