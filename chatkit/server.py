@@ -101,6 +101,7 @@ from .widgets import WidgetComponent, WidgetComponentBase, WidgetRoot
 
 DEFAULT_PAGE_SIZE = 20
 DEFAULT_ERROR_MESSAGE = "An error occurred when generating a response."
+_HIDDEN_ITEMS = (HiddenContextItem, SDKHiddenContextItem)
 
 
 def diff_widget(
@@ -535,9 +536,7 @@ class ChatKitServer[TContext = Any](ABC):
                 )
                 # filter out hidden context items
                 items.data = [
-                    item
-                    for item in items.data
-                    if not isinstance(item, (HiddenContextItem, SDKHiddenContextItem))
+                    item for item in items.data if not isinstance(item, _HIDDEN_ITEMS)
                 ]
                 return self._serialize(items)
             case ThreadsUpdateReq():
@@ -918,6 +917,7 @@ class ChatKitServer[TContext = Any](ABC):
         # Keep track of items that were streamed but not yet saved
         # so that we can persist them when the stream is cancelled.
         pending_items: dict[str, ThreadItem] = {}
+        hidden_item_ids: set[str] = set()
 
         try:
             async with _closing_stream(aiter(stream())) as events:
@@ -949,14 +949,30 @@ class ChatKitServer[TContext = Any](ABC):
                             # when the stream is cancelled.
                             self._update_pending_items(pending_items, event)
 
-                    # special case - don't send hidden context items back to the client
-                    should_swallow_event = isinstance(
-                        event, ThreadItemDoneEvent
-                    ) and isinstance(
-                        event.item, (HiddenContextItem, SDKHiddenContextItem)
-                    )
-
-                    if not should_swallow_event:
+                    if isinstance(event, (ThreadCreatedEvent, ThreadUpdatedEvent)):
+                        hidden_item_ids.update(
+                            item.id
+                            for item in event.thread.items.data
+                            if isinstance(item, _HIDDEN_ITEMS)
+                        )
+                        yield event.model_copy(
+                            update={"thread": self._to_thread_response(event.thread)}
+                        )
+                    elif isinstance(
+                        event,
+                        (
+                            ThreadItemAddedEvent,
+                            ThreadItemDoneEvent,
+                            ThreadItemReplacedEvent,
+                        ),
+                    ) and isinstance(event.item, _HIDDEN_ITEMS):
+                        hidden_item_ids.add(event.item.id)
+                    elif not (
+                        isinstance(
+                            event, (ThreadItemUpdatedEvent, ThreadItemRemovedEvent)
+                        )
+                        and event.item_id in hidden_item_ids
+                    ):
                         yield event
 
                     # in case user updated the thread while streaming
@@ -1115,11 +1131,19 @@ class ChatKitServer[TContext = Any](ABC):
         ).encode("utf-8")
 
     def _to_thread_response(self, thread: ThreadMetadata | Thread) -> Thread:
-        def is_hidden(item: ThreadItem) -> bool:
-            return isinstance(item, (HiddenContextItem, SDKHiddenContextItem))
-
-        items = thread.items if isinstance(thread, Thread) else Page()
-        items.data = [item for item in items.data if not is_hidden(item)]
+        items = (
+            thread.items.model_copy(
+                update={
+                    "data": [
+                        item
+                        for item in thread.items.data
+                        if not isinstance(item, _HIDDEN_ITEMS)
+                    ]
+                }
+            )
+            if isinstance(thread, Thread)
+            else Page()
+        )
 
         return Thread(
             id=thread.id,
