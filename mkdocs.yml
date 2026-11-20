@@ -73,6 +73,7 @@ nav:
           - protocol: api/chatkit/protocol.md
           - server: api/chatkit/server.md
           - store: api/chatkit/store.md
+          - store checks: api/chatkit/store_checks.md
           - turns: api/chatkit/turns.md
           - types: api/chatkit/types.md
           - widgets: api/chatkit/widgets.md

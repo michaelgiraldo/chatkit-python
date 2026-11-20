@@ -12,6 +12,7 @@ from chatkit.errors import ErrorCode
 from chatkit.protocol import encode_message, encode_sse, parse_request
 from chatkit.server import ChatKitServer, StreamingResult
 from chatkit.store import ThreadPatch, ThreadStore
+from chatkit.store_checks import check_thread_store
 from chatkit.turns import Turn, TurnOutcome
 from chatkit.types import ThreadMetadata, ThreadStreamEvent
 from chatkit.widgets import WidgetComponent, WidgetRoot

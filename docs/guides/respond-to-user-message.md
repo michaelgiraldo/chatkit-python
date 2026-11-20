@@ -152,83 +152,61 @@ To support uploads, supply an
 `AttachmentMetadataStore` for records and an `AttachmentStore` for file
 operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-strategy)
 
-Here are the thread read and upsert methods of a Postgres implementation.
+### Use the file-backed SQLite example
+
+The [SQLite example](../examples/sqlite_thread_store.py) implements all 12
+`ThreadStore` methods. Save it with your app or import it from this checkout.
+It scopes thread and item queries by `context.user_id`, so supply this value
+from your authenticated application session. The database survives restarts.
+Use a new SQLite file for the example.
 
 ```python
-from psycopg.types.json import Jsonb
+from dataclasses import dataclass
 
-from chatkit.store import NotFoundError, ThreadStore
-from chatkit.types import ThreadMetadata
+from docs.examples.sqlite_thread_store import SQLiteThreadStore
 
 
-class MyPostgresStore(ThreadStore[MyRequestContext]):
-    def __init__(self, conninfo: str) -> None:
-        self._conninfo = conninfo
-        self._init_schema()
+@dataclass(frozen=True)
+class RequestContext:
+    user_id: str
 
-    def _init_schema(self) -> None:
-        with self._connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS threads (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    data JSONB NOT NULL
-                );
-                """
-            )
 
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS items (
-                    id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL
-                        REFERENCES threads (id)
-                        ON DELETE CASCADE,
-                    user_id TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    data JSONB NOT NULL
-                );
-                """
-            )
-
-            conn.commit()
-
-    async def load_thread(
-        self, thread_id: str, context: MyRequestContext
-    ) -> ThreadMetadata:
-        with self._connection() as conn, conn.cursor(row_factory=tuple_row) as cur:
-            cur.execute(
-                "SELECT data FROM threads WHERE id = %s AND user_id = %s",
-                (thread_id, context.user_id),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise NotFoundError(f"Thread {thread_id} not found")
-            return ThreadMetadata.model_validate(row[0])
-
-    async def save_thread(
-        self, thread: ThreadMetadata, context: MyRequestContext
-    ) -> None:
-        payload = Jsonb(thread.model_dump(mode="json"))
-        with self._connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO threads (id, user_id, created_at, data)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (id)
-                DO UPDATE SET data = EXCLUDED.data
-                WHERE threads.user_id = EXCLUDED.user_id
-                """,
-                (thread.id, context.user_id, thread.created_at, payload),
-            )
-            if not cur.rowcount:
-                raise NotFoundError(f"Thread {thread.id} not found")
-            conn.commit()
-
-    # Implement the remaining ThreadStore methods using the same request scope.
+store = SQLiteThreadStore[RequestContext]("chat.sqlite3")
 ```
+
+Pass `store` to your `ChatKitServer` subclass. The example uses short SQLite
+transactions and Python's synchronous `sqlite3` driver. Each operation runs
+on the calling thread, so this is a local development reference. For a busy
+async server, use an async driver or run the SQLite transactions in a worker.
+The example persists threads and items. Configure a separate attachment store
+if your app supports uploads.
+
+### Check your app's store
+
+Run `check_thread_store` in your app's test suite with a disposable database
+and contexts for two distinct test users. The check writes and deletes a
+synthetic thread. It verifies scoped reads, tied-timestamp pagination,
+concurrent patches, form and tool claims, and retry truncation.
+
+```python
+from chatkit.store_checks import check_thread_store
+
+
+async def test_app_store(tmp_path):
+    path = tmp_path / "contract.sqlite3"
+    await check_thread_store(
+        SQLiteThreadStore[RequestContext](path),
+        RequestContext(user_id="example-user"),
+        other_context=RequestContext(user_id="other-example-user"),
+        peer=SQLiteThreadStore[RequestContext](path),
+    )
+```
+
+For async adapters, supply independent store instances sharing the test database
+so the two calls can contend across connections. A synchronous driver runs
+those tasks in sequence on an event loop. To test actual write contention
+with synchronous SQLite, run each transaction on its own worker, as in the
+repository's SQLite concurrency test.
 
 Customize ID generation by overriding `generate_thread_id` and `generate_item_id` if you need external or deterministic IDs. Store metadata such as a model `last_response_id` on `ThreadMetadata` to drive your inference pipeline.
 

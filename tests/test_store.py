@@ -1,14 +1,19 @@
 import asyncio
 import sqlite3
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 
 import pytest
 
 from chatkit.store import ConflictError
-from chatkit.types import StructuredInputItem, ThreadMetadata
+from chatkit.store_checks import check_thread_store
+from chatkit.types import AssistantMessageItem, StructuredInputItem, ThreadMetadata
+from docs.examples.sqlite_thread_store import SQLiteThreadStore
+from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
 from tests.helpers.storage_contract import (
+    ALTERNATIVE_CONTEXT,
     DEFAULT_CONTEXT,
     AttachmentMetadataStoreContract,
     ThreadStoreContract,
@@ -134,3 +139,43 @@ async def test_sqlite_claim_and_patch_across_independent_connections(tmp_path: P
     assert item.status == ("answered" if answered else "skipped")
     patched = await first_store.load_thread(thread.id, ctx)
     assert patched.metadata == {"test": "test", "answered": True, "skipped": True}
+
+
+@pytest.mark.asyncio
+async def test_app_store_checks_work_with_independent_instances(tmp_path: Path):
+    path = tmp_path / "contract.sqlite3"
+    await check_thread_store(
+        SQLiteThreadStore[RequestContext](path),
+        DEFAULT_CONTEXT,
+        other_context=ALTERNATIVE_CONTEXT,
+        peer=SQLiteThreadStore[RequestContext](path),
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_backed_example_reopens_with_stable_timestamp_order(tmp_path: Path):
+    path = tmp_path / "turns.sqlite3"
+    thread = make_thread()
+    store = SQLiteThreadStore[RequestContext](path)
+    await store.save_thread(thread, DEFAULT_CONTEXT)
+    instant = datetime.now(UTC)
+    for item_id, offset in (("b", timedelta()), ("a", timedelta(hours=-3))):
+        await store.add_thread_item(
+            thread.id,
+            AssistantMessageItem(
+                id=item_id,
+                thread_id=thread.id,
+                created_at=instant.astimezone(timezone(offset)),
+                content=[],
+            ),
+            DEFAULT_CONTEXT,
+        )
+
+    reopened = SQLiteThreadStore[RequestContext](path)
+    assert await reopened.load_thread(thread.id, DEFAULT_CONTEXT) == thread
+    page = await reopened.load_thread_items(thread.id, None, 1, "asc", DEFAULT_CONTEXT)
+    assert [item.id for item in page.data] == ["a"]
+    second_page = await reopened.load_thread_items(
+        thread.id, page.after, 1, "asc", DEFAULT_CONTEXT
+    )
+    assert [item.id for item in second_page.data] == ["b"]

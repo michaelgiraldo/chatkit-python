@@ -8,6 +8,7 @@ What you'll find here:
 - **Protocol**: [`chatkit.protocol`](protocol.md) – JSON request parsing and encoding for transport adapters.
 - **Turns**: [`chatkit.turns`](turns.md) – typed triggers, request context, and response outcomes.
 - **Store integration**: [`chatkit.store`](store.md) – separate interfaces for threads and items, attachment metadata, and attachment file operations.
+- **Store checks**: [`chatkit.store_checks`](store_checks.md) – contract checks for app-owned thread stores.
 - **Agents integration helpers**: [`chatkit.agents`](agents.md) – helpers and utilities for using ChatKit together with the Agents SDK.
 - **Data models and types**: [`chatkit.types`](types.md) – Pydantic models for threads, items, events, and other shared types.
 - **Errors**: [`chatkit.errors`](errors.md) – structured error types your ChatKit integration can raise so ChatKit can emit consistent `ErrorEvent`s to the client.
