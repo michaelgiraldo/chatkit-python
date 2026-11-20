@@ -399,7 +399,7 @@ async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
     return await get_document_by_id(document_id)
 ```
 
-`stream_agent_response` will forward these events alongside any assistant text or tool call updates. Client tool calls are also supported via `ctx.context.client_tool_call` when you register the tool on both client and server.
+`stream_agent_response` forwards these events alongside assistant text and tool updates. To call a browser callback from an agent tool, use [`request_client_tool`](update-client-during-response.md#define-a-client-tool-in-your-agent).
 
 ### Save structured tool results after a turn
 

@@ -3,6 +3,7 @@ import json
 from collections import defaultdict
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import aclosing
+from dataclasses import dataclass
 from datetime import datetime
 from inspect import cleandoc
 from typing import (
@@ -22,9 +23,9 @@ from agents import (
     StreamEvent,
     TResponseInputItem,
 )
+from agents.tool_context import ToolContext
 from openai.types.responses import (
     EasyInputMessageParam,
-    ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
     ResponseFunctionWebSearch,
     ResponseInputContentParam,
@@ -96,13 +97,13 @@ from .types import (
 from .widgets import Markdown, Text, WidgetRoot
 
 _CHAT_COMPLETIONS_PLACEHOLDER_ID = "__fake_id__"
+_CLIENT_TOOL_CONFLICT = "Only one client tool may be requested per turn."
 
 
-class ClientToolCall(BaseModel):
-    """
-    Returned from tool methods to indicate a client-side tool call.
-    """
-
+@dataclass(frozen=True, slots=True)
+class _ClientToolRequest:
+    item_id: str | None
+    call_id: str
     name: str
     arguments: dict[str, Any]
 
@@ -117,8 +118,9 @@ class AgentContext[TContext](BaseModel):
     store: Annotated[ThreadStore[TContext], SkipValidation]
     request_context: TContext
     previous_response_id: str | None = None
-    client_tool_call: ClientToolCall | None = None
     workflow_item: WorkflowItem | None = None
+    _client_tool_request: _ClientToolRequest | None = None
+    _client_tool_conflict: bool = False
     _events: asyncio.Queue[ThreadStreamEvent | _QueueCompleteSentinel] = asyncio.Queue()
 
     def generate_id(
@@ -129,6 +131,31 @@ class AgentContext[TContext](BaseModel):
             return self.store.generate_thread_id(self.request_context)
         return self.store.generate_item_id(
             type, thread or self.thread, self.request_context
+        )
+
+    def request_client_tool(
+        self,
+        tool: ToolContext[AgentContext[TContext]],
+        *,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Request a browser callback for this invocation of an Agents SDK tool.
+
+        Configure the agent to stop at the calling tool. The browser receives one
+        pending call when the run finishes and supplies its result on the next turn.
+        """
+        if tool.context is not self or not tool.tool_call_id:
+            raise ValueError("Pass the ToolContext for the current tool invocation.")
+        if self._client_tool_request is not None:
+            self._client_tool_conflict = True
+            raise ValueError(_CLIENT_TOOL_CONFLICT)
+
+        self._client_tool_request = _ClientToolRequest(
+            item_id=tool.tool_call.id if tool.tool_call is not None else None,
+            call_id=tool.tool_call_id,
+            name=name,
+            arguments=arguments,
         )
 
     async def stream_widget(
@@ -472,24 +499,6 @@ async def _convert_annotation(
     return None
 
 
-def _function_call_metadata(raw_item: object) -> tuple[str | None, str | None]:
-    if isinstance(raw_item, dict):
-        if raw_item.get("type") != "function_call":
-            return None, None
-
-        call_id = raw_item.get("call_id")
-        item_id = raw_item.get("id")
-        return (
-            call_id if isinstance(call_id, str) else None,
-            item_id if isinstance(item_id, str) else None,
-        )
-
-    if isinstance(raw_item, ResponseFunctionToolCall):
-        return raw_item.call_id, raw_item.id
-
-    return None, None
-
-
 def _search_status(
     call: ResponseFunctionWebSearch,
 ) -> Literal["loading", "complete", "none"]:
@@ -597,8 +606,6 @@ async def _stream_agent_response(
     queue_iterator: _AsyncQueueIterator,
     converter: ResponseStreamConverter,
 ) -> AsyncGenerator[ThreadStreamEvent, None]:
-    current_item_id = None
-    current_tool_call = None
     ctx = context
     thread = context.thread
     produced_items = set()
@@ -758,17 +765,6 @@ async def _stream_agent_response(
                     # there is a guardrail tripwire
                     produced_items.add(event.item.id)
                 yield event
-                continue
-
-            if event.type == "run_item_stream_event":
-                event = event.item
-                if event.type == "tool_call_item":
-                    current_tool_call, current_item_id = _function_call_metadata(
-                        event.raw_item
-                    )
-                    if current_tool_call:
-                        assert current_item_id
-                        produced_items.add(current_item_id)
                 continue
 
             if event.type != "raw_response_event":
@@ -1010,6 +1006,11 @@ async def _stream_agent_response(
             queue_iterator.drain_and_complete()
         raise
 
+    if context._client_tool_conflict:
+        # The Agents SDK can convert a tool exception into a tool result. Never
+        # hand off an ambiguous request even if the run handled the exception.
+        raise ValueError(_CLIENT_TOOL_CONFLICT)
+
     context._complete()
 
     # Settle native search state before yielding queued events. A disconnect
@@ -1030,21 +1031,18 @@ async def _stream_agent_response(
             thread.id, ctx.workflow_item, ctx.request_context
         )
 
-    if context.client_tool_call:
+    if (request := context._client_tool_request) is not None:
+        item_id = request.item_id
+        if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+            item_id = context.generate_id("tool_call")
         yield ThreadItemDoneEvent(
             item=ClientToolCallItem(
-                id=current_item_id
-                or context.store.generate_item_id(
-                    "tool_call", thread, context.request_context
-                ),
+                id=item_id,
                 thread_id=thread.id,
-                name=context.client_tool_call.name,
-                arguments=context.client_tool_call.arguments,
+                name=request.name,
+                arguments=request.arguments,
                 created_at=datetime.now(),
-                call_id=current_tool_call
-                or context.store.generate_item_id(
-                    "tool_call", thread, context.request_context
-                ),
+                call_id=request.call_id,
             ),
         )
 

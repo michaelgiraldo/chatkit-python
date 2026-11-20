@@ -128,16 +128,18 @@ Use client effects instead when you do not need to wait for the client callback 
 
 ### Define a client tool in your agent
 
-Set `ctx.context.client_tool_call` inside a tool and configure the agent to stop at that tool. Only one client tool call can run per turn. Include client tools in `stop_at_tool_names` so the model pauses while the client callback runs and returns its result.
+Annotate the tool with the Agents SDK's `ToolContext` and call `ctx.context.request_client_tool(ctx, ...)` to tie the browser callback to this invocation. Turnspan accepts one client tool request per turn. Include the client tool in `stop_at_tool_names` so the model pauses while the browser callback runs and returns its result.
 
 ```python
-from agents import Agent, RunContextWrapper, StopAtTools, function_tool
-from chatkit.agents import AgentContext, ClientToolCall
+from agents import Agent, StopAtTools, function_tool
+from agents.tool_context import ToolContext
+from chatkit.agents import AgentContext
 
 
 @function_tool(description_override="Read the user's current canvas selection.")
-async def get_selected_canvas_nodes(ctx: RunContextWrapper[AgentContext]) -> None:
-    ctx.context.client_tool_call = ClientToolCall(
+async def get_selected_canvas_nodes(ctx: ToolContext[AgentContext]) -> None:
+    ctx.context.request_client_tool(
+        ctx,
         name="get_selected_canvas_nodes",
         arguments={"project": my_project()},
     )
@@ -153,7 +155,7 @@ assistant = Agent[AgentContext](
 
 ### Register the client tool in ChatKit.js
 
-Provide a matching callback when initializing ChatKit on the client. The function name must match the `ClientToolCall.name`, and its return value is sent back to the server to resume the run.
+Provide a matching callback when initializing ChatKit on the client. Match the name passed to `request_client_tool`. The client sends the return value back to the server to resume the run.
 
 ```ts
 const chatkit = useChatKit({

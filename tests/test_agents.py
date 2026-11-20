@@ -22,6 +22,7 @@ from agents import (
     StreamEvent,
     ToolCallItem,
 )
+from agents.tool_context import ToolContext
 from openai.types.responses import (
     EasyInputMessageParam,
     ResponseFileSearchToolCall,
@@ -69,7 +70,6 @@ from openai.types.responses.response_text_done_event import ResponseTextDoneEven
 
 from chatkit.agents import (
     AgentContext,
-    ClientToolCall,
     ResponseStreamConverter,
     ThreadItemConverter,
     accumulate_text,
@@ -364,46 +364,38 @@ async def test_returns_widget_full_replace_generator():
     )
 
 
-async def test_client_tool_call_uses_raw_function_call_id():
+async def test_duplicate_client_tool_requests_fail_the_handoff():
     context = AgentContext(
-        previous_response_id=None,
         thread=thread,
         store=mock_store,
         request_context=None,
-        client_tool_call=ClientToolCall(name="get_selection", arguments={}),
     )
-    result = make_result()
-    raw_item = ResponseFunctionToolCall(
-        id="fc_123",
-        type="function_call",
-        call_id="call_123",
-        name="get_selection",
-        arguments="{}",
-        status="completed",
-    )
-    result.add_event(
-        RunItemStreamEvent(
-            name="tool_called",
-            item=ToolCallItem(
-                agent=Agent("Assistant"),
-                raw_item=raw_item,
+
+    def tool_context(index: int) -> ToolContext[AgentContext[None]]:
+        return ToolContext(
+            context=context,
+            tool_name="get_selection",
+            tool_arguments="{}",
+            tool_call_id=f"call_{index}",
+            tool_call=ResponseFunctionToolCall(
+                id=f"fc_{index}",
+                type="function_call",
+                call_id=f"call_{index}",
+                name="get_selection",
+                arguments="{}",
+                status="completed",
             ),
         )
-    )
+
+    context.request_client_tool(tool_context(1), name="get_selection", arguments={})
+    with pytest.raises(ValueError, match="Only one client tool"):
+        context.request_client_tool(tool_context(2), name="get_selection", arguments={})
+
+    # The SDK can turn a callback exception into a tool result and complete.
+    result = make_result()
     result.done()
-
-    events = await all_events(
-        stream_agent_response(
-            context=context,
-            result=result,
-        )
-    )
-
-    assert len(events) == 1
-    assert isinstance(events[0], ThreadItemDoneEvent)
-    assert isinstance(events[0].item, ClientToolCallItem)
-    assert events[0].item.id == "fc_123"
-    assert events[0].item.call_id == "call_123"
+    with pytest.raises(ValueError, match="Only one client tool"):
+        await all_events(stream_agent_response(context, result))
 
 
 async def test_accumulate_text():

@@ -72,9 +72,15 @@ Include this tool in your agent so the model can call it when it needs that info
 When the context only exists on the client (selection, viewport, local app state), use a client tool:
 
 ```python
+from agents import function_tool
+from agents.tool_context import ToolContext
+from chatkit.agents import AgentContext
+
+
 @function_tool(description_override="Read the user's current canvas selection.")
-async def get_canvas_selection(ctx: RunContextWrapper[AgentContext]) -> None:
-    ctx.context.client_tool_call = ClientToolCall(
+async def get_canvas_selection(ctx: ToolContext[AgentContext]) -> None:
+    ctx.context.request_client_tool(
+        ctx,
         name="get_canvas_selection",
         arguments={},
     )
@@ -99,7 +105,7 @@ const chatkit = useChatKit({
 });
 ```
 
-ChatKit will send the client tool result back to the server and continue the run with that data included as model input.
+Configure the agent to [stop at the client tool](update-client-during-response.md#define-a-client-tool-in-your-agent). ChatKit sends the client tool result back to the server and continues the run with that data included as model input.
 
 ## Inject extra context as model input item
 

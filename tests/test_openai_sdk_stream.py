@@ -1,8 +1,10 @@
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
+from typing import Literal
 
 import httpx2
+import pytest
 from agents import (
     Agent,
     ModelSettings,
@@ -10,18 +12,23 @@ from agents import (
     OpenAIResponsesModel,
     RunConfig,
     Runner,
+    StopAtTools,
+    function_tool,
 )
+from agents.tool_context import ToolContext
 from openai import AsyncOpenAI
 
 from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
-from chatkit.turns import Turn, UserMessageTurn
+from chatkit.turns import ClientToolTurn, Turn, UserMessageTurn
 from chatkit.types import (
     AssistantMessageContentPartAnnotationAdded,
     AssistantMessageContentPartTextDelta,
     AssistantMessageItem,
+    ClientToolCallItem,
     ErrorEvent,
     InferenceOptions,
     Thread,
+    ThreadAddClientToolOutputParams,
     ThreadAddUserMessageParams,
     ThreadCreatedEvent,
     ThreadCreateParams,
@@ -29,6 +36,7 @@ from chatkit.types import (
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
+    ThreadsAddClientToolOutputReq,
     ThreadsAddUserMessageReq,
     ThreadsCreateReq,
     ThreadsGetByIdReq,
@@ -126,6 +134,88 @@ def _mock_client(
         base_url="https://example.com/v1",
         http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
         max_retries=0,
+    )
+
+
+def _chat_completions_stream(turn: int, choices: list[dict]) -> str:
+    chunk = {
+        "id": f"chatcmpl_example_{turn}",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "gpt-6-luna",
+    }
+    return (
+        "".join(
+            f"data: {json.dumps(dict(chunk, choices=[choice]))}\n\n"
+            for choice in choices
+        )
+        + "data: [DONE]\n\n"
+    )
+
+
+def _client_tool_stream(
+    api: Literal["responses", "chat_completions"], turn: int
+) -> str:
+    names = ("client_read", "server_lookup")
+    if api == "chat_completions":
+        calls = [
+            {
+                "index": index,
+                "id": f"call_{name}_{turn}",
+                "type": "function",
+                "function": {"name": name, "arguments": "{}"},
+            }
+            for index, name in enumerate(names)
+        ]
+        return _chat_completions_stream(
+            turn,
+            [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "tool_calls": calls},
+                    "finish_reason": None,
+                },
+                {"index": 0, "delta": {}, "finish_reason": "tool_calls"},
+            ],
+        )
+
+    items = [
+        {
+            "id": f"fc_{name}_{turn}",
+            "type": "function_call",
+            "call_id": f"call_{name}_{turn}",
+            "name": name,
+            "arguments": "{}",
+            "status": "completed",
+        }
+        for name in names
+    ]
+    events = [
+        {
+            "type": f"response.output_item.{stage}",
+            "output_index": index,
+            "item": item,
+        }
+        for index, item in enumerate(items)
+        for stage in ("added", "done")
+    ]
+    events.append({
+        "type": "response.completed",
+        "response": {
+            "id": f"resp_tool_{turn}",
+            "created_at": 1,
+            "model": "gpt-6-luna",
+            "object": "response",
+            "output": items,
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "status": "completed",
+        },
+    })
+    return "".join(
+        f"data: {json.dumps(dict(event, sequence_number=index))}\n\n"
+        for index, event in enumerate(events)
     )
 
 
@@ -270,12 +360,6 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         assert json.loads(request.content)["stream"] is True
         requested_paths.append(request.url.path)
         turn = len(requested_paths)
-        chunk = {
-            "id": f"chatcmpl_example_{turn}",
-            "object": "chat.completion.chunk",
-            "created": 1,
-            "model": "gpt-6-luna",
-        }
         choices = [
             {
                 "index": 0,
@@ -288,11 +372,7 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         return httpx2.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
-            text="".join(
-                f"data: {json.dumps(dict(chunk, choices=[choice]))}\n\n"
-                for choice in choices
-            )
-            + "data: [DONE]\n\n",
+            text=_chat_completions_stream(turn, choices),
         )
 
     async with _mock_client(handle_request) as client:
@@ -365,3 +445,160 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         for item in Thread.model_validate_json(loaded.json).items.data
         if isinstance(item, AssistantMessageItem)
     ] == [(first_reply.id, "Example reply 1"), (second_reply.id, "Example reply 2")]
+
+
+@pytest.mark.parametrize("api", ["responses", "chat_completions"])
+async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
+    api: Literal["responses", "chat_completions"],
+):
+    provider_requests = 0
+    server_calls: list[str] = []
+
+    def handle_request(request: httpx2.Request) -> httpx2.Response:
+        nonlocal provider_requests
+        provider_requests += 1
+        turn = (provider_requests + 1) // 2
+        expected_call_id = f"call_client_read_{turn}"
+        expected_result = f"selection-{turn}"
+        body = json.loads(request.content)
+        assert request.url.path == (
+            "/v1/responses" if api == "responses" else "/v1/chat/completions"
+        )
+        if provider_requests % 2:
+            stream = _client_tool_stream(api, turn)
+        elif api == "responses":
+            call, output = body["input"]
+            assert (call["name"], call["call_id"]) == ("client_read", expected_call_id)
+            assert output["call_id"] == expected_call_id
+            assert json.loads(output["output"]) == expected_result
+            stream = _responses_stream(turn)
+        else:
+            call, output = body["messages"]
+            (invocation,) = call["tool_calls"]
+            assert (invocation["function"]["name"], invocation["id"]) == (
+                "client_read",
+                expected_call_id,
+            )
+            assert output["tool_call_id"] == expected_call_id
+            assert json.loads(output["content"]) == expected_result
+            stream = _chat_completions_stream(
+                turn,
+                [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "Example reply"},
+                        "finish_reason": None,
+                    },
+                    {"index": 0, "delta": {}, "finish_reason": "stop"},
+                ],
+            )
+        return httpx2.Response(
+            200, headers={"Content-Type": "text/event-stream"}, text=stream
+        )
+
+    @function_tool
+    async def client_read(ctx: ToolContext[AgentContext[RequestContext]]) -> None:
+        """Read a selection from the browser."""
+        ctx.context.request_client_tool(ctx, name="client_read", arguments={})
+
+    @function_tool
+    async def server_lookup(ctx: ToolContext[AgentContext[RequestContext]]) -> str:
+        """Read data from the server."""
+        server_calls.append(ctx.tool_call_id)
+        return "Server data"
+
+    pending_items: list[ClientToolCallItem] = []
+    async with _mock_client(handle_request) as client:
+        model_type = (
+            OpenAIResponsesModel if api == "responses" else OpenAIChatCompletionsModel
+        )
+        agent = Agent[AgentContext[RequestContext]](
+            name="Tool example",
+            model=model_type("gpt-6-luna", client),
+            tools=[client_read, server_lookup],
+            tool_use_behavior=StopAtTools(stop_at_tool_names=[client_read.name]),
+        )
+
+        async def respond(
+            turn: Turn[RequestContext],
+        ) -> AsyncIterator[ThreadStreamEvent]:
+            context = AgentContext(
+                thread=turn.thread, store=server.store, request_context=turn.context
+            )
+            if isinstance(turn.input, ClientToolTurn):
+                input_item = turn.input.tool_call
+            else:
+                assert isinstance(turn.input, UserMessageTurn)
+                input_item = turn.input.message
+            result = Runner.run_streamed(
+                agent,
+                await simple_to_agent_input(input_item),
+                context=context,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+            async with aclosing(stream_agent_response(context, result)) as events:
+                async for event in events:
+                    yield event
+
+        with make_server(respond) as server:
+            events = await server.process_streaming(
+                ThreadsCreateReq(
+                    params=ThreadCreateParams(input=_message_input("Example question"))
+                )
+            )
+            thread_id = next(
+                event.thread.id
+                for event in events
+                if isinstance(event, ThreadCreatedEvent)
+            )
+            for turn in (1, 2):
+                if turn == 2:
+                    events = await server.process_streaming(
+                        ThreadsAddUserMessageReq(
+                            params=ThreadAddUserMessageParams(
+                                thread_id=thread_id,
+                                input=_message_input("Another question"),
+                            )
+                        )
+                    )
+                assert not any(isinstance(event, ErrorEvent) for event in events)
+                (pending,) = [
+                    event.item
+                    for event in events
+                    if isinstance(event, ThreadItemDoneEvent)
+                    and isinstance(event.item, ClientToolCallItem)
+                ]
+                assert (pending.name, pending.call_id, pending.status) == (
+                    "client_read",
+                    f"call_client_read_{turn}",
+                    "pending",
+                )
+                pending_items.append(pending)
+                resumed = await server.process_streaming(
+                    ThreadsAddClientToolOutputReq(
+                        params=ThreadAddClientToolOutputParams(
+                            thread_id=thread_id, result=f"selection-{turn}"
+                        )
+                    )
+                )
+                assert _completed_reply(resumed).content[0].text == "Example reply"
+            loaded = await server.process_non_streaming(
+                ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
+            )
+
+    assert provider_requests == 4
+    assert server_calls == ["call_server_lookup_1", "call_server_lookup_2"]
+    ids = [item.id for item in pending_items]
+    if api == "responses":
+        assert ids == ["fc_client_read_1", "fc_client_read_2"]
+    else:
+        assert ids[0] != ids[1]
+        assert all(item_id.startswith("tc_") for item_id in ids)
+    assert [
+        (item.id, item.call_id, item.status, item.output)
+        for item in Thread.model_validate_json(loaded.json).items.data
+        if isinstance(item, ClientToolCallItem)
+    ] == [
+        (item.id, item.call_id, "completed", f"selection-{index}")
+        for index, item in enumerate(pending_items, 1)
+    ]
