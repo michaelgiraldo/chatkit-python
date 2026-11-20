@@ -43,6 +43,7 @@ generator. Add this method to your server subclass using your app's
 
 ```python
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 
 from chatkit.server import stream_widget
 from chatkit.turns import Turn
@@ -53,18 +54,24 @@ async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStrea
     user_name = "Harry Potter"
     message = "Yer a wizard, Harry"
     message_widget = build_message_widget(user_name=user_name, message=message)
-    async for event in stream_widget(
-        turn.thread,
-        message_widget,
-        copy_text=f"Message to {user_name}: {message}",
-        generate_id=lambda item_type: self.store.generate_item_id(
-            item_type, turn.thread, turn.context
-        ),
-    ):
-        yield event
+    async with aclosing(
+        stream_widget(
+            turn.thread,
+            message_widget,
+            copy_text=f"Message to {user_name}: {message}",
+            generate_id=lambda item_type: self.store.generate_item_id(
+                item_type, turn.thread, turn.context
+            ),
+        )
+    ) as events:
+        async for event in events:
+            yield event
 ```
 
-To stream gradual updates, yield successive widget states from an async generator; `stream_widget` diffs and emits `ThreadItemUpdatedEvent`s for you.
+To stream gradual updates, yield successive widget states from an async
+generator. `stream_widget` emits updates for each change. A producer that
+yields zero states produces no widget. Use `aclosing` when forwarding events
+so a disconnect also closes the widget producer.
 
 ## Stream widgets from tools
 
@@ -165,6 +172,7 @@ Example widget definition with a client action handler:
 Implement `ChatKitServer.action` to process incoming actions. The `sender` argument is the widget item that triggered the action (if available).
 
 ```python
+from contextlib import aclosing
 from datetime import datetime
 
 from chatkit.errors import CustomStreamError
@@ -195,14 +203,17 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
 
             # Stream an updated widget back to the client.
             updated_widget = build_message_widget(user_name="Support", message=text)
-            async for event in stream_widget(
-                thread,
-                updated_widget,
-                generate_id=lambda item_type: self.store.generate_item_id(
-                    item_type, thread, context
-                ),
-            ):
-                yield event
+            async with aclosing(
+                stream_widget(
+                    thread,
+                    updated_widget,
+                    generate_id=lambda item_type: self.store.generate_item_id(
+                        item_type, thread, context
+                    ),
+                )
+            ) as events:
+                async for event in events:
+                    yield event
 ```
 
 Treat action payloads as untrusted input from the client.

@@ -215,14 +215,17 @@ async def stream_widget(
     widget: WidgetRoot | AsyncGenerator[WidgetRoot, None],
     copy_text: str | None = None,
     generate_id: Callable[[StoreItemType], str] = default_generate_id,
-) -> AsyncIterator[ThreadStreamEvent]:
-    """Stream a widget root (or async sequence of roots) as ThreadStreamEvents."""
-    item_id = generate_id("message")
+) -> AsyncGenerator[ThreadStreamEvent, None]:
+    """Stream a widget root or successive root states.
+
+    An empty producer emits no events. Closing the returned stream also closes
+    its producer.
+    """
 
     if not isinstance(widget, AsyncGenerator):
         yield ThreadItemDoneEvent(
             item=WidgetItem(
-                id=item_id,
+                id=generate_id("message"),
                 thread_id=thread.id,
                 created_at=datetime.now(),
                 widget=widget,
@@ -231,31 +234,28 @@ async def stream_widget(
         )
         return
 
-    initial_state = await widget.__anext__()
-
-    item = WidgetItem(
-        id=item_id,
-        created_at=datetime.now(),
-        widget=initial_state,
-        copy_text=copy_text,
-        thread_id=thread.id,
-    )
-
-    yield ThreadItemAddedEvent(item=item)
-
-    last_state = initial_state
-
-    while widget:
+    async with _closing_stream(widget) as states:
         try:
-            new_state = await widget.__anext__()
+            last_state = await anext(states)
+        except StopAsyncIteration:
+            return
+
+        item = WidgetItem(
+            id=generate_id("message"),
+            created_at=datetime.now(),
+            widget=last_state,
+            copy_text=copy_text,
+            thread_id=thread.id,
+        )
+        yield ThreadItemAddedEvent(item=item)
+
+        async for new_state in states:
             for update in diff_widget(last_state, new_state):
                 yield ThreadItemUpdatedEvent(
-                    item_id=item_id,
+                    item_id=item.id,
                     update=update,
                 )
             last_state = new_state
-        except StopAsyncIteration:
-            break
 
     yield ThreadItemDoneEvent(
         item=item.model_copy(update={"widget": last_state}),

@@ -1,4 +1,5 @@
 import json
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, Literal
 
@@ -6,7 +7,22 @@ import pytest
 from pydantic import TypeAdapter
 
 from chatkit.server import diff_widget
-from chatkit.types import WidgetItem, WidgetRootUpdated
+from chatkit.turns import Turn
+from chatkit.types import (
+    InferenceOptions,
+    Thread,
+    ThreadCreatedEvent,
+    ThreadCreateParams,
+    ThreadGetByIdParams,
+    ThreadItemDoneEvent,
+    ThreadsCreateReq,
+    ThreadsGetByIdReq,
+    ThreadStreamEvent,
+    UserMessageInput,
+    UserMessageTextContent,
+    WidgetItem,
+    WidgetRootUpdated,
+)
 from chatkit.widgets import (
     BasicRoot,
     Card,
@@ -20,6 +36,8 @@ from chatkit.widgets import (
     WidgetRoot,
     WidgetTemplate,
 )
+from tests._types import RequestContext
+from tests.helpers.server import make_server
 
 
 def test_nested_list_view_preserves_typed_rows_and_click_actions():
@@ -53,6 +71,66 @@ def test_nested_list_view_preserves_typed_rows_and_click_actions():
     assert row.onClickAction.handler == "server"
     assert TypeAdapter(StrictWidgetComponent).validate_python(nested_list) == child
     assert adapter.validate_json(adapter.dump_json(card, exclude_none=True)) == card
+
+
+@pytest.mark.parametrize(
+    "border",
+    [
+        1.5,
+        {"size": 0.5, "color": {"light": "#ccc", "dark": "#333"}, "style": "dashed"},
+        {"top": 0.5, "bottom": {"size": 1.5, "color": "strong"}},
+    ],
+)
+async def test_card_border_survives_thread_reload(border):
+    template = WidgetTemplate({
+        "version": "1.0",
+        "name": "Bordered card",
+        "template": json.dumps({"type": "Card", "children": [], "border": border}),
+    })
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        yield ThreadItemDoneEvent(
+            item=WidgetItem(
+                id="bordered-card",
+                thread_id=turn.thread.id,
+                created_at=datetime.now(),
+                widget=template.build(),
+            )
+        )
+
+    with make_server(respond) as server:
+        events = await server.process_streaming(
+            ThreadsCreateReq(
+                params=ThreadCreateParams(
+                    input=UserMessageInput(
+                        content=[UserMessageTextContent(text="Show a card")],
+                        attachments=[],
+                        inference_options=InferenceOptions(),
+                    )
+                )
+            )
+        )
+        thread_id = next(
+            event.thread.id for event in events if isinstance(event, ThreadCreatedEvent)
+        )
+        (streamed_item,) = [
+            event.item
+            for event in events
+            if isinstance(event, ThreadItemDoneEvent)
+            and isinstance(event.item, WidgetItem)
+        ]
+        reloaded = await server.process_non_streaming(
+            ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
+        )
+        thread = Thread.model_validate_json(reloaded.json)
+
+    (stored_item,) = [
+        item for item in thread.items.data if isinstance(item, WidgetItem)
+    ]
+    assert isinstance(streamed_item.widget, Card)
+    assert streamed_item.widget.border == border
+    assert isinstance(stored_item.widget, Card)
+    assert stored_item.widget.border == border
 
 
 @pytest.mark.parametrize("component", [Text, Markdown])

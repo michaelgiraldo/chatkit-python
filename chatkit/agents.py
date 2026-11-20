@@ -134,15 +134,11 @@ class AgentContext[TContext](BaseModel):
         copy_text: str | None = None,
     ) -> None:
         """Stream a widget into the thread by enqueueing widget events."""
-        async for event in stream_widget(
-            self.thread,
-            widget,
-            copy_text,
-            lambda item_type: self.store.generate_item_id(
-                item_type, self.thread, self.request_context
-            ),
-        ):
-            await self._events.put(event)
+        async with aclosing(
+            stream_widget(self.thread, widget, copy_text, self.generate_id)
+        ) as events:
+            async for event in events:
+                await self._events.put(event)
 
     async def end_workflow(
         self, summary: WorkflowSummary | None = None, expanded: bool = False

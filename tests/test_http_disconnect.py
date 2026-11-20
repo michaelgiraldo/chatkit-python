@@ -1,15 +1,16 @@
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import nullcontext
+from contextlib import aclosing, nullcontext
 from datetime import UTC, datetime
 from typing import Literal
 
 import pytest
+from fastapi import FastAPI
 from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message, Scope
 
 from chatkit.fastapi import process_request
-from chatkit.server import NonStreamingResult
+from chatkit.server import NonStreamingResult, stream_widget
 from chatkit.turns import Turn, UserMessageTurn
 from chatkit.types import (
     AssistantMessageContent,
@@ -31,7 +32,9 @@ from chatkit.types import (
     ThreadStreamEvent,
     UserMessageInput,
     UserMessageTextContent,
+    WidgetItem,
 )
+from chatkit.widgets import DynamicWidgetRoot
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
@@ -175,3 +178,86 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
             True,
             [("partial-reply", "Partial reply")],
         )
+
+
+@pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])
+async def test_http_disconnect_closes_widget_producer(asgi_version: str):
+    disconnect = asyncio.Event()
+    widget_sent = asyncio.Event()
+    finalized = asyncio.Event()
+
+    async def produce_widget():
+        try:
+            yield DynamicWidgetRoot(type="Card", children=[])
+        finally:
+            await asyncio.sleep(0)
+            finalized.set()
+
+    request_body = (
+        ThreadsCreateReq(
+            params=ThreadCreateParams(
+                input=UserMessageInput(
+                    content=[UserMessageTextContent(text="Show a card")],
+                    attachments=[],
+                    inference_options=InferenceOptions(),
+                )
+            )
+        )
+        .model_dump_json()
+        .encode()
+    )
+
+    async def receive() -> Message:
+        nonlocal request_body
+        if request_body:
+            body, request_body = request_body, b""
+            return {"type": "http.request", "body": body, "more_body": False}
+        await disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+        elif message["type"] == "http.response.body" and message["body"]:
+            event = decode_event(message["body"])
+            if isinstance(event, ThreadItemAddedEvent) and isinstance(
+                event.item, WidgetItem
+            ):
+                widget_sent.set()
+                # Disconnect while the producer is still suspended at its yield.
+                if asgi_version == "2.4":
+                    raise BrokenPipeError("Synthetic client disconnect")
+                disconnect.set()
+                await asyncio.Event().wait()
+
+    producer = produce_widget()
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        async with aclosing(stream_widget(turn.thread, producer)) as events:
+            async for event in events:
+                yield event
+
+    with make_server(respond) as server:
+        app = FastAPI()
+
+        @app.post("/chatkit")
+        async def chatkit(request: Request):
+            return await process_request(server, request, DEFAULT_CONTEXT)
+
+        scope: Scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": asgi_version},
+            "method": "POST",
+            "path": "/chatkit",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+        }
+        expected_exit = (
+            pytest.raises(ClientDisconnect) if asgi_version == "2.4" else nullcontext()
+        )
+        # Keep the producer alive until checking that the adapter closed it.
+        async with asyncio.timeout(5), aclosing(producer):
+            with expected_exit:
+                await app(scope, receive, send)
+            assert widget_sent.is_set()
+            assert finalized.is_set()

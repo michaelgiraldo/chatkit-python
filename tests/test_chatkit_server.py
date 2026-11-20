@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+from contextlib import aclosing
 from datetime import datetime
 from typing import Any, AsyncIterator, cast
 
@@ -1712,6 +1713,39 @@ async def test_threads_update_request():
         )
         updated_thread = TypeAdapter[Thread](Thread).validate_json(updated_thread.json)
         assert updated_thread.title == "New Title"
+
+
+async def test_empty_widget_producer_allows_turn_to_continue():
+    async def empty_widget():
+        return
+        yield Card(children=[])
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        async with aclosing(stream_widget(turn.thread, empty_widget())) as events:
+            async for event in events:
+                yield event
+        yield ProgressUpdateEvent(text="Still responding")
+
+    with make_server(respond) as server:
+        events = await server.process_streaming(
+            ThreadsCreateReq(
+                params=ThreadCreateParams(
+                    input=UserMessageInput(
+                        content=[UserMessageTextContent(text="Hello")],
+                        attachments=[],
+                        inference_options=InferenceOptions(),
+                    )
+                )
+            )
+        )
+
+    assert [event.type for event in events] == [
+        "thread.created",
+        "thread.item.done",
+        "stream_options",
+        "progress_update",
+    ]
+    assert events[-1] == ProgressUpdateEvent(text="Still responding")
 
 
 async def test_returns_widget_item_generator():

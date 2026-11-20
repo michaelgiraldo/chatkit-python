@@ -57,7 +57,7 @@ class Spacing(TypedDict):
 class Border(TypedDict):
     """Border style definition for an edge."""
 
-    size: int
+    size: int | float
     """Thickness of the border in px."""
     color: NotRequired[str | ThemeColor]
     """Border color; accepts border color token, a primitive color token, a CSS string, or theme-aware `{ light, dark }`.
@@ -78,17 +78,17 @@ class Border(TypedDict):
 class Borders(TypedDict):
     """Composite border configuration applied across edges."""
 
-    top: NotRequired[int | Border]
+    top: NotRequired[int | float | Border]
     """Top border or thickness in px."""
-    right: NotRequired[int | Border]
+    right: NotRequired[int | float | Border]
     """Right border or thickness in px."""
-    bottom: NotRequired[int | Border]
+    bottom: NotRequired[int | float | Border]
     """Bottom border or thickness in px."""
-    left: NotRequired[int | Border]
+    left: NotRequired[int | float | Border]
     """Left border or thickness in px."""
-    x: NotRequired[int | Border]
+    x: NotRequired[int | float | Border]
     """Horizontal borders or thickness in px."""
-    y: NotRequired[int | Border]
+    y: NotRequired[int | float | Border]
     """Vertical borders or thickness in px."""
 
 
@@ -274,6 +274,8 @@ class Card(WidgetComponentBase):
 
     Primitive color token: e.g. `red-100`, `blue-900`, `gray-500`
     """
+    border: int | float | Border | Borders | None = None
+    """Card border as a thickness in px, a border style, or per-edge settings."""
     size: Literal["sm", "md", "lg", "full"] | None = None
     """Visual size of the card; accepts a size token. No preset default is documented."""
     padding: float | str | Spacing | None = None
