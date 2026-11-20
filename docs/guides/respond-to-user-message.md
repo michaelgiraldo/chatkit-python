@@ -127,12 +127,18 @@ from `turn.context` in the turn hooks and from the `context` argument in your
 store methods.
 
 ```python
+from chatkit.protocol import parse_request
+
 context = MyRequestContext(user_id="abc123")
-result = await server.process(await request.body(), context)
+result = await server.process(parse_request(await request.body()), context)
 ```
 
 Build authorization fields in the context from your authenticated application
 session. Treat metadata in the request body as client input.
+With FastAPI, pass the server, the HTTP request, and your context to
+`chatkit.fastapi.process_request`. For other transports, use the
+[protocol helpers](../api/chatkit/protocol.md) to parse requests and encode the
+response or stream.
 
 ## Implement your ChatKit data store
 

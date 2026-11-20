@@ -12,6 +12,14 @@ class InvalidRequestError(ValueError):
         self.validation_error = validation_error
 
 
+class InvalidOperationError(ValueError):
+    """The validated request cannot be applied to the target resource."""
+
+
+class UnsupportedOperationError(RuntimeError):
+    """The requested capability has not been configured on the server."""
+
+
 # Not a closed enum, new error codes can and will be added as needed
 class ErrorCode(str, Enum):
     STREAM_ERROR = "stream.error"

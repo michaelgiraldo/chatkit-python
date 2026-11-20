@@ -29,7 +29,7 @@ from chatkit.types import (
     UserMessageTextContent,
 )
 from tests._types import RequestContext
-from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
+from tests.helpers.server import DEFAULT_CONTEXT, make_server
 
 
 async def start_stream(server: ChatKitServer[RequestContext]) -> StreamingResult:
@@ -42,18 +42,20 @@ async def start_stream(server: ChatKitServer[RequestContext]) -> StreamingResult
             )
         )
     )
-    result = await server.process(request.model_dump_json(), DEFAULT_CONTEXT)
+    result = await server.process(request, DEFAULT_CONTEXT)
     assert isinstance(result, StreamingResult)
     return result
 
 
-async def read_turn_prelude(stream: AsyncIterator[bytes]) -> ThreadCreatedEvent:
-    created = decode_event(await anext(stream))
+async def read_turn_prelude(
+    stream: AsyncIterator[ThreadStreamEvent],
+) -> ThreadCreatedEvent:
+    created = await anext(stream)
     assert isinstance(created, ThreadCreatedEvent)
-    user_message = decode_event(await anext(stream))
+    user_message = await anext(stream)
     assert isinstance(user_message, ThreadItemDoneEvent)
     assert isinstance(user_message.item, UserMessageItem)
-    assert isinstance(decode_event(await anext(stream)), StreamOptionsEvent)
+    assert isinstance(await anext(stream), StreamOptionsEvent)
     return created
 
 
@@ -85,10 +87,7 @@ async def assert_cancelled_turn(
     assert assistant_message.content[0].text == expected_text
 
 
-@pytest.mark.parametrize("iterator_kind", ["public", "json_events"])
-async def test_stream_close_finalizes_responder_and_persists_partial_message(
-    iterator_kind,
-):
+async def test_stream_close_finalizes_responder_and_persists_partial_message():
     finalized = asyncio.Event()
 
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
@@ -105,11 +104,11 @@ async def test_stream_close_finalizes_responder_and_persists_partial_message(
 
     with make_server(responder) as server:
         result = await start_stream(server)
-        stream = result.__aiter__() if iterator_kind == "public" else result.json_events
-        async with aclosing(stream):
+        assert result.__aiter__() is result
+        async with aclosing(result) as stream:
             created = await read_turn_prelude(stream)
-            assert isinstance(decode_event(await anext(stream)), ThreadItemAddedEvent)
-            assert isinstance(decode_event(await anext(stream)), ThreadItemUpdatedEvent)
+            assert isinstance(await anext(stream), ThreadItemAddedEvent)
+            assert isinstance(await anext(stream), ThreadItemUpdatedEvent)
 
         assert finalized.is_set()
         await assert_cancelled_turn(server, created.thread.id, "Partial answer")
@@ -132,9 +131,9 @@ async def test_cancelling_stream_read_finalizes_responder_and_persists_partial_m
 
     with make_server(responder) as server:
         result = await start_stream(server)
-        async with aclosing(result.__aiter__()) as stream:
+        async with aclosing(result) as stream:
             created = await read_turn_prelude(stream)
-            assert isinstance(decode_event(await anext(stream)), ThreadItemAddedEvent)
+            assert isinstance(await anext(stream), ThreadItemAddedEvent)
 
             async with asyncio.TaskGroup() as tasks:
                 pull = tasks.create_task(anext(stream))
@@ -158,12 +157,12 @@ async def test_stream_can_be_read_across_tasks(responder_fails):
 
     with make_server(responder) as server:
         result = await start_stream(server)
-        async with aclosing(result.__aiter__()) as stream:
+        async with aclosing(result) as stream:
             await read_turn_prelude(stream)
 
-            first = decode_event(await asyncio.create_task(anext(stream)))
+            first = await asyncio.create_task(anext(stream))
             assert first == ProgressUpdateEvent(text="First")
-            second = decode_event(await asyncio.create_task(anext(stream)))
+            second = await asyncio.create_task(anext(stream))
             if responder_fails:
                 assert second == ErrorEvent(
                     code=ErrorCode.STREAM_ERROR, allow_retry=True
@@ -190,7 +189,7 @@ async def test_stream_accepts_responder_without_aclose():
 
     with make_server(responder) as server:
         result = await start_stream(server)
-        events = [decode_event(raw) async for raw in result]
+        events = [event async for event in result]
 
     assert [event.type for event in events] == [
         "thread.created",

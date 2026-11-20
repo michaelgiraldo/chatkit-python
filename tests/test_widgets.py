@@ -122,13 +122,13 @@ async def test_card_border_survives_thread_reload(border):
         reloaded = await server.process_non_streaming(
             ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
         )
-        thread = Thread.model_validate_json(reloaded.json)
+        assert isinstance(reloaded, Thread)
+        thread = reloaded
 
     (stored_item,) = [
         item for item in thread.items.data if isinstance(item, WidgetItem)
     ]
-    assert isinstance(streamed_item.widget, Card)
-    assert streamed_item.widget.border == border
+    assert streamed_item.widget.model_dump(mode="json").get("border") == border
     assert isinstance(stored_item.widget, Card)
     assert stored_item.widget.border == border
 

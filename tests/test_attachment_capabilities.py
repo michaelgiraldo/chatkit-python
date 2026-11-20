@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from chatkit.server import ChatKitServer, NonStreamingResult, StreamingResult
+from chatkit.server import ChatKitServer, EmptyResult, StreamingResult
 from chatkit.store import AttachmentStore, NotFoundError
 from chatkit.turns import Turn
 from chatkit.types import (
@@ -24,7 +24,7 @@ from chatkit.types import (
 )
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
-from tests.helpers.server import DEFAULT_CONTEXT, decode_streaming_result
+from tests.helpers.server import DEFAULT_CONTEXT
 
 
 class UploadGateway(AttachmentStore[RequestContext]):
@@ -78,17 +78,17 @@ async def test_attachments_use_explicit_metadata_store(tmp_path: Path):
         threads, attachment_store=uploads, attachment_metadata_store=metadata
     )
 
-    result = await server.process(CREATE_ATTACHMENT.model_dump_json(), DEFAULT_CONTEXT)
-    assert isinstance(result, NonStreamingResult)
-    attachment = FileAttachment.model_validate_json(result.json)
+    result = await server.process(CREATE_ATTACHMENT, DEFAULT_CONTEXT)
+    assert isinstance(result, FileAttachment)
+    attachment = result
     assert uploads.files == {attachment.id}
     assert await metadata.load_attachment(attachment.id, DEFAULT_CONTEXT) == attachment
     with pytest.raises(NotFoundError):
         await threads.load_attachment(attachment.id, DEFAULT_CONTEXT)
 
-    stream = await server.process(CREATE_THREAD.model_dump_json(), DEFAULT_CONTEXT)
+    stream = await server.process(CREATE_THREAD, DEFAULT_CONTEXT)
     assert isinstance(stream, StreamingResult)
-    events = await decode_streaming_result(stream)
+    events = [event async for event in stream]
     thread = next(
         event.thread for event in events if isinstance(event, ThreadCreatedEvent)
     )
@@ -100,8 +100,8 @@ async def test_attachments_use_explicit_metadata_store(tmp_path: Path):
     assert item.attachments == [saved_attachment]
     assert (await metadata.load_threads(10, None, "asc", DEFAULT_CONTEXT)).data == []
 
-    result = await server.process(DELETE_ATTACHMENT.model_dump_json(), DEFAULT_CONTEXT)
-    assert isinstance(result, NonStreamingResult)
+    result = await server.process(DELETE_ATTACHMENT, DEFAULT_CONTEXT)
+    assert isinstance(result, EmptyResult)
     assert uploads.files == set()
     with pytest.raises(NotFoundError):
         await metadata.load_attachment(attachment.id, DEFAULT_CONTEXT)
@@ -113,16 +113,14 @@ async def test_missing_attachment_metadata_store_fails_before_writes(tmp_path: P
     server = AttachmentTestServer(threads, attachment_store=uploads)
 
     with pytest.raises(RuntimeError, match="AttachmentMetadataStore is not configured"):
-        await server.process(CREATE_ATTACHMENT.model_dump_json(), DEFAULT_CONTEXT)
+        await server.process(CREATE_ATTACHMENT, DEFAULT_CONTEXT)
     assert uploads.files == set()
 
     uploads.files.add("file-example")
     with pytest.raises(RuntimeError, match="AttachmentMetadataStore is not configured"):
-        await server.process(DELETE_ATTACHMENT.model_dump_json(), DEFAULT_CONTEXT)
+        await server.process(DELETE_ATTACHMENT, DEFAULT_CONTEXT)
     assert uploads.files == {"file-example"}
 
-    stream = await server.process(CREATE_THREAD.model_dump_json(), DEFAULT_CONTEXT)
-    assert isinstance(stream, StreamingResult)
     with pytest.raises(RuntimeError, match="AttachmentMetadataStore is not configured"):
-        await anext(stream.json_events)
+        await server.process(CREATE_THREAD, DEFAULT_CONTEXT)
     assert (await threads.load_threads(10, None, "asc", DEFAULT_CONTEXT)).data == []

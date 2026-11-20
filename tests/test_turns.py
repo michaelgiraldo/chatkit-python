@@ -17,10 +17,10 @@ from chatkit.turns import (
 from chatkit.types import (
     AssistantMessageContent,
     AssistantMessageItem,
-    BaseReq,
     ClientToolCallItem,
     ErrorEvent,
     InferenceOptions,
+    StreamingReq,
     StructuredInputAnswerSubmission,
     StructuredInputFreeform,
     StructuredInputItem,
@@ -42,7 +42,7 @@ from chatkit.types import (
 )
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
-from tests.helpers.server import DEFAULT_CONTEXT, decode_event, decode_streaming_result
+from tests.helpers.server import DEFAULT_CONTEXT
 
 
 class RecordingServer(ChatKitServer[RequestContext]):
@@ -70,13 +70,13 @@ class RecordingServer(ChatKitServer[RequestContext]):
         )
         self.finished.append((turn, outcome, items.data))
 
-    async def open_stream(self, request: BaseReq) -> StreamingResult:
-        stream = await self.process(request.model_dump_json(), DEFAULT_CONTEXT)
+    async def open_stream(self, request: StreamingReq) -> StreamingResult:
+        stream = await self.process(request, DEFAULT_CONTEXT)
         assert isinstance(stream, StreamingResult)
         return stream
 
-    async def consume(self, request: BaseReq) -> list[ThreadStreamEvent]:
-        return await decode_streaming_result(await self.open_stream(request))
+    async def consume(self, request: StreamingReq) -> list[ThreadStreamEvent]:
+        return [event async for event in await self.open_stream(request)]
 
 
 def create_thread() -> ThreadsCreateReq:
@@ -234,9 +234,9 @@ async def test_stream_close_reports_cancelled_after_partial_reply_save(tmp_path:
 
     server = RecordingServer(tmp_path, respond)
     stream = await server.open_stream(create_thread())
-    async with aclosing(stream.json_events) as events:
+    async with aclosing(stream) as events:
         async for raw in events:
-            if isinstance(decode_event(raw), ThreadItemAddedEvent):
+            if isinstance(raw, ThreadItemAddedEvent):
                 break
         assert server.finished == []
 
@@ -259,9 +259,9 @@ async def test_close_after_user_message_reports_cancelled_before_respond(
 
     server = RecordingServer(tmp_path, respond)
     stream = await server.open_stream(create_thread())
-    async with aclosing(stream.json_events) as events:
+    async with aclosing(stream) as events:
         async for raw in events:
-            event = decode_event(raw)
+            event = raw
             if isinstance(event, ThreadItemDoneEvent):
                 assert event.item.type == "user_message"
                 break

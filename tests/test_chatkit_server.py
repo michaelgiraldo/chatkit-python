@@ -10,6 +10,7 @@ from pydantic import AnyUrl, TypeAdapter
 
 from chatkit.actions import Action
 from chatkit.errors import ErrorCode
+from chatkit.protocol import encode_message
 from chatkit.server import StreamingResult, stream_widget
 from chatkit.store import (
     AttachmentStore,
@@ -105,8 +106,6 @@ from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
 from tests.helpers.server import (
     DEFAULT_CONTEXT,
-    decode_event,
-    decode_streaming_result,
     make_server,
 )
 
@@ -195,15 +194,15 @@ async def test_stream_cancellation_persists_pending_assistant_message_and_hidden
                         inference_options=InferenceOptions(),
                     )
                 )
-            ).model_dump_json(),
+            ),
             DEFAULT_CONTEXT,
         )
         assert isinstance(stream, StreamingResult)
 
         events: list[ThreadStreamEvent] = []
         with pytest.raises(asyncio.CancelledError):  # noqa: PT012
-            async for raw in stream.json_events:
-                events.append(decode_event(raw))
+            async for raw in stream:
+                events.append(raw)
 
         thread = next(e.thread for e in events if e.type == "thread.created")
         items = await server.store.load_thread_items(
@@ -257,15 +256,15 @@ async def test_stream_cancellation_does_not_persist_pending_empty_assistant_mess
                         inference_options=InferenceOptions(),
                     )
                 )
-            ).model_dump_json(),
+            ),
             DEFAULT_CONTEXT,
         )
         assert isinstance(stream, StreamingResult)
 
         events: list[ThreadStreamEvent] = []
         with pytest.raises(asyncio.CancelledError):  # noqa: PT012
-            async for raw in stream.json_events:
-                events.append(decode_event(raw))
+            async for raw in stream:
+                events.append(raw)
 
         thread = next(e.thread for e in events if e.type == "thread.created")
         items = await server.store.load_thread_items(
@@ -574,15 +573,15 @@ async def test_omits_unset_allowed_image_domains_in_created_and_updated_json_eve
                         inference_options=InferenceOptions(),
                     )
                 )
-            ).model_dump_json(),
+            ),
             DEFAULT_CONTEXT,
         )
         assert isinstance(stream, StreamingResult)
 
         thread_created_event: dict[str, Any] | None = None
         thread_updated_event: dict[str, Any] | None = None
-        async for raw in stream.json_events:
-            event = json.loads(raw.split(b"data: ")[1])
+        async for raw in stream:
+            event = json.loads(encode_message(raw))
             if event["type"] == "thread.created":
                 thread_created_event = event
             if event["type"] == "thread.updated":
@@ -791,7 +790,9 @@ async def test_list_threads_response():
         list_result = await server.process_non_streaming(
             ThreadsListReq(params=ThreadListParams(limit=20))
         )
-        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(list_result.json)
+        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(
+            encode_message(list_result)
+        )
         assert len(threads.data) == 20
 
         # Newest first
@@ -802,7 +803,9 @@ async def test_list_threads_response():
         more_threads = await server.process_non_streaming(
             ThreadsListReq(params=ThreadListParams(after=threads.data[-1].id))
         )
-        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(more_threads.json)
+        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(
+            encode_message(more_threads)
+        )
         assert len(threads.data) == 5
         assert threads.has_more is False
         assert not threads.after
@@ -841,7 +844,7 @@ async def test_list_items_response():
         list_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json)
+        items = TypeAdapter(Page[ThreadItem]).validate_json(encode_message(list_result))
         assert len(items.data) == 20
         # Newest first
         assert items.data[0].created_at > items.data[1].created_at
@@ -853,7 +856,7 @@ async def test_list_items_response():
                 params=ItemsListParams(thread_id=thread.id, after=items.data[-1].id)
             )
         )
-        items = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json)
+        items = TypeAdapter(Page[ThreadItem]).validate_json(encode_message(list_result))
         assert len(items.data) == 6  # +1 for user message
         assert items.has_more is False
 
@@ -1323,7 +1326,9 @@ async def test_calls_action_sync():
                 )
             )
         )
-        response = TypeAdapter(SyncCustomActionResponse).validate_json(result.json)
+        response = TypeAdapter(SyncCustomActionResponse).validate_json(
+            encode_message(result)
+        )
 
         assert sync_actions
         assert sync_actions[0] == (
@@ -1432,7 +1437,7 @@ async def test_get_thread_by_id():
                 params=ThreadGetByIdParams(thread_id=thread.id),
             )
         )
-        loaded_thread = TypeAdapter(Thread).validate_json(result.json)
+        loaded_thread = TypeAdapter(Thread).validate_json(encode_message(result))
         assert loaded_thread.id == thread.id
         assert loaded_thread.title == thread.title
         assert loaded_thread.items.data[0].type == "user_message"
@@ -1452,7 +1457,9 @@ async def test_create_file():
                 )
             )
         )
-        attachment = TypeAdapter[Attachment](Attachment).validate_json(result.json)
+        attachment = TypeAdapter[Attachment](Attachment).validate_json(
+            encode_message(result)
+        )
 
         # Verify response includes file
         assert attachment.id is not None
@@ -1487,7 +1494,9 @@ async def test_create_image_file():
                 )
             )
         )
-        attachment = TypeAdapter[Attachment](Attachment).validate_json(result.json)
+        attachment = TypeAdapter[Attachment](Attachment).validate_json(
+            encode_message(result)
+        )
 
         assert attachment.id is not None
         assert attachment.mime_type == file_content_type
@@ -1537,7 +1546,7 @@ async def test_user_message_attachment_metadata_not_serialized():
         list_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json)
+        items = TypeAdapter(Page[ThreadItem]).validate_json(encode_message(list_result))
         user_items = [item for item in items.data if item.type == "user_message"]
         assert user_items
         attachments = user_items[0].attachments
@@ -1677,7 +1686,9 @@ async def test_list_threads_paginated_response():
         list_result = await server.process_non_streaming(
             ThreadsListReq(params=ThreadListParams(limit=20))
         )
-        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(list_result.json)
+        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(
+            encode_message(list_result)
+        )
         assert len(threads.data) == 20
         assert threads.has_more is True
         assert threads.after is not None
@@ -1685,7 +1696,9 @@ async def test_list_threads_paginated_response():
         list_result = await server.process_non_streaming(
             ThreadsListReq(params=ThreadListParams(after=threads.data[-1].id))
         )
-        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(list_result.json)
+        threads = TypeAdapter(Page[ThreadMetadata]).validate_json(
+            encode_message(list_result)
+        )
         assert len(threads.data) == 5
         assert threads.has_more is False
 
@@ -1711,7 +1724,9 @@ async def test_threads_update_request():
                 params=ThreadUpdateParams(thread_id=thread.id, title="New Title")
             )
         )
-        updated_thread = TypeAdapter[Thread](Thread).validate_json(updated_thread.json)
+        updated_thread = TypeAdapter[Thread](Thread).validate_json(
+            encode_message(updated_thread)
+        )
         assert updated_thread.title == "New Title"
 
 
@@ -1836,7 +1851,7 @@ async def test_delete_thread():
         response = await server.process_non_streaming(
             ThreadsDeleteReq(params=ThreadDeleteParams(thread_id=thread.id))
         )
-        assert response.json == b"{}"
+        assert encode_message(response) == b"{}"
 
         try:
             await server.process_non_streaming(
@@ -1888,7 +1903,11 @@ async def test_thread_item_removed_event_removes_item():
         list_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json).data
+        items = (
+            TypeAdapter(Page[ThreadItem])
+            .validate_json(encode_message(list_result))
+            .data
+        )
         assert all(i.id != removed_id for i in items)
 
 
@@ -1909,7 +1928,7 @@ async def test_raising_in_responder_yields_error_event():
                         inference_options=InferenceOptions(),
                     )
                 )
-            ).model_dump_json(),
+            ),
             RequestContext(user_id="test_user"),
         )
         assert isinstance(result, StreamingResult)
@@ -1917,7 +1936,6 @@ async def test_raising_in_responder_yields_error_event():
 
         # Yield an errro
         async for e in iter:
-            e = decode_event(e)
             if e.type == "error":
                 assert e.code == ErrorCode.STREAM_ERROR
                 break
@@ -1983,7 +2001,11 @@ async def test_thread_item_replaced_event_replaces_item():
         list_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json).data
+        items = (
+            TypeAdapter(Page[ThreadItem])
+            .validate_json(encode_message(list_result))
+            .data
+        )
 
         # Find the replaced item
         replaced_item = next((i for i in items if i.id == original_id), None)
@@ -2053,7 +2075,11 @@ async def test_thread_item_replaced_event_with_widget():
         list_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json).data
+        items = (
+            TypeAdapter(Page[ThreadItem])
+            .validate_json(encode_message(list_result))
+            .data
+        )
 
         # Find the replaced widget item
         replaced_item = next((i for i in items if i.id == widget_id), None)
@@ -2111,7 +2137,9 @@ async def test_retry_after_item():
         list_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items_before = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json)
+        items_before = TypeAdapter(Page[ThreadItem]).validate_json(
+            encode_message(list_result)
+        )
         assert len(items_before.data) == 2
         assert items_before.data[0].type == "assistant_message"
         assert items_before.data[0].content[0].type == "output_text"
@@ -2150,7 +2178,7 @@ async def test_retry_after_item():
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
         items_after = TypeAdapter(Page[ThreadItem]).validate_json(
-            list_result_after.json
+            encode_message(list_result_after)
         )
         assert len(items_after.data) == 2  # Still user message + assistant message
         assert items_after.data[0].type == "assistant_message"
@@ -2191,11 +2219,13 @@ async def test_retry_after_item_invalid_item():
         items_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items = TypeAdapter(Page[ThreadItem]).validate_json(items_result.json)
+        items = TypeAdapter(Page[ThreadItem]).validate_json(
+            encode_message(items_result)
+        )
         assistant_item_id = items.data[0].id
 
         # Try to retry after an assistant message (should fail)
-        with pytest.raises(ValueError, match="is not a user message"):
+        with pytest.raises(ValueError, match="must start from a user message"):
             await server.process_streaming(
                 ThreadsRetryAfterItemReq(
                     params=ThreadRetryAfterItemParams(
@@ -2259,7 +2289,9 @@ async def test_retry_after_item_with_multiple_messages():
         list_result = await server.process_non_streaming(
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
-        items_before = TypeAdapter(Page[ThreadItem]).validate_json(list_result.json)
+        items_before = TypeAdapter(Page[ThreadItem]).validate_json(
+            encode_message(list_result)
+        )
         assert len(items_before.data) == 4
 
         # Get the second user message ID to retry after it
@@ -2289,7 +2321,7 @@ async def test_retry_after_item_with_multiple_messages():
             ItemsListReq(params=ItemsListParams(thread_id=thread.id))
         )
         items_after = TypeAdapter(Page[ThreadItem]).validate_json(
-            list_result_after.json
+            encode_message(list_result_after)
         )
         assert len(items_after.data) == 4  # Still 4 items
         # First user message and response should remain unchanged
@@ -2367,7 +2399,7 @@ async def test_input_transcribe_decodes_base64_and_normalizes_mime_type():
                 )
             )
         )
-        parsed = TypeAdapter(TranscriptionResult).validate_json(result.json)
+        parsed = TypeAdapter(TranscriptionResult).validate_json(encode_message(result))
         assert parsed.text == "ok"
 
     assert seen["audio"] == audio_bytes
@@ -2471,11 +2503,11 @@ async def test_custom_id_generators_on_server():
                         inference_options=InferenceOptions(),
                     )
                 )
-            ).model_dump_json(),
+            ),
             DEFAULT_CONTEXT,
         )
         assert isinstance(result, StreamingResult)
-        events = await decode_streaming_result(result)
+        events = [event async for event in result]
 
         thread_created = next(e for e in events if e.type == "thread.created")
         assert thread_created.thread.id == "thr_custom_1"

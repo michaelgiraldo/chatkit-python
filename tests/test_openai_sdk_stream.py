@@ -342,9 +342,10 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
 
     assert previous_ids == [None, "resp_1"]
     assert completed_ids == ["resp_1", "resp_2"]
+    assert isinstance(loaded, Thread)
     assert [
         (item.id, item.content[0].text)
-        for item in Thread.model_validate_json(loaded.json).items.data
+        for item in loaded.items.data
         if isinstance(item, AssistantMessageItem)
     ] == [("msg_1", "Example reply"), ("msg_2", "Example reply")]
 
@@ -440,9 +441,10 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
             if isinstance(event, ThreadItemUpdatedEvent)
             and isinstance(event.update, AssistantMessageContentPartTextDelta)
         ] == ["Example ", f"reply {turn}"]
+    assert isinstance(loaded, Thread)
     assert [
         (item.id, item.content[0].text)
-        for item in Thread.model_validate_json(loaded.json).items.data
+        for item in loaded.items.data
         if isinstance(item, AssistantMessageItem)
     ] == [(first_reply.id, "Example reply 1"), (second_reply.id, "Example reply 2")]
 
@@ -594,9 +596,10 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
     else:
         assert ids[0] != ids[1]
         assert all(item_id.startswith("tc_") for item_id in ids)
+    assert isinstance(loaded, Thread)
     assert [
         (item.id, item.call_id, item.status, item.output)
-        for item in Thread.model_validate_json(loaded.json).items.data
+        for item in loaded.items.data
         if isinstance(item, ClientToolCallItem)
     ] == [
         (item.id, item.call_id, "completed", f"selection-{index}")

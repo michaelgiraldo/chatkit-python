@@ -141,6 +141,55 @@ def test_process_request_reports_missing_thread(client: TestClient):
     assert "example-missing" not in response.text
 
 
+def test_streaming_request_resolves_thread_before_sending_headers(client: TestClient):
+    response = client.post(
+        "/chatkit",
+        json={
+            "type": "threads.add_user_message",
+            "params": {
+                "thread_id": "example-missing",
+                "input": {
+                    "content": [{"type": "input_text", "text": "Hello"}],
+                    "attachments": [],
+                    "inference_options": {},
+                },
+            },
+        },
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "ChatKit resource not found."}
+
+
+def test_tool_output_requires_a_pending_call_before_sending_headers(client: TestClient):
+    created = client.post(
+        "/chatkit",
+        json={
+            "type": "threads.create",
+            "params": {
+                "input": {
+                    "content": [{"type": "input_text", "text": "Hello"}],
+                    "attachments": [],
+                    "inference_options": {},
+                },
+            },
+        },
+    )
+    event = decode_event(created.content.splitlines()[0])
+    assert isinstance(event, ThreadCreatedEvent)
+    response = client.post(
+        "/chatkit",
+        json={
+            "type": "threads.add_client_tool_output",
+            "params": {"thread_id": event.thread.id, "result": "example"},
+        },
+    )
+    assert response.status_code == 422
+    assert (
+        response.json()["detail"]
+        == "The thread is not waiting for a client tool result."
+    )
+
+
 @pytest.mark.parametrize(
     "failure",
     [

@@ -45,9 +45,10 @@ See [Trigger client-side effects without blocking](../guides/update-client-durin
 
 Close the ChatKit iterator when the HTTP response exits. A client can disconnect
 while the transport is sending an event, between reads from the ChatKit stream.
-`aiter(result)` and `result.json_events` expose the same iterator on a
-`StreamingResult`. Closing an active stream releases the responder and runs the
-server's cancellation hook, which saves partial assistant replies by default.
+`StreamingResult` is an async iterator of typed events. For a custom transport,
+own it with `async with aclosing(result)` and encode each event with
+`chatkit.protocol.encode_sse`. Closing an active stream releases the responder
+and saves partial assistant replies by default.
 
 For FastAPI or Starlette, use `chatkit.fastapi.process_request` to close the
 stream when the HTTP response ends.

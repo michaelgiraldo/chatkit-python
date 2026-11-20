@@ -10,7 +10,7 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message, Scope
 
 from chatkit.fastapi import process_request
-from chatkit.server import NonStreamingResult, stream_widget
+from chatkit.server import stream_widget
 from chatkit.turns import Turn, UserMessageTurn
 from chatkit.types import (
     AssistantMessageContent,
@@ -154,11 +154,11 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
             if isinstance(event, ThreadCreatedEvent)
         )
         reload = ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
-        loaded = await server.process(reload.model_dump_json(), DEFAULT_CONTEXT)
-        assert isinstance(loaded, NonStreamingResult)
+        loaded = await server.process(reload, DEFAULT_CONTEXT)
+        assert isinstance(loaded, Thread)
         partial_replies = [
             (item.id, item.content[0].text)
-            for item in Thread.model_validate_json(loaded.json).items.data
+            for item in loaded.items.data
             if isinstance(item, AssistantMessageItem)
         ]
 

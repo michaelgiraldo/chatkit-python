@@ -5,12 +5,14 @@ from typing import Any, AsyncIterator, Callable
 from pydantic import TypeAdapter
 
 from chatkit.actions import Action
-from chatkit.server import ChatKitServer, NonStreamingResult, StreamingResult
+from chatkit.server import ChatKitServer, StreamingResult
 from chatkit.store import AttachmentStore
 from chatkit.turns import Turn
 from chatkit.types import (
     AudioInput,
     FeedbackKind,
+    NonStreamingReq,
+    StreamingReq,
     SyncCustomActionResponse,
     ThreadMetadata,
     ThreadStreamEvent,
@@ -28,12 +30,6 @@ DEFAULT_CONTEXT = RequestContext(user_id="test_user")
 
 def decode_event(event: bytes) -> ThreadStreamEvent:
     return TypeAdapter(ThreadStreamEvent).validate_json(event.split(b"data: ")[1])
-
-
-async def decode_streaming_result(
-    streaming_result: StreamingResult,
-) -> list[ThreadStreamEvent]:
-    return [decode_event(event) async for event in streaming_result.json_events]
 
 
 @contextmanager
@@ -117,19 +113,17 @@ def make_server(
             return transcribe_callback(audio_input, context)
 
         async def process_streaming(
-            self, request_obj, context: Any | None = None
+            self, request_obj: StreamingReq, context: Any | None = None
         ) -> list[ThreadStreamEvent]:
-            result = await self.process(
-                request_obj.model_dump_json(), context or DEFAULT_CONTEXT
-            )
+            result = await self.process(request_obj, context or DEFAULT_CONTEXT)
             assert isinstance(result, StreamingResult)
-            return await decode_streaming_result(result)
+            return [event async for event in result]
 
-        async def process_non_streaming(self, request_obj, context: Any | None = None):
-            result = await self.process(
-                request_obj.model_dump_json(), context or DEFAULT_CONTEXT
-            )
-            assert isinstance(result, NonStreamingResult)
+        async def process_non_streaming(
+            self, request_obj: NonStreamingReq, context: Any | None = None
+        ):
+            result = await self.process(request_obj, context or DEFAULT_CONTEXT)
+            assert not isinstance(result, StreamingResult)
             return result
 
     try:
