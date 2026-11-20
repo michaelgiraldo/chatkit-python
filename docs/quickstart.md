@@ -1,64 +1,37 @@
 # Quick start
 
-Run the self-hosted Python backend from this checkout. It streams a fixed
-reply and lets you verify ChatKit before adding a model or database.
-
-## Render chat UI
-
-!!! note "Quick start uses React"
-    This section shows the React integration using `@openai/chatkit-react`.  
-    If you’re not using React, you can render ChatKit directly with vanilla JavaScript using `@openai/chatkit`. See the [ChatKit.js quick start](https://openai.github.io/chatkit-js/quickstart/) for details.
-
-Install the React bindings used in this example. This version includes
-`@openai/chatkit` 1.9.0.
-
-```sh
-npm install @openai/chatkit-react@1.6.1
-```
-
-In your index.html, load ChatKit.js:
-
-```html
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <script src="https://cdn.platform.openai.com/deployments/chatkit/chatkit.js"></script>
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
-</html>
-```
-
-Wire up a minimal React app. Point `api.url` at your ChatKit server endpoint and pass the domain key you configured there.
-
-```tsx
-import {ChatKit, useChatKit} from "@openai/chatkit-react";
-
-export function App() {
-  const chatkit = useChatKit({
-    api: {
-      url: "http://localhost:8000/chatkit",
-      domainKey: "local-dev", // domain keys are optional in dev
-    },
-  });
-
-  return <ChatKit control={chatkit.control} />;
-}
-```
-
-Start the example server below to send messages from the UI.
+Run the self-hosted ChatKit demo from this checkout. It uses sample replies and
+widgets and runs without an API key.
 
 ## Run your ChatKit server
 
-This fork requires Python 3.14 or newer. From the root of this fork's checkout,
-install the package and FastAPI for the example server. Then expose a single
-`/chatkit` endpoint that forwards requests to a `ChatKitServer` instance.
+Install `uv`, then run this command from the root of the checkout.
+
+```sh
+make demo
+```
+
+Open [the demo on port 8000](http://127.0.0.1:8000/). The page loads the
+official ChatKit browser client from its CDN and sends requests to
+`/chatkit` on the same local server. Set `DEMO_PORT` to use a different port.
+
+You can also start the demo with Python 3.14 and pip.
 
 ```sh
 python -m pip install '.[fastapi]'
+python -m uvicorn docs.examples.quickstart:app --host 127.0.0.1 --port 8000
 ```
+
+## Try the browser flow
+
+1. Send `hello`. The reply is **Hello, world!**
+2. Send `widget`, then click **Save demo state**. The card shows **Widget state saved.**
+3. Send `slow`. Click **Stop response** while the reply is still streaming.
+4. Reload the page and reopen the thread from **Conversation history**. The
+   saved widget and the partial reply are still there. Send another message to
+   verify that the thread accepts a follow-up.
+
+## How the demo works
 
 The [runnable backend](examples/quickstart.py) receives every ChatKit
 request at `/chatkit`. Its `ChatKitServer.respond(turn)` yields events for
@@ -77,16 +50,10 @@ when your app supports files.
 
 ## Verify your backend
 
-Start the example from the root of the checkout.
+With the demo server running, send a test message directly to the backend.
 
 ```sh
-python -m uvicorn docs.examples.quickstart:app --port 8000
-```
-
-In another terminal, send a test message directly to the backend.
-
-```sh
-curl --no-buffer --fail-with-body http://localhost:8000/chatkit \
+curl --no-buffer --fail-with-body http://127.0.0.1:8000/chatkit \
   --header 'Content-Type: application/json' \
   --data '{
     "type": "threads.create",
