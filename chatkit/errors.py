@@ -1,5 +1,5 @@
 from abc import ABC
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import ValidationError
 
@@ -21,13 +21,9 @@ class UnsupportedOperationError(RuntimeError):
 
 
 # Not a closed enum, new error codes can and will be added as needed
-class ErrorCode(str, Enum):
+class ErrorCode(StrEnum):
     STREAM_ERROR = "stream.error"
 
-
-DEFAULT_STATUS: dict[ErrorCode, int] = {
-    ErrorCode.STREAM_ERROR: 500,
-}
 
 DEFAULT_ALLOW_RETRY: dict[ErrorCode, bool] = {
     ErrorCode.STREAM_ERROR: True,
@@ -53,7 +49,6 @@ class StreamError(BaseStreamError):
         allow_retry: bool | None = None,
     ):
         self.code = code
-        self.status_code = DEFAULT_STATUS.get(code, 500)
         if allow_retry is None:
             self.allow_retry = DEFAULT_ALLOW_RETRY.get(code, False)
         else:
