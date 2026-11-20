@@ -11,8 +11,8 @@ Here’s how a widget is represented from design time through runtime streaming.
 | Working definition | [Widget UI language](#widget-ui-language) plus a schema (Zod/JSON) and example data you author in <https://widgets.chatkit.studio>. |
 | Published definition | The exported [`.widget` file](#widget-files) bundling the layout, schema, and sample data. |
 | Server runtime (definition only) | [`WidgetTemplate`](../api/chatkit/widgets.md#chatkit.widgets.WidgetTemplate) instance loaded from the `.widget` file. |
-| Server runtime (hydrated) | [`DynamicWidgetRoot`](../api/chatkit/widgets.md#chatkit.widgets.DynamicWidgetRoot) or [`BasicRoot`](../api/chatkit/widgets.md#chatkit.widgets.BasicRoot) Pydantic model instance built from the template and real data. |
-| Streamed to the client | The hydrated root serialized to JSON and included inside a [`WidgetItem`](../api/chatkit/types.md#chatkit.types.WidgetItem) streamed by `ChatKitServer`. |
+| Server runtime (hydrated) | A [`WidgetRoot`](../api/chatkit/widgets.md#chatkit.widgets.WidgetRoot) built from a template or from typed Python builders. |
+| Streamed and saved | The same widget tree is serialized to JSON in streamed and stored [`WidgetItem`](../api/chatkit/types.md#chatkit.types.WidgetItem) records. Reload uses that tree directly and preserves nested properties, including client extension fields. |
 | Rendered by the client | ChatKit.js deserializes the JSON into typed widget objects (for example, [`Card`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/card/) or [`ListView`](https://openai.github.io/chatkit-js/api/openai/chatkit/namespaces/widgets/type-aliases/listview/)) and renders them; entity previews use [`BasicRoot`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/basicroot/) returned from [`entities.onRequestPreview`](#entity-previews). |
 | Sent as model input | A Responses API `Message` produced from a [`WidgetItem`](../api/chatkit/types.md#chatkit.types.WidgetItem) via [`ThreadItemConverter.widget_to_input`](../api/chatkit/agents.md#chatkit.agents.ThreadItemConverter.widget_to_input). |
 
@@ -39,7 +39,7 @@ Exported `.widget` files are JSON blobs that include the widget template, the ex
 
 ## Entity previews
 
-The [`entities.onRequestPreview`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/type-aliases/entitiesoption/#onrequestpreview) ChatKit option returns a preview typed as [`BasicRoot`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/basicroot/).
+The [`entities.onRequestPreview`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/type-aliases/entitiesoption/#onrequestpreview) ChatKit option returns a preview typed as [`BasicRoot`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/basicroot/). On the server, build a `Basic` template using `WidgetTemplate.build()` and return its JSON.
 
 
 ## When to use

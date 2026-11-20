@@ -33,7 +33,22 @@ def build_message_widget(user_name: str, message: str):
     })
 ```
 
-`WidgetTemplate.build` accepts plain dicts or Pydantic models. Use `.build_basic` if you're working with a `BasicRoot` widget outside of streaming.
+`WidgetTemplate.build` accepts plain dicts or Pydantic models and returns a
+`WidgetRoot`. Use it for `Basic` entity preview templates as well.
+
+## Build widgets in Python
+
+Use named builders for editor completion and field validation when writing
+widgets in code. `stream_widget` accepts a `Card` or `ListView` directly. Call
+`.build()` to get the `WidgetRoot` for a manually constructed `WidgetItem` or
+root replacement event. A child builder such as `Text` also provides `.build()`
+for manually constructed component replacement events.
+
+```python
+from chatkit.widgets import Card, Text
+
+widget = Card(children=[Text(value="Your order is ready.")]).build()
+```
 
 ## Stream widgets from `respond`
 
@@ -93,7 +108,7 @@ async def sample_widget(ctx: RunContextWrapper[AgentContext]):
 The examples above return a fully completed static widget. You can also stream an updating widget by yielding new versions of the widget from a generator function. The ChatKit framework will send updates for the parts of the widget that have changed.
 
 !!! note "Text streaming support"
-    Currently, only `<Text>` and `<Markdown>` components marked with an `id` have their text updates streamed. Other diffs will forgo the streaming UI and replace and rerender parts of the widget client-side.
+    A `<Text>` or `<Markdown>` component with a unique `id` can stream appended text. Layout and property changes replace the widget client-side.
 
 ```python
 from typing import AsyncGenerator

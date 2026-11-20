@@ -451,4 +451,4 @@ Clicks and hover previews apply to the tagged entities shown in past user messag
 ```
 
 - `entities.onClick` fires when a user clicks a tag in the transcript. Handle navigation or open a detail view. See the [onClick option](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/entitiesoption/#onclick).
-- `entities.onRequestPreview` runs when the user hovers or taps a tag that has `interactive: true`. Return a `BasicRoot` widget; you can build one with `WidgetTemplate.build_basic(...)` if you are building the preview widgets server-side. See the [onRequestPreview option](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/entitiesoption/#onrequestpreview).
+- `entities.onRequestPreview` runs when the user hovers or taps a tag that has `interactive: true`. Return a `Basic` widget. For server-built previews, render a `Basic` template with `WidgetTemplate.build()` and return its JSON. [onRequestPreview option](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/entitiesoption/#onrequestpreview)

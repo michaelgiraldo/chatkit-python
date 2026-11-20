@@ -49,9 +49,11 @@ for path in SRC_ROOT.rglob("*.py"):
             f.write("      members:\n")
             for symbol in (
                 "WidgetTemplate",
-                "DynamicWidgetRoot",
-                "BasicRoot",
-                "DynamicWidgetComponent",
+                "WidgetRoot",
+                "WidgetComponent",
+                "Card",
+                "ListView",
+                "ListViewItem",
             ):
                 f.write(f"        - {symbol}\n")
         else:

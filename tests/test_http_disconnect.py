@@ -34,7 +34,7 @@ from chatkit.types import (
     UserMessageTextContent,
     WidgetItem,
 )
-from chatkit.widgets import DynamicWidgetRoot
+from chatkit.widgets import WidgetRoot
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
@@ -188,7 +188,7 @@ async def test_http_disconnect_closes_widget_producer(asgi_version: str):
 
     async def produce_widget():
         try:
-            yield DynamicWidgetRoot(type="Card", children=[])
+            yield WidgetRoot(type="Card", children=[])
         finally:
             await asyncio.sleep(0)
             finalized.set()

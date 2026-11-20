@@ -94,7 +94,7 @@ from .types import (
     WorkflowTaskAdded,
     WorkflowTaskUpdated,
 )
-from .widgets import Markdown, Text, WidgetRoot
+from .widgets import Markdown, Text, WidgetRootInput
 
 _CHAT_COMPLETIONS_PLACEHOLDER_ID = "__fake_id__"
 _CLIENT_TOOL_CONFLICT = "Only one client tool may be requested per turn."
@@ -160,7 +160,7 @@ class AgentContext[TContext](BaseModel):
 
     async def stream_widget(
         self,
-        widget: WidgetRoot | AsyncGenerator[WidgetRoot, None],
+        widget: WidgetRootInput | AsyncGenerator[WidgetRootInput, None],
         copy_text: str | None = None,
     ) -> None:
         """Stream a widget into the thread by enqueueing widget events."""

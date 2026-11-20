@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import binascii
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -96,7 +97,6 @@ from .types import (
     TranscriptionResult,
     UserMessageInput,
     UserMessageItem,
-    WidgetComponentUpdated,
     WidgetItem,
     WidgetRootUpdated,
     WidgetStreamingTextValueDelta,
@@ -105,123 +105,78 @@ from .types import (
     WorkflowTaskUpdated,
     is_streaming_req,
 )
-from .widgets import WidgetComponent, WidgetComponentBase, WidgetRoot
+from .widgets import WidgetRoot, WidgetRootInput
 
 DEFAULT_PAGE_SIZE = 20
 DEFAULT_ERROR_MESSAGE = "An error occurred when generating a response."
 _HIDDEN_ITEMS = (HiddenContextItem, SDKHiddenContextItem)
 
 
+def _widget_state(widget: WidgetRootInput) -> WidgetRoot:
+    return widget if isinstance(widget, WidgetRoot) else widget.build()
+
+
 def diff_widget(
-    before: WidgetRoot, after: WidgetRoot
-) -> list[WidgetStreamingTextValueDelta | WidgetRootUpdated | WidgetComponentUpdated]:
-    """
-    Compare two WidgetRoots and return a list of deltas.
-    """
+    before: WidgetRootInput, after: WidgetRootInput
+) -> list[WidgetStreamingTextValueDelta | WidgetRootUpdated]:
+    """Emit unambiguous text appends, or replace the widget for other changes."""
+    before_payload = _widget_state(before).model_dump(mode="json")
+    after_widget = _widget_state(after)
+    after_payload = after_widget.model_dump(mode="json")
 
-    def is_streaming_text(component: WidgetComponentBase) -> bool:
-        return getattr(component, "type", None) in {"Markdown", "Text"} and isinstance(
-            getattr(component, "value", None), str
-        )
+    def index_components(root: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        by_id: dict[str, list[dict[str, Any]]] = {}
 
-    def full_replace(before: WidgetComponentBase, after: WidgetComponentBase) -> bool:
-        if (
-            before.type != after.type
-            or before.id != after.id
-            or before.key != after.key
-        ):
-            return True
-
-        def full_replace_value(before_value: Any, after_value: Any) -> bool:
-            if isinstance(before_value, list) and isinstance(after_value, list):
-                if len(before_value) != len(after_value):
-                    return True
-                for nth_before_value, nth_after_value in zip(before_value, after_value):
-                    if full_replace_value(nth_before_value, nth_after_value):
-                        return True
-            elif before_value != after_value:
-                if isinstance(before_value, WidgetComponentBase) and isinstance(
-                    after_value, WidgetComponentBase
-                ):
-                    return full_replace(before_value, after_value)
-                else:
-                    return True
-            return False
-
-        for field in before.model_fields_set.union(after.model_fields_set):
-            if (
-                is_streaming_text(before)
-                and is_streaming_text(after)
-                and before.id
-                and field == "value"
-                and getattr(after, "value", "").startswith(getattr(before, "value", ""))
-            ):
-                # Appends to the value prop of Markdown or Text do not trigger a full replace
-                continue
-            if full_replace_value(
-                getattr(before, field, None), getattr(after, field, None)
-            ):
-                return True
-
-        return False
-
-    if full_replace(before, after):
-        return [WidgetRootUpdated(widget=after)]
-
-    deltas: list[
-        WidgetStreamingTextValueDelta | WidgetComponentUpdated | WidgetRootUpdated
-    ] = []
-
-    def find_all_streaming_text_components(
-        component: WidgetComponent | WidgetRoot,
-    ) -> dict[str, WidgetComponentBase]:
-        components = {}
-
-        def recurse(component: WidgetComponent | WidgetRoot):
-            if is_streaming_text(component) and component.id:
-                components[component.id] = component
-
-            if hasattr(component, "children"):
-                children = getattr(component, "children", None) or []
+        def visit(node: dict[str, Any]) -> None:
+            if component_id := node.get("id"):
+                by_id.setdefault(component_id, []).append(node)
+            children = node.get("children")
+            if isinstance(children, dict):
+                visit(children)
+            elif isinstance(children, list):
                 for child in children:
-                    recurse(child)
+                    visit(child)
 
-        recurse(component)
-        return components
+        visit(root)
+        return by_id
 
-    before_nodes = find_all_streaming_text_components(before)
-    after_nodes = find_all_streaming_text_components(after)
-
-    for id, after_node in after_nodes.items():
-        before_node = before_nodes.get(id)
-        if before_node is None:
-            raise ValueError(
-                f"Node {id} was not present when the widget was initially rendered. All nodes with ID must persist across all widget updates."
-            )
-
-        before_value = str(getattr(before_node, "value", None))
-        after_value = str(getattr(after_node, "value", None))
-
-        if before_value != after_value:
-            if not after_value.startswith(before_value):
-                raise ValueError(
-                    f"Node {id} was updated with a new value that is not a prefix of the initial value. All widget updates must be cumulative."
-                )
-            done = not getattr(after_node, "streaming", False)
+    before_index = index_components(before_payload)
+    deltas: list[WidgetStreamingTextValueDelta | WidgetRootUpdated] = []
+    for component_id, new_nodes in index_components(after_payload).items():
+        old_nodes = before_index.get(component_id, [])
+        if len(old_nodes) != 1 or len(new_nodes) != 1:
+            continue
+        old_node, new_node = old_nodes[0], new_nodes[0]
+        old_value, new_value = old_node.get("value"), new_node.get("value")
+        if (
+            old_node["type"] in {"Text", "Markdown"}
+            and old_node["type"] == new_node["type"]
+            and isinstance(old_value, str)
+            and isinstance(new_value, str)
+            and new_value != old_value
+            and new_value.startswith(old_value)
+        ):
+            old_node["value"] = new_value
             deltas.append(
                 WidgetStreamingTextValueDelta(
-                    component_id=id,
-                    delta=after_value[len(before_value) :],
-                    done=done,
+                    component_id=component_id,
+                    delta=new_value[len(old_value) :],
+                    done=not new_node.get("streaming", False),
                 )
             )
 
+    # Once appends are applied, compare the remaining JSON, including extensions
+    # and explicit nulls. JSON equality distinguishes boolean and numeric props.
+    if json.dumps(before_payload, sort_keys=True) != json.dumps(
+        after_payload, sort_keys=True
+    ):
+        return [WidgetRootUpdated(widget=after_widget)]
     return deltas
 
 
 async def stream_widget(
     thread: ThreadMetadata,
-    widget: WidgetRoot | AsyncGenerator[WidgetRoot, None],
+    widget: WidgetRootInput | AsyncGenerator[WidgetRootInput, None],
     copy_text: str | None = None,
     generate_id: Callable[[StoreItemType], str] = default_generate_id,
 ) -> AsyncGenerator[ThreadStreamEvent, None]:
@@ -237,7 +192,7 @@ async def stream_widget(
                 id=generate_id("message"),
                 thread_id=thread.id,
                 created_at=datetime.now(),
-                widget=widget,
+                widget=_widget_state(widget),
                 copy_text=copy_text,
             ),
         )
@@ -245,7 +200,7 @@ async def stream_widget(
 
     async with _closing_stream(widget) as states:
         try:
-            last_state = await anext(states)
+            last_state = _widget_state(await anext(states)).model_copy(deep=True)
         except StopAsyncIteration:
             return
 
@@ -258,7 +213,8 @@ async def stream_widget(
         )
         yield ThreadItemAddedEvent(item=item)
 
-        async for new_state in states:
+        async for state in states:
+            new_state = _widget_state(state).model_copy(deep=True)
             for update in diff_widget(last_state, new_state):
                 yield ThreadItemUpdatedEvent(
                     item_id=item.id,

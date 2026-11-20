@@ -10,4 +10,4 @@ What you'll find here:
 - **Agents integration helpers**: [`chatkit.agents`](agents.md) – helpers and utilities for using ChatKit together with the Agents SDK.
 - **Data models and types**: [`chatkit.types`](types.md) – Pydantic models for threads, items, events, and other shared types.
 - **Errors**: [`chatkit.errors`](errors.md) – structured error types your ChatKit integration can raise so ChatKit can emit consistent `ErrorEvent`s to the client.
-- **Widgets**: [`chatkit.widgets`](widgets.md) – models and helpers such as `WidgetTemplate`, `DynamicWidgetRoot`, and `BasicRoot` for building rich UI responses.
+- **Widgets**: [`chatkit.widgets`](widgets.md) – named builders, `WidgetTemplate`, and the canonical `WidgetRoot` and `WidgetComponent` models for rich UI responses.

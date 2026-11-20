@@ -277,7 +277,7 @@ async def test_returns_widget_item():
     assert len(events) == 1
     assert isinstance(events[0], ThreadItemDoneEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(value="Hello, world!")])
+    assert events[0].item.widget == Card(children=[Text(value="Hello, world!")]).build()
 
 
 async def test_returns_widget_item_generator():
@@ -309,7 +309,7 @@ async def test_returns_widget_item_generator():
     assert len(events) == 3
     assert isinstance(events[0], ThreadItemAddedEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(id="text", value="")])
+    assert events[0].item.widget == Card(children=[Text(id="text", value="")]).build()
 
     assert isinstance(events[1], ThreadItemUpdatedEvent)
     assert events[1].update.type == "widget.streaming_text.value_delta"
@@ -318,8 +318,9 @@ async def test_returns_widget_item_generator():
 
     assert isinstance(events[2], ThreadItemDoneEvent)
     assert isinstance(events[2].item, WidgetItem)
-    assert events[2].item.widget == Card(
-        children=[Text(id="text", value="Hello, world")]
+    assert (
+        events[2].item.widget
+        == Card(children=[Text(id="text", value="Hello, world")]).build()
     )
 
 
@@ -349,18 +350,27 @@ async def test_returns_widget_full_replace_generator():
     assert len(events) == 3
     assert isinstance(events[0], ThreadItemAddedEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(id="text", value="Hello!")])
+    assert (
+        events[0].item.widget
+        == Card(children=[Text(id="text", value="Hello!")]).build()
+    )
 
     assert isinstance(events[1], ThreadItemUpdatedEvent)
     assert events[1].update.type == "widget.root.updated"
-    assert events[1].update.widget == Card(
-        children=[Text(key="other text", value="World!", streaming=False)]
+    assert (
+        events[1].update.widget
+        == Card(
+            children=[Text(key="other text", value="World!", streaming=False)]
+        ).build()
     )
 
     assert isinstance(events[2], ThreadItemDoneEvent)
     assert isinstance(events[2].item, WidgetItem)
-    assert events[2].item.widget == Card(
-        children=[Text(key="other text", value="World!", streaming=False)]
+    assert (
+        events[2].item.widget
+        == Card(
+            children=[Text(key="other text", value="World!", streaming=False)]
+        ).build()
     )
 
 
@@ -525,7 +535,7 @@ async def test_input_item_converter_to_input_items_mixed():
         ),
         WidgetItem(
             id="wd_123",
-            widget=Card(children=[Text(value="Hello, world!")]),
+            widget=Card(children=[Text(value="Hello, world!")]).build(),
             thread_id=thread.id,
             created_at=datetime.now(),
         ),
@@ -883,7 +893,7 @@ async def test_stream_agent_response_yields_context_events_without_streaming_eve
             id="123",
             created_at=datetime.now(),
             thread_id=thread.id,
-            widget=Card(children=[Text(id="text", value="Hello, world!")]),
+            widget=Card(children=[Text(id="text", value="Hello, world!")]).build(),
         ),
     )
 
@@ -919,7 +929,7 @@ async def test_stream_agent_response_maps_events():
             id="123",
             created_at=datetime.now(),
             thread_id=thread.id,
-            widget=Card(children=[Text(id="text", value="Hello, world!")]),
+            widget=Card(children=[Text(id="text", value="Hello, world!")]).build(),
         ),
     )
 
@@ -1470,7 +1480,7 @@ async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
                 id="3",
                 created_at=datetime.now(),
                 thread_id=thread.id,
-                widget=Card(children=[Text(id="text", value="Hello, world!")]),
+                widget=Card(children=[Text(id="text", value="Hello, world!")]).build(),
             ),
         )
     )

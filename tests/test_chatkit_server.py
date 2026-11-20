@@ -878,7 +878,7 @@ async def test_calls_action():
                             value="test",
                         )
                     ],
-                ),
+                ).build(),
             ),
         )
 
@@ -898,7 +898,7 @@ async def test_calls_action():
                     children=[
                         Text(value="Email sent!"),
                     ]
-                ),
+                ).build(),
             ),
         )
 
@@ -945,7 +945,10 @@ async def test_calls_action():
         assert events[1].type == "thread.item.updated"
         assert isinstance(events[1], ThreadItemUpdatedEvent)
         assert events[1].update.type == "widget.root.updated"
-        assert events[1].update.widget == Card(children=[Text(value="Email sent!")])
+        assert (
+            events[1].update.widget
+            == Card(children=[Text(value="Email sent!")]).build()
+        )
 
 
 async def test_add_structured_input_replaces_item_with_custom_answer_and_resumes_response():
@@ -1269,7 +1272,7 @@ async def test_calls_action_sync():
                             value="test",
                         )
                     ],
-                ),
+                ).build(),
             ),
         )
 
@@ -1289,7 +1292,7 @@ async def test_calls_action_sync():
                         children=[
                             Text(value="Email sent!"),
                         ]
-                    )
+                    ).build()
                 }
             )
         )
@@ -1335,7 +1338,7 @@ async def test_calls_action_sync():
             widget_item,
         )
         assert response.updated_item == widget_item.model_copy(
-            update={"widget": Card(children=[Text(value="Email sent!")])}
+            update={"widget": Card(children=[Text(value="Email sent!")]).build()}
         )
 
 
@@ -1362,7 +1365,9 @@ async def test_add_feedback():
                 id="widget_1",
                 type="widget",
                 created_at=datetime.now(),
-                widget=Card(children=[Text(key="text", value="Widget content")]),
+                widget=Card(
+                    children=[Text(key="text", value="Widget content")]
+                ).build(),
                 thread_id=thread.id,
             ),
         )
@@ -1781,7 +1786,7 @@ async def test_returns_widget_item_generator():
     assert len(events) == 5
     assert isinstance(events[0], ThreadItemAddedEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(id="text", value="")])
+    assert events[0].item.widget == Card(children=[Text(id="text", value="")]).build()
 
     assert isinstance(events[1], ThreadItemUpdatedEvent)
     assert events[1].update.type == "widget.streaming_text.value_delta"
@@ -1800,8 +1805,9 @@ async def test_returns_widget_item_generator():
 
     assert isinstance(events[4], ThreadItemDoneEvent)
     assert isinstance(events[4].item, WidgetItem)
-    assert events[4].item.widget == Card(
-        children=[Text(id="text", value="Hello, world")]
+    assert (
+        events[4].item.widget
+        == Card(children=[Text(id="text", value="Hello, world")]).build()
     )
 
 
@@ -1819,15 +1825,22 @@ async def test_returns_widget_item_generator_full_replace():
     assert len(events) == 3
     assert isinstance(events[0], ThreadItemAddedEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(id="text", value="Hello")])
+    assert (
+        events[0].item.widget == Card(children=[Text(id="text", value="Hello")]).build()
+    )
 
     assert isinstance(events[1], ThreadItemUpdatedEvent)
     assert events[1].update.type == "widget.root.updated"
-    assert events[1].update.widget == Card(children=[Text(id="text", value="World")])
+    assert (
+        events[1].update.widget
+        == Card(children=[Text(id="text", value="World")]).build()
+    )
 
     assert isinstance(events[2], ThreadItemDoneEvent)
     assert isinstance(events[2].item, WidgetItem)
-    assert events[2].item.widget == Card(children=[Text(id="text", value="World")])
+    assert (
+        events[2].item.widget == Card(children=[Text(id="text", value="World")]).build()
+    )
 
 
 async def test_delete_thread():
@@ -2016,8 +2029,8 @@ async def test_thread_item_replaced_event_replaces_item():
 
 async def test_thread_item_replaced_event_with_widget():
     widget_id = "widget_to_replace"
-    original_widget = Card(children=[Text(value="Original widget content")])
-    replacement_widget = Card(children=[Text(value="Replaced widget content")])
+    original_widget = Card(children=[Text(value="Original widget content")]).build()
+    replacement_widget = Card(children=[Text(value="Replaced widget content")]).build()
 
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         thread = turn.thread
@@ -2084,9 +2097,7 @@ async def test_thread_item_replaced_event_with_widget():
         replaced_item = next((i for i in items if i.id == widget_id), None)
         assert replaced_item is not None
         assert isinstance(replaced_item, WidgetItem)
-        assert isinstance(replaced_item.widget, Card)
-        assert isinstance(replaced_item.widget.children[0], Text)
-        assert replaced_item.widget.children[0].value == "Replaced widget content"
+        assert replaced_item.widget == replacement_widget
 
 
 async def test_retry_after_item():

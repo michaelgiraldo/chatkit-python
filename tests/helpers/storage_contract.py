@@ -93,7 +93,7 @@ def make_thread_items(thread_id: str) -> list[ThreadItem]:
                     ],
                 ),
             ]
-        ),
+        ).build(),
     )
 
     return [user_msg, assistant_msg, widget]
@@ -502,7 +502,7 @@ class ThreadStoreContract(ABC):
             type="widget",
             thread_id=thread.id,
             created_at=now + timedelta(seconds=1),
-            widget=Card(children=[Text(value="Test")]),
+            widget=Card(children=[Text(value="Test")]).build(),
         )
         await self.store.save_thread(thread, DEFAULT_CONTEXT)
         await self.store.save_item(thread.id, assistant_msg, DEFAULT_CONTEXT)
