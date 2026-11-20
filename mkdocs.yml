@@ -74,6 +74,7 @@ nav:
           - widgets: api/chatkit/widgets.md
           - icons: api/chatkit/icons.md
   - Release process / changelog: release.md
+  - Upstream status: upstream-status.md
   - ChatKit JS Docs: https://openai.github.io/chatkit-js/
 
 markdown_extensions:

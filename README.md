@@ -9,6 +9,7 @@ Install from the root of the checkout with `python -m pip install .`. See the
 [quick start](docs/quickstart.md) to run a ChatKit server and
 [Pin an app to the fork](docs/guides/pin-the-fork.md) to install a specific commit.
 The [changelog](docs/release.md) covers what changed in Turnspan 2.
+The [upstream status page](docs/upstream-status.md) records review decisions.
 
 ## License
 This project is licensed under the [Apache License 2.0](LICENSE).
