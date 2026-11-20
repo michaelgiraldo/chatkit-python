@@ -62,9 +62,10 @@ python -m pip install '.[fastapi]'
 
 The [runnable backend](examples/quickstart.py) receives every ChatKit
 request at `/chatkit`. Its `ChatKitServer.respond(turn)` yields events for
-a `Turn` with the thread, trigger, and request context. The
-[streaming response helper](examples/chatkit_response.py) closes the ChatKit
-stream when an HTTP client disconnects.
+a `Turn` with the thread, trigger, and request context. The endpoint calls
+`chatkit.fastapi.process_request(server, request, context={})`. The adapter
+closes streams on disconnect and returns JSON errors for invalid requests.
+[FastAPI adapter reference](api/chatkit/fastapi.md)
 
 ## Store chat data
 

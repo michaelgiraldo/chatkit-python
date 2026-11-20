@@ -12,9 +12,9 @@ from typing import (
     assert_never,
 )
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from chatkit.errors import CustomStreamError, StreamError
+from chatkit.errors import CustomStreamError, InvalidRequestError, StreamError
 
 from .logger import logger
 from .store import (
@@ -452,7 +452,10 @@ class ChatKitServer[TContext = Any](ABC):
         self, request: str | bytes | bytearray, context: TContext
     ) -> StreamingResult | NonStreamingResult:
         """Parse an incoming ChatKit request and route it to streaming or non-streaming handlers."""
-        parsed_request = TypeAdapter[ChatKitReq](ChatKitReq).validate_json(request)
+        try:
+            parsed_request = TypeAdapter[ChatKitReq](ChatKitReq).validate_json(request)
+        except ValidationError as error:
+            raise InvalidRequestError(error) from error
         logger.info(f"Received request op: {parsed_request.type}")
 
         if is_streaming_req(parsed_request):

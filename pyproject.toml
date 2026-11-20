@@ -14,7 +14,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-fastapi = ["fastapi>=0.165.0,<1"]
+fastapi = [
+  "anyio>=4.16.0,<5",
+  "fastapi>=0.165.0,<1",
+  "starlette>=1.10.0,<2",
+]
 
 [build-system]
 requires = ["setuptools>=84.2.1"]

@@ -3,7 +3,8 @@ from datetime import datetime
 
 from fastapi import FastAPI, Request, Response
 
-from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.fastapi import process_request
+from chatkit.server import ChatKitServer
 from chatkit.turns import Turn
 from chatkit.types import (
     AssistantMessageContent,
@@ -11,7 +12,6 @@ from chatkit.types import (
     ThreadItemDoneEvent,
     ThreadStreamEvent,
 )
-from docs.examples.chatkit_response import ChatKitStreamingResponse
 from docs.examples.in_memory_thread_store import Context, InMemoryThreadStore
 
 
@@ -33,7 +33,4 @@ server = MyChatKitServer(store=InMemoryThreadStore())
 
 @app.post("/chatkit")
 async def chatkit(request: Request) -> Response:
-    result = await server.process(await request.body(), context={})
-    if isinstance(result, StreamingResult):
-        return ChatKitStreamingResponse(result)
-    return Response(content=result.json, media_type="application/json")
+    return await process_request(server, request, context={})

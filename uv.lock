@@ -839,7 +839,9 @@ dependencies = [
 
 [package.optional-dependencies]
 fastapi = [
+    { name = "anyio" },
     { name = "fastapi" },
+    { name = "starlette" },
 ]
 
 [package.dev-dependencies]
@@ -863,11 +865,13 @@ lint = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", marker = "extra == 'fastapi'", specifier = ">=4.16.0,<5" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.165.0,<1" },
     { name = "jinja2", specifier = ">=3.1.6,<4" },
     { name = "openai", specifier = ">=3.56.0,<4" },
     { name = "openai-agents", specifier = ">=0.25.0,<0.26" },
     { name = "pydantic", specifier = ">=2.14.4,<3" },
+    { name = "starlette", marker = "extra == 'fastapi'", specifier = ">=1.10.0,<2" },
     { name = "uvicorn", specifier = ">=0.54.0,<1" },
 ]
 provides-extras = ["fastapi"]

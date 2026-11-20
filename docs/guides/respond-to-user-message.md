@@ -91,15 +91,14 @@ and [structured results](#save-structured-tool-results-after-a-turn).
 
 ### Wire ChatKit to your web framework
 
-Expose a single `/chatkit` endpoint that forwards requests to your
-`MyChatKitServer` instance. For this FastAPI example, save
-[chatkit_response.py](../examples/chatkit_response.py) alongside your endpoint module.
+Expose a single `/chatkit` endpoint. Install the `fastapi` extra to use the
+adapter with your `MyChatKitServer` instance. Construct the request context
+in your app and pass it into the adapter.
 
 ```python
 from fastapi import FastAPI, Request, Response
 
-from chatkit.server import StreamingResult
-from chatkit_response import ChatKitStreamingResponse
+from chatkit.fastapi import process_request
 
 app = FastAPI()
 store = MyPostgresStore(conn_info)
@@ -107,16 +106,18 @@ server = MyChatKitServer(store)
 
 
 @app.post("/chatkit")
-async def chatkit_endpoint(request: Request):
+async def chatkit_endpoint(request: Request) -> Response:
     # Build a per-request context from the incoming HTTP request.
     context = MyRequestContext(user_id="abc123")
 
-    # Let ChatKit handle the request and return either a streaming or JSON result.
-    result = await server.process(await request.body(), context)
-    if isinstance(result, StreamingResult):
-        return ChatKitStreamingResponse(result)
-    return Response(content=result.json, media_type="application/json")
+    return await process_request(server, request, context)
 ```
+
+The adapter serves JSON or an SSE stream. It returns HTTP 400 for malformed
+JSON, HTTP 422 for an invalid ChatKit payload, and HTTP 404 for missing
+resources reported before streaming. ChatKit's streaming error events are
+sent as part of the SSE response.
+[FastAPI adapter reference](../api/chatkit/fastapi.md)
 
 ### How request context flows into ChatKit
 

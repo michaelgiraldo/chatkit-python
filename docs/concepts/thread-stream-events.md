@@ -49,7 +49,9 @@ while the transport is sending an event, between reads from the ChatKit stream.
 `StreamingResult`. Closing an active stream releases the responder and runs the
 server's cancellation hook, which saves partial assistant replies by default.
 
-For FastAPI or Starlette, use [the quickstart response helper](../examples/chatkit_response.py).
+For FastAPI or Starlette, use `chatkit.fastapi.process_request` to close the
+stream when the HTTP response ends.
+[FastAPI adapter reference](../api/chatkit/fastapi.md)
 It keeps the iterator open for the lifetime of the HTTP response and closes it
 when the framework reports a disconnect.
 

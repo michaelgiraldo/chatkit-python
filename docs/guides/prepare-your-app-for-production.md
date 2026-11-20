@@ -184,17 +184,15 @@ The Python SDK expects your own app to handle authentication; `ChatKitServer` wo
 
 1. Authenticate the incoming HTTP request using your web framework (session middleware, OAuth bearer tokens, etc.).
 2. Build a `RequestContext` that includes the authenticated user id, org/tenant, and any roles or scopes.
-3. Pass that context into `server.process`.
+3. Pass that context into `process_request`.
 
-This FastAPI example assumes your authentication middleware supplies
-`request.user`. It uses [chatkit_response.py](../examples/chatkit_response.py)
-from the quickstart. Save it alongside your endpoint module.
+This example assumes your FastAPI authentication middleware supplies
+`request.user`.
 
 ```python
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
-from chatkit.server import StreamingResult
-from chatkit_response import ChatKitStreamingResponse
+from chatkit.fastapi import process_request
 
 
 def get_current_user(request: Request) -> str:
@@ -212,12 +210,9 @@ server = MyChatKitServer(store)
 async def chatkit_endpoint(
     request: Request,
     user_id: str = Depends(get_current_user),
-):
+) -> Response:
     context = RequestContext(user_id=user_id, locale="en")
-    result = await server.process(await request.body(), context)
-    if isinstance(result, StreamingResult):
-        return ChatKitStreamingResponse(result)
-    return Response(content=result.json, media_type="application/json")
+    return await process_request(server, request, context)
 ```
 
 Enforce per-user or per-tenant access in your thread store, attachment stores,

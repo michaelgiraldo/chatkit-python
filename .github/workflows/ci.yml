@@ -49,4 +49,4 @@ jobs:
             python -I -c 'import chatkit.agents, chatkit.server, chatkit.widgets, uvicorn'
           uv --no-config run --no-project --isolated --python "$python_version" \
             --default-index https://pypi.org/simple --with "${wheel}[fastapi]" \
-            python -I -c 'from fastapi import FastAPI; import chatkit.server; FastAPI()'
+            python -I -c 'from fastapi import FastAPI; from chatkit.fastapi import process_request; assert callable(process_request); FastAPI()'

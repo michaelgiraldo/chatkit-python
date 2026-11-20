@@ -68,6 +68,7 @@ nav:
       - Modules:
           - agents: api/chatkit/agents.md
           - errors: api/chatkit/errors.md
+          - fastapi: api/chatkit/fastapi.md
           - server: api/chatkit/server.md
           - store: api/chatkit/store.md
           - turns: api/chatkit/turns.md

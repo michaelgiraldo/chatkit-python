@@ -1,6 +1,16 @@
 from abc import ABC
 from enum import Enum
 
+from pydantic import ValidationError
+
+
+class InvalidRequestError(ValueError):
+    """The request body could not be parsed as a ChatKit operation."""
+
+    def __init__(self, validation_error: ValidationError):
+        super().__init__("Invalid ChatKit request body")
+        self.validation_error = validation_error
+
 
 # Not a closed enum, new error codes can and will be added as needed
 class ErrorCode(str, Enum):

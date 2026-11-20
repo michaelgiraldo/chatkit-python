@@ -5,10 +5,11 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import pytest
-from starlette.requests import ClientDisconnect
+from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message, Scope
 
-from chatkit.server import NonStreamingResult, StreamingResult
+from chatkit.fastapi import process_request
+from chatkit.server import NonStreamingResult
 from chatkit.turns import Turn, UserMessageTurn
 from chatkit.types import (
     AssistantMessageContent,
@@ -31,7 +32,6 @@ from chatkit.types import (
     UserMessageInput,
     UserMessageTextContent,
 )
-from docs.examples.chatkit_response import ChatKitStreamingResponse
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
@@ -49,6 +49,7 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
     stalled = asyncio.Event()
     finalized = asyncio.Event()
     streamed: list[ThreadStreamEvent] = []
+    request_body = b""
 
     async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         thread = turn.thread
@@ -87,6 +88,10 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
             finalized.set()
 
     async def receive() -> Message:
+        nonlocal request_body
+        if request_body:
+            body, request_body = request_body, b""
+            return {"type": "http.request", "body": body, "more_body": False}
         await disconnect.wait()
         return {"type": "http.disconnect"}
 
@@ -123,14 +128,14 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
         request = ThreadsCreateReq(
             params=ThreadCreateParams(input=message_input("Start"))
         )
-        result = await server.process(request.model_dump_json(), DEFAULT_CONTEXT)
-        assert isinstance(result, StreamingResult)
-
+        request_body = request.model_dump_json().encode()
         scope: Scope = {
             "type": "http",
             "asgi": {"version": "3.0", "spec_version": asgi_version},
         }
-        response = ChatKitStreamingResponse(result)
+        response = await process_request(
+            server, Request(scope, receive), DEFAULT_CONTEXT
+        )
         expected_exit = (
             pytest.raises(ClientDisconnect) if asgi_version == "2.4" else nullcontext()
         )
