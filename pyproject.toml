@@ -6,18 +6,20 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
   "pydantic>=2.14.4,<3",
-  "uvicorn>=0.54.0,<1",
-  "openai>=3.56.0,<4",
-  # Widen after verifying the next Agents SDK minor release.
-  "openai-agents>=0.25.0,<0.26",
   "jinja2>=3.1.6,<4",
 ]
 
 [project.optional-dependencies]
+agents = [
+  "openai>=3.56.0,<4",
+  # Widen after verifying the next Agents SDK minor release.
+  "openai-agents>=0.25.0,<0.26",
+]
 fastapi = [
   "anyio>=4.16.0,<5",
   "fastapi>=0.165.0,<1",
   "starlette>=1.10.0,<2",
+  "uvicorn>=0.54.0,<1",
 ]
 
 [build-system]

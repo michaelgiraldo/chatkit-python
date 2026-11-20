@@ -16,6 +16,10 @@ for the release or commit you tested.
 openai-chatkit = { url = "https://github.com/michaelgiraldo/chatkit-python/archive/COMMIT_SHA.tar.gz" }
 ```
 
+When pinning a commit on the maintained branch, use `openai-chatkit[agents]`
+in the app's dependency list if it imports `chatkit.agents`. Select
+`[agents,fastapi]` if the app also uses the FastAPI adapter.
+
 Refresh the lock and install it with Python 3.14.
 
 ```sh

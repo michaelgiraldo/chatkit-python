@@ -105,6 +105,12 @@ and the text `Hello, world!`. The hardcoded responder runs without an API key.
 
 ## Generate model responses
 
+Install the Agents extra alongside FastAPI to use the model integration.
+
+```sh
+python -m pip install '.[fastapi,agents]'
+```
+
 Replace the fixed reply in the example with an Agents SDK call. Set
 `OPENAI_API_KEY` in your environment before running.
 

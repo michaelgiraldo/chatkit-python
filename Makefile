@@ -4,6 +4,7 @@
 UV_ENV := env -i PATH="$(PATH)" HOME="$(HOME)" UV_PYTHON="$(shell cat .python-version)"
 UV := $(UV_ENV) uv --no-config
 UV_LOCK_ARGS := --locked --default-index https://pypi.org/simple
+UV_RUN := $(UV) run $(UV_LOCK_ARGS) --all-extras
 
 sync:
 	$(UV) sync $(UV_LOCK_ARGS) --all-extras --all-packages --group dev
@@ -11,28 +12,28 @@ sync:
 install: sync
 
 format:
-	$(UV) run $(UV_LOCK_ARGS) ruff format
-	$(UV) run $(UV_LOCK_ARGS) ruff check --fix
+	$(UV_RUN) ruff format
+	$(UV_RUN) ruff check --fix
 
 format-check:
-	$(UV) run $(UV_LOCK_ARGS) ruff format --check
+	$(UV_RUN) ruff format --check
 
 lint:
-	$(UV) run $(UV_LOCK_ARGS) ruff check
+	$(UV_RUN) ruff check
 
 pyright:
-	$(UV) run $(UV_LOCK_ARGS) pyright
+	$(UV_RUN) pyright
 
 test:
-	$(UV) run $(UV_LOCK_ARGS) pytest
+	$(UV_RUN) pytest
 
 build:
 	$(UV) build --default-index https://pypi.org/simple
 
 serve-docs:
-	$(UV) run $(UV_LOCK_ARGS) mkdocs serve
+	$(UV_RUN) mkdocs serve
 
 deploy-docs:
-	$(UV) run $(UV_LOCK_ARGS) mkdocs gh-deploy --force --verbose
+	$(UV_RUN) mkdocs gh-deploy --force --verbose
 
 check: format-check lint pyright test
