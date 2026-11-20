@@ -5,7 +5,8 @@
 This November 19, 2026 snapshot covers all open issues and pull requests in
 OpenAI's ChatKit Python repository. We checked them against Turnspan 2
 (`1.6.5+turnspan.2`, commit `4c7ba49`) on Python 3.14. The release passed 164
-tests, and its GitHub Actions run passed.
+tests, and its GitHub Actions run passed. The table also counts fixes verified
+by CI on Turnspan's maintained Python 3.14 branch after that release.
 [Open issues](https://github.com/openai/chatkit-python/issues) ·
 [Open pull requests](https://github.com/openai/chatkit-python/pulls) ·
 [Turnspan 2 release](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.2) ·
@@ -13,17 +14,17 @@ tests, and its GitHub Actions run passed.
 
 | Decision | Issues | PRs | Entries | Distinct topics |
 | --- | ---: | ---: | ---: | ---: |
-| Resolved in Turnspan 2 | 4 | 11 | 15 | 11 |
-| Partially addressed | 0 | 1 | 1 | 1 |
+| Resolved on Turnspan | 4 | 12 | 16 | 12 |
 | Deferred | 3 | 2 | 5 | 4 |
 | Reviewed, no fix needed | 4 | 1 | 5 | 5 |
 | **Total reviewed** | **11** | **15** | **26** | **21** |
 
-The fixed count includes **15 of 26 entries (58%)** across **11 of 21 topics
-(52%)**. Entries count individual GitHub reports and patches. Topics count
-each underlying behavior once. The fixed count includes shipped code, docs,
-and tooling changes that fully address the reported need. It excludes the
-partial, deferred, and no-fix rows below.
+The maintained branch resolves **16 of 26 entries (62%)** across **12 of 21
+topics (57%)**. Turnspan 2 shipped fixes for 15 entries across 11 topics. The
+test collection fix for #122 landed after the release. Entries count individual
+GitHub reports and patches. Topics count each underlying behavior once. The
+fixed count includes code, docs, and tooling changes that fully address the
+reported need.
 
 ## Resolved in Turnspan 2
 
@@ -41,11 +42,11 @@ partial, deferred, and no-fix rows below.
 | Structured output persistence | The guide shows how to save structured tool results after a successful stream, with an upsert keyed to the thread and user message. A scripted Agents SDK run exercised a successful save and verified that a failed turn skips it. [Issue #120](https://github.com/openai/chatkit-python/issues/120) · [Persistence example](guides/respond-to-user-message.md#save-structured-tool-results-after-a-turn) |
 | GitHub Actions setup-uv update | The PR proposes setup-uv v7. Turnspan pins the newer v10.3.3 by commit in its CI, docs, and release workflows. The exact release commit passed CI. [PR #84](https://github.com/openai/chatkit-python/pull/84) · [Workflow pins](https://github.com/michaelgiraldo/chatkit-python/commit/59aff6e) |
 
-## Partially addressed
+## Resolved after Turnspan 2
 
-| Topic | What we verified and what remains |
+| Topic | What we verified on the Python 3.14 branch |
 | --- | --- |
-| Test imports in a clean checkout | Plain `pytest` passed all 164 tests with `PYTHONPATH` unset, and the private Agents SDK sentinel import is gone. The optional `--import-mode=importlib` run still failed collection in five files that use top-level `helpers` imports. The standard entry point is covered. Broader import-mode compatibility stays outside the fixed count. [PR #122](https://github.com/openai/chatkit-python/pull/122) · [Pytest configuration](https://github.com/michaelgiraldo/chatkit-python/commit/5e080e4) · [Fixture cleanup](https://github.com/michaelgiraldo/chatkit-python/commit/58f57af) |
+| Test imports in a clean checkout | **Fixed.** Shared server and stream helpers live in `tests/helpers/`, and plain `pytest` defaults to `importlib` mode. All nine test modules collected individually, and CI passed all 164 tests. Turnspan 2 had already removed the private Agents SDK sentinel import. Thanks to Mark Zhang for reporting the import problem. [PR #122](https://github.com/openai/chatkit-python/pull/122) · [Test setup](https://github.com/michaelgiraldo/chatkit-python/commit/92a1696934836e72469d94e858ee322b58f0415c) · [Passing CI run](https://github.com/michaelgiraldo/chatkit-python/actions/runs/44663927249) · [Fixture cleanup](https://github.com/michaelgiraldo/chatkit-python/commit/58f57af) |
 
 ## Deferred
 
