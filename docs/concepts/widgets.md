@@ -10,7 +10,7 @@ Here’s how a widget is represented from design time through runtime streaming.
 | --- | --- |
 | Working definition | [Widget UI language](#widget-ui-language) plus a schema (Zod/JSON) and example data you author in <https://widgets.chatkit.studio>. |
 | Published definition | The exported [`.widget` file](#widget-files) bundling the layout, schema, and sample data. |
-| Server runtime (definition only) | [`WidgetTemplate`](../api/chatkit/templates.md#chatkit.templates.WidgetTemplate) instance loaded from the `.widget` file. |
+| Server runtime (definition only) | [`WidgetTemplate`](../api/chatkit/templates.md#chatkit.templates.WidgetTemplate) instance loaded from the `.widget` file using the `templates` extra. |
 | Server runtime (hydrated) | A [`WidgetRoot`](../api/chatkit/widget_models.md#chatkit.widget_models.WidgetRoot) built from a template or from typed Python builders. |
 | Streamed and saved | The same widget tree is serialized to JSON in streamed and stored [`WidgetItem`](../api/chatkit/models.md#chatkit.models.WidgetItem) records. Reload uses that tree directly and preserves nested properties, including client extension fields. |
 | Rendered by the client | ChatKit.js deserializes the JSON into typed widget objects (for example, [`Card`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/card/) or [`ListView`](https://openai.github.io/chatkit-js/api/openai/chatkit/namespaces/widgets/type-aliases/listview/)) and renders them; entity previews use [`BasicRoot`](https://openai.github.io/chatkit-js/api/openai/chatkit-react/namespaces/widgets/type-aliases/basicroot/) returned from [`entities.onRequestPreview`](#entity-previews). |
@@ -26,7 +26,7 @@ Widget layouts use a strict, simplified JSX dialect that only allows specific co
 Every widget must be wrapped in a root-level container element. For single, self-contained content such as a summary, confirmation, or form, use `<Card>`. For a set of options (for example, restaurants or files), use `<ListView>`. Reserve `<Basic>` for entity previews.
 
 - `<Card>`: Simple card with a light border and plain background; supports confirm and cancel actions.
-- `<ListView>`: Scroll-friendly list with built-in “show more” mechanics. Children must be `<ListViewItem>`, and `<ListViewItem>` must only appear as a direct child of `<ListView>`; it has a constrained prop set for row-like layout (`children`, `gap`, `align`, `onClickAction`).
+- `<ListView>` can be the root of a widget or sit inside a `<Card>`. Its direct children are `<ListViewItem>` rows, with layout and interaction props such as `children`, `gap`, `align`, and `onClickAction`.
 - `<Basic>`: Minimal container only used for entity previews.
 
 ## .widget files

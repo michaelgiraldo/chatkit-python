@@ -1,24 +1,26 @@
 # Pin an app to the fork
 
-Pin a full GitHub commit SHA to install the same tested ChatKit code whenever
-you build your app. The installed package's source URL identifies the commit,
-and Turnspan 2 reports the version `1.6.5+turnspan.2`.
+Pin a full GitHub commit SHA to install the same tested Turnspan code whenever
+you build your app. The installed package's source URL identifies the commit.
 
 ## Lock the fork as an app dependency
 
-From your app's repository, keep `openai-chatkit` in the `dependencies` list in
-`pyproject.toml`. For Turnspan 2, use `openai-chatkit==1.6.5+turnspan.2`. Add
-this entry to the app's uv sources, replacing `COMMIT_SHA` with the full SHA
-for the release or commit you tested.
+Choose a version from the [published releases](https://github.com/michaelgiraldo/chatkit-python/releases)
+or a reviewed commit on the maintained branch. Open the commit on GitHub and
+copy its full SHA. In your app's `pyproject.toml`, keep `openai-chatkit` in
+the `dependencies` list. If you specify an exact version there, use the
+version declared by the chosen commit. Add this uv source, replacing
+`COMMIT_SHA` with the full SHA.
 
 ```toml
 [tool.uv.sources]
 openai-chatkit = { url = "https://github.com/michaelgiraldo/chatkit-python/archive/COMMIT_SHA.tar.gz" }
 ```
 
-When pinning a commit on the maintained branch, use `openai-chatkit[agents]`
-in the app's dependency list if it imports `chatkit.agents`. Select
-`[agents,fastapi]` if the app also uses the FastAPI adapter.
+Choose extras for the pinned version. On the maintained branch, add `agents`
+for `chatkit.agents`, `fastapi` for the FastAPI adapter, and `templates` for
+loading exported `.widget` files. For example, use `openai-chatkit[agents,fastapi]`
+for an Agents integration served by FastAPI.
 
 Refresh the lock and install it with Python 3.14.
 

@@ -14,3 +14,4 @@ What you'll find here:
 - **Requests and events**: [`chatkit.requests`](requests.md) describes browser operations. [`chatkit.events`](events.md) defines streamed updates.
 - **Errors**: [`chatkit.errors`](errors.md) – structured error types your ChatKit integration can raise so ChatKit can emit consistent `ErrorEvent`s to the client.
 - **Widgets**: [`chatkit.widgets`](widgets.md) provides typed builders. [`chatkit.widget_models`](widget_models.md) owns the JSON tree, [`chatkit.widget_stream`](widget_stream.md) streams updates, and [`chatkit.templates`](templates.md) loads `.widget` files with the `templates` extra.
+- **Icons**. [`chatkit.icons`](icons.md) defines the icon names accepted by widgets and progress events.

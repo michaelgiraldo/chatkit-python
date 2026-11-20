@@ -43,7 +43,7 @@ class ItemData(BaseModel):
 
 
 def _sort_timestamp(created_at: datetime) -> str:
-    # Match the SDK's local timestamps and give offset-aware inputs the same order.
+    # Sort timestamps on the same UTC timeline, including legacy local timestamps.
     return created_at.astimezone(UTC).isoformat(timespec="microseconds")
 
 

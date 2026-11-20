@@ -9,7 +9,7 @@ At a high level:
 
 ## Server tools
 
-Server tools are ordinary Python functions you register with your inference setup (for example, as tools on an agent or as explicit steps in your pipeline). During inference, the model can decide to call them; ChatKit serializes the call, runs your function, and feeds the output back to the model.
+Server tools are Python functions registered with an agent or inference pipeline. Your inference integration runs the function and returns its result to the model. With the Agents SDK, ChatKit can convert run events into updates for the conversation.
 
 Use server tools to:
 
@@ -30,8 +30,10 @@ Some operations can only run on the client—for example:
 Client tools let the model request that kind of data mid-turn:
 
 - On the server, you instruct your inference pipeline to stop when a specific tool is called (for example, by using `StopAtTools` around that tool).
-- ChatKit turns the tool call into a streamed thread item.
-- On the client, `onClientTool` receives that item, runs your callback, and returns a JSON result.
-- ChatKit sends the result back to the server, which starts a new stream to continue the run with the tool output included as model input.
+- Your responder streams a pending `ClientToolCallItem` and the server saves it.
+- The client calls `onClientTool` with the tool name and parameters. The callback returns a JSON-compatible result.
+- The server saves the result and calls `respond` with a [`ClientToolTurn`](../api/chatkit/turns.md#chatkit.turns.ClientToolTurn). The responder can use the stored call and output as input to the next model run.
 
 Use client tools when the model needs fresh, local context it cannot safely obtain from server-side state alone.
+
+[Client tool example](../guides/update-client-during-response.md#call-client-tools-mid-inference)

@@ -24,7 +24,8 @@ With `history.enabled: true`, ChatKit.js will:
 - Let users click a past thread to load its items and continue the conversation.
 - Let users delete and rename threads.
 
-Set `history.enabled: false` if you want a single-thread, stateless chat experience with no history UI.
+Set `history.enabled: false` to hide the history UI. Your store still persists
+the current conversation.
 
 ## Show readable titles in history
 
@@ -88,7 +89,8 @@ By default, users can continue any past thread: selecting it in the history view
 
 Use `thread.status` to mark conversations that should no longer accept new messages. Locked and closed threads still appear in history, but the composer UI changes.
 
-There are two ways to stop new user messages: temporarily lock a thread or permanently close it when the conversation is finished.
+Use the locked state for a temporary pause and the closed state when the
+conversation is finished.
 
 | State   | When to use                                    | Input UI                                       | What the user sees |
 |---------|------------------------------------------------|------------------------------------------------|--------------------|
@@ -115,24 +117,17 @@ await store.patch_thread(
 await store.patch_thread(thread.id, {"status": ActiveStatus()}, context)
 ```
 
-When you persist a new status during `respond`, ChatKit emits a `ThreadUpdatedEvent` so all viewers see the updated state.
+To update the connected client from `respond` or `action`, yield the event
+returned by `await self.update_thread(thread.id, {"status": status}, context)`.
+Calling the store directly only saves the status.
 
 You can also update the thread status from a custom client-facing endpoint that updates the store directly (outside of the ChatKit server request flow). If the user is currently viewing the thread, have the client call `chatkit.fetchUpdates()` after the status is persisted so the UI picks up the latest thread state.
 
 ### Block server-side work when locked or closed
 
-Thread status only affects the composer UI; `ChatKitServer` does not automatically reject actions, tool calls, or imperative message adds. Your integration should short-circuit handlers when a thread is disabled:
-
-```python
-class MyChatKitServer(ChatKitServer[RequestContext]):
-    async def respond(self, turn: Turn[RequestContext]):
-        if turn.thread.status.type in {"locked", "closed"}:
-            return
-        # normal processing
-
-    async def action(self, thread, action, sender, context):
-        if thread.status.type in {"locked", "closed"}:
-            return
-        # normal processing
-```
+Thread status controls how the client displays the composer. Enforce your
+write policy in the backend for locked or closed threads. Check it before
+dispatching a write operation, or enforce it in your store transaction when a
+thread could close concurrently. `respond` runs after ChatKit saves an
+incoming message or tool result, so it is too late to prevent that write.
 

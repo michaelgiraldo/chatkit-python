@@ -1,28 +1,54 @@
-# Release process/changelog
+# Release process and changelog
 
-The project follows a slightly modified version of [semantic versioning](https://semver.org/spec/v2.0.0.html). The SDK is still evolving and certain backwards-incompatible changes may be released as minor versions.
+Turnspan keeps the OpenAI ChatKit base version and increments the
+`+turnspan.N` suffix for releases of this fork. Read the changelog for API
+and storage changes before updating a [commit pin](guides/pin-the-fork.md).
 
-See [Turnspan's GitHub releases](https://github.com/michaelgiraldo/chatkit-python/releases)
-and the original [OpenAI ChatKit releases](https://github.com/openai/chatkit-python/releases).
+Turnspan publishes [GitHub releases](https://github.com/michaelgiraldo/chatkit-python/releases).
+The `openai-chatkit` package on PyPI tracks the
+[original OpenAI project](https://github.com/openai/chatkit-python/releases).
 
-## Minor versions
+## Cut a Turnspan release
 
-We will increase minor versions for **breaking changes** to any public interfaces. For example, going from `1.0.x` to `1.1.x` might include breaking changes.
+1. Set the version in `pyproject.toml`, refresh `uv.lock`, and update the
+   README and changelog.
+2. Run `make check` and `make build` on Python 3.14. Verify that GitHub
+   Actions passes on the exact commit to be released.
+3. Tag that commit with the package version prefixed by `v`. Publish a GitHub
+   release with the changelog, the full commit SHA for installation, and the
+   passing CI run.
 
-If you don't want breaking changes, we recommend pinning to `1.0.x` versions in your project.
+## Turnspan 3 (`1.6.5+turnspan.3`)
 
-## Patch versions
+### What's new
 
-We will increment patch versions for non-breaking changes:
+- The [FastAPI adapter](quickstart.md) returns clear HTTP errors for invalid
+  requests and closes event producers when the client disconnects. The
+  browser demo runs locally with `make demo`.
+- Streamed and reloaded widgets share a lossless representation. Card borders
+  survive reload, empty widget streams complete cleanly, and a disconnect
+  closes the widget producer.
+- Image previews and web-search progress are tracked by provider item ID.
+  Overlapping calls keep separate progress and results. Thanks to Francis
+  Poisson-Gagnon for the [web-search report](https://github.com/openai/chatkit-python/issues/28)
+  and [proposed fix](https://github.com/openai/chatkit-python/pull/29).
+- The [SQLite example](guides/respond-to-user-message.md#use-the-file-backed-sqlite-example)
+  demonstrates durable storage. `chatkit.store_checks` supplies reusable checks
+  for custom thread stores.
+- Test helpers live outside test modules, and pytest uses `importlib` mode
+  in clean checkouts. Thanks to Mark Zhang for
+  [reporting the import problem](https://github.com/openai/chatkit-python/pull/122).
+- The docs now build with Zensical and publish to
+  [GitHub Pages](https://michaelgiraldo.github.io/chatkit-python/).
 
-- Bug fixes
-- New features
-- Changes to private interfaces
+### Upgrade from Turnspan 2
 
-## Breaking change changelog
-
-### Unreleased
-
+- Implement `respond(self, turn)` using the typed trigger on `turn.input`.
+  Use `on_turn_finished` to observe whether the server completed, is waiting
+  for input, cancelled, or failed.
+- Implement `ThreadStore` for thread and item persistence. Configure attachment
+  metadata and file operations through `AttachmentMetadataStore` and
+  `AttachmentStore` where needed.
 - Import thread records from `chatkit.models`, requests from `chatkit.requests`,
   and stream events from `chatkit.events`. Use `ThreadItemUpdatedEvent` for
   item updates and `chatkit.icons.IconName` for widget icons.
@@ -43,7 +69,6 @@ We will increment patch versions for non-breaking changes:
 - Pass provider continuation IDs to `Runner.run_streamed`. An `AgentContext`
   belongs to one response run, and writes after it closes raise
   `asyncio.QueueShutDown`.
-
 - Client tool callbacks use `AgentContext.request_client_tool` with the
   Agents SDK's `ToolContext` to bind the browser callback to its invocation.
 - Custom HTTP transports parse the request with `chatkit.protocol.parse_request`,
@@ -59,7 +84,7 @@ We will increment patch versions for non-breaking changes:
 - Install the `agents` extra when using `chatkit.agents`. The `fastapi` extra
   supplies the HTTP adapter's dependencies and Uvicorn.
 
-### Turnspan 2 (`1.6.5+turnspan.2`)
+## Turnspan 2 (`1.6.5+turnspan.2`)
 
 - Lists inside cards now parse as typed `ListView` widgets, including their rows
   and click actions. Thanks to Saloni Garg for the [upstream fix](https://github.com/openai/chatkit-python/pull/137).
@@ -70,15 +95,15 @@ We will increment patch versions for non-breaking changes:
   app's configured value. Turnspan no longer adds a `ChatKit/Python` suffix.
   The dependency range remains at Agents SDK 0.25.x pending tests of the next
   minor release.
-- Plain `pytest` works in a clean checkout with `PYTHONPATH` unset, using the
-  same configuration as `make test`. Thanks to Mark Zhang for
-  [reporting the test import problem](https://github.com/openai/chatkit-python/pull/122).
+- Removed the private Agents SDK sentinel import implicated in
+  [PR #122](https://github.com/openai/chatkit-python/pull/122). The shared test
+  helpers and default `importlib` configuration followed in Turnspan 3.
 - The [structured feedback example](guides/respond-to-user-message.md#save-structured-tool-results-after-a-turn)
   shows how tools can access the thread ID and how the app can save feedback
   after a successful stream. Thanks to Jao Garcia for the
   [persistence question](https://github.com/openai/chatkit-python/issues/120).
 
-### Turnspan 1 (`1.6.5+turnspan.1`)
+## Turnspan 1 (`1.6.5+turnspan.1`)
 
 - The fork now requires Python 3.14 or newer. For Python 3.10 through 3.13, the upstream `v1.6.5` release remains available.
 - Installing the fork requires OpenAI Python 3.56.0 through 3.x, Agents SDK
@@ -93,6 +118,8 @@ We will increment patch versions for non-breaking changes:
 - Widget updates handle added and removed properties and text without IDs.
   Repeated workflow tasks update the correct position, and empty streamed
   citations leave subsequent citations intact.
+
+## Upstream release history
 
 ### 1.6.0
 

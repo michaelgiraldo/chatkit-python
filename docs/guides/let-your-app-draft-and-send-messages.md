@@ -9,19 +9,20 @@ At a high level:
 
 ## Get ChatKit commands from `useChatKit`
 
-When you call `useChatKit`, you can destructure commands alongside the `control` object you pass into `<ChatKit />`:
+When you call `useChatKit`, destructure commands alongside the `control`
+object you pass into `<ChatKit />`. This example uses the same self-hosted API
+configuration as the [production guide](prepare-your-app-for-production.md#domain-keys).
 
 ```tsx
 import {ChatKit, useChatKit} from "@openai/chatkit-react";
 
-export function Inbox() {
+export function Inbox({backendUrl, domainKey}: {backendUrl: string; domainKey: string}) {
   const {
     control,
     setComposerValue,
     sendUserMessage,
-    setThreadId,
   } = useChatKit({
-    // ... your normal options (api, history, composer, etc.)
+    api: {url: backendUrl, domainKey},
   });
 
   return <ChatKit control={control} />;
@@ -64,13 +65,12 @@ function QuickReplies({
 Use `sendUserMessage` when your app needs to initiate a turn directly—for example, from a custom toolbar button or a widget action handled on the client.
 
 ```tsx
-export function Inbox() {
+export function Inbox({backendUrl, domainKey}: {backendUrl: string; domainKey: string}) {
   const {
     control,
     sendUserMessage,
-    setThreadId,
   } = useChatKit({
-    // ...
+    api: {url: backendUrl, domainKey},
   });
 
   const handleHelpClick = () => {

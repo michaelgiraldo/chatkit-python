@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -68,7 +68,7 @@ class MyChatKitServer(ChatKitServer[Context]):
         fields = {
             "id": self.store.generate_item_id("message", turn.thread, turn.context),
             "thread_id": turn.thread.id,
-            "created_at": datetime.now(),
+            "created_at": datetime.now(UTC),
         }
 
         if prompt == "widget":

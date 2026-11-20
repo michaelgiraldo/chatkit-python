@@ -4,7 +4,7 @@
 
 ## Thread metadata updates
 
-ChatKitServer emits these after it creates a thread or notices metadata changes (title, status, etc.) so the UI stays in sync.
+ChatKitServer emits a creation event when it saves a new thread. To save metadata changes such as a title or status and show them in the UI, apply a patch with `ChatKitServer.update_thread` and yield the returned event.
 
 - [`ThreadCreatedEvent`](../api/chatkit/events.md#chatkit.events.ThreadCreatedEvent): introduce a new thread
 - [`ThreadUpdatedEvent`](../api/chatkit/events.md#chatkit.events.ThreadUpdatedEvent): update the current thread metadata such as title or status
@@ -19,7 +19,7 @@ Thread item events drive the conversation state. ChatKitServer processes these e
 - [`ThreadItemRemovedEvent`](../api/chatkit/events.md#chatkit.events.ThreadItemRemovedEvent): delete an item by id.
 - [`ThreadItemReplacedEvent`](../api/chatkit/events.md#chatkit.events.ThreadItemReplacedEvent): swap an item in place.
 
-Note: `ThreadItemAddedEvent` does not persist the item. `ChatKitServer` saves on `ThreadItemDoneEvent`/`ThreadItemReplacedEvent`, tracks pending items in between, and handles store writes for all `ThreadItem*Event`s.
+The server tracks additions and deltas in memory while the item streams. A done event inserts the completed item, a replacement event saves the new value, and a removal event deletes it. On cancellation, the default handler saves pending assistant messages with content.
 
 ## Errors
 
@@ -39,7 +39,7 @@ See [Trigger client-side effects without blocking](../guides/update-client-durin
 
 ## Stream options
 
-[`StreamOptionsEvent`](../api/chatkit/events.md#chatkit.events.StreamOptionsEvent) configures runtime stream behavior (for example, allowing user cancellation). `ChatKitServer` emits one at the start of every stream using `get_stream_options`; override that method to change defaults such as `allow_cancel`.
+[`StreamOptionsEvent`](../api/chatkit/events.md#chatkit.events.StreamOptionsEvent) configures stream behavior before response events begin. `ChatKitServer` gets these options from `get_stream_options`. Override that method to change defaults such as `allow_cancel`.
 
 ## Closing a stream
 
@@ -50,11 +50,9 @@ own it with `async with aclosing(result)` and encode each event with
 `chatkit.protocol.encode_sse`. Closing an active stream releases the responder
 and saves partial assistant replies by default.
 
-For FastAPI or Starlette, use `chatkit.fastapi.process_request` to close the
-stream when the HTTP response ends.
-[FastAPI adapter reference](../api/chatkit/fastapi.md)
-It keeps the iterator open for the lifetime of the HTTP response and closes it
-when the framework reports a disconnect.
+For FastAPI or Starlette, use `chatkit.fastapi.process_request` to keep the
+iterator open for the lifetime of the HTTP response and close it when the
+framework reports a disconnect. [FastAPI adapter reference](../api/chatkit/fastapi.md)
 
 When your own `respond` or `action` generator forwards another async generator,
 wrap the inner generator in `contextlib.aclosing`. This carries early closure

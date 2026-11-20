@@ -80,13 +80,18 @@ Example client configuration:
 Example FastAPI direct upload endpoint:
 
 ```python
-@app.post("/files")
-async def upload_file(request: Request):
-    form_data = await request.form()
-    file = form_data.get("file")
+from fastapi import HTTPException, Request, Response
+from starlette.datastructures import UploadFile
 
+
+@app.post("/files")
+async def upload_file(request: Request) -> Response:
     context = await authenticate(request)
-    attachment = await upload_to_blob_store(file, context)
+    async with request.form() as form:
+        file = form.get("file")
+        if not isinstance(file, UploadFile):
+            raise HTTPException(status_code=400, detail="Expected a file upload.")
+        attachment = await upload_to_blob_store(file, context)
     await attachment_metadata_store.save_attachment(attachment, context)
 
     return Response(
@@ -94,6 +99,9 @@ async def upload_file(request: Request):
         media_type="application/json",
     )
 ```
+
+Install `python-multipart` in your app to parse this form. Apply your
+server-side size and MIME type limits in `upload_to_blob_store`.
 
 ### Two-phase upload
 
@@ -232,7 +240,10 @@ The raw value is available as `audio_input.mime_type`. Use `audio_input.media_ty
 Example transcription method using the OpenAI Audio API:
 
 ```python
+from fastapi import HTTPException
 from openai import AsyncOpenAI
+
+from chatkit.models import AudioInput, TranscriptionResult
 
 client = AsyncOpenAI()
 
@@ -357,7 +368,10 @@ const chatkit = useChatKit({
 
 ### Convert tags into model input in your server
 
-Mentions arrive server-side as structured tags. Override `ThreadItemConverter.tag_to_message_content` to describe what each tag refers to and translate it into model-readable content.
+Mentions arrive server-side as structured tags. The wire type is
+`input_tag`, with your app-specific type in `tag.data`. Override
+`ThreadItemConverter.tag_to_message_content` to translate the tag into
+model-readable content. Resolve the tag using the authenticated request context.
 
 Example converter method that wraps the tagged entity details in custom markup:
 
@@ -368,22 +382,28 @@ from openai.types.responses import ResponseInputTextParam
 
 
 class MyThreadItemConverter(ThreadItemConverter):
+    def __init__(self, context: RequestContext):
+        self.context = context
+
     async def tag_to_message_content(
         self, tag: UserMessageTagContent
     ) -> ResponseInputTextParam:
-        if tag.type == "article":
-            # Load or unpack the entity the tag refers to
-            summary = await fetch_article_summary(tag.id)
+        if tag.data.get("type") != "article":
             return ResponseInputTextParam(
-                type="input_text",
-                text=(
-                    "<ARTICLE_TAG>\n"
-                    f"ID: {tag.id}\n"
-                    f"Title: {tag.text}\n"
-                    f"Summary: {summary}\n"
-                    "</ARTICLE_TAG>"
-                ),
+                type="input_text", text=f"Tagged reference: {tag.text}"
             )
+
+        article = await fetch_article_summary(tag.id, self.context)
+        return ResponseInputTextParam(
+            type="input_text",
+            text=(
+                "<ARTICLE_TAG>\n"
+                f"ID: {tag.id}\n"
+                f"Title: {article.title}\n"
+                f"Summary: {article.summary}\n"
+                "</ARTICLE_TAG>"
+            ),
+        )
 ```
 
 ### Pair mentions with retrieval tool calls
@@ -393,13 +413,13 @@ When the referenced content is too large to inline, keep the tag lean (id + shor
 Example tool paired with the converter above:
 
 ```python
-from agents import Agent, StopAtTools, RunContextWrapper, function_tool
+from agents import Agent, RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
 
 
 @function_tool(description_override="Fetch full article content by id.")
 async def fetch_article(ctx: RunContextWrapper[AgentContext], article_id: str):
-    article = await load_article_content(article_id)
+    article = await load_article_content(article_id, ctx.context.request_context)
     return {
         "title": article.title,
         "content": article.body,
@@ -423,7 +443,7 @@ For example:
 
 ```
 - <ARTICLE_TAG>...</ARTICLE_TAG> is a summary of an article the user referenced.
-- Use it as trusted context when answering questions about that article.
+- Use the content as reference data for questions about the article.
 - Do not restate the summary verbatim; answer the user’s question concisely.
 - Call the `fetch_article` tool with the article id from the tag when more
   detail is needed or the user asks for specifics not in the summary.

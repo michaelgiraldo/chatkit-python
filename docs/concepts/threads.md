@@ -30,9 +30,9 @@ A typical thread lifecycle looks like this:
 
 - **Thread creation**: When a user submits a message and no thread exists yet, ChatKitServer creates one and persists it by calling your store’s `save_thread`.
 - **Appending items**: As the server streams a response, ChatKit persists thread items automatically as each item completes. Streaming events directly drive what gets stored.
-- **Updating metadata**: During respond, you can freely mutate the thread object (for example, to set or refine the title). ChatKit automatically persists these updates when the response completes. You can also call store.save_thread explicitly if needed.
+- **Updating metadata**. Apply a [`ThreadPatch`](../api/chatkit/store.md#chatkit.store.ThreadPatch) to the saved thread. In a responder, yield `await self.update_thread(turn.thread.id, {"title": "New title"}, turn.context)` to save the change and update the browser. Use `store.patch_thread` when the change needs no stream event.
 - **Loading history**: When history is enabled client-side, ChatKit retrieves past threads and their items. Users can continue an existing thread by default.
-- **Closing or archiving**: Threads can be marked read-only (for example, by disabling new messages) or deleted entirely if they should no longer be discoverable.
+- **Closing or locking**. Set the thread status to `closed` or `locked` to update the client's input UI. Enforce any write restrictions in your server. Delete a thread when it should be removed from history.
 
 
 ## How thread items are used
@@ -41,7 +41,7 @@ Thread items serve two primary purposes in ChatKit:
 
 ### Model input
 
-Your server's [`respond`](../api/chatkit/server.md#chatkit.server.ChatKitServer.respond) logic reads thread items to construct input for the model input. This ensures the model sees the full conversational context both during an active response and when a user resumes a past thread. 
+Your server's [`respond`](../api/chatkit/server.md#chatkit.server.ChatKitServer.respond) can load thread items and choose the history to include in model input. The same stored history is available when a user resumes a conversation.
 
 See [Respond to a user message](../guides/respond-to-user-message.md) for a full walkthrough.
 
@@ -65,12 +65,7 @@ User text is not Markdown-rendered, but it may contain [@-mentions](../guides/ac
 
 ### Assistant messages
 
-[`AssistantMessageItem`](../api/chatkit/models.md#chatkit.models.AssistantMessageItem)s represent assistant output. Their content can include:
-
-- Markdown-rendered text
-- Tool call outputs
-- Widgets and structured UI elements
-- [Inline annotations](../guides/add-annotations.md)
+[`AssistantMessageItem`](../api/chatkit/models.md#chatkit.models.AssistantMessageItem) holds assistant text and [inline annotations](../guides/add-annotations.md). Widgets, client tool calls, and structured inputs are separate thread items.
 
 Assistant text supports rich Markdown and is rendered progressively as it streams.
 
@@ -88,11 +83,11 @@ Assistant messages support:
 
 ### Hidden context items
 
-Hidden context items are included in model input but are not rendered in the chat UI. They allow the model to react to what happened in the interface, not just what the user typed.
+Hidden context items stay on the server. Your responder can include them in model input so the model can react to activity in the interface.
 
 Typical use cases include recording widget actions, selection state, or system signals.
 
-- **[`HiddenContextItem`](../api/chatkit/models.md#chatkit.models.HiddenContextItem)**: Integration-defined hidden context. You control its schema and how it is converted for the model.
+- **[`HiddenContextItem`](../api/chatkit/models.md#chatkit.models.HiddenContextItem)**. Application-defined context. The default converter handles strings. Override `hidden_context_to_input` to pass structured content.
 
 - **[`SDKHiddenContextItem`](../api/chatkit/models.md#chatkit.models.SDKHiddenContextItem)**: Hidden context inserted by the ChatKit Python SDK for its own internal operations. Most applications do not need to modify this unless overriding conversion behavior.
 

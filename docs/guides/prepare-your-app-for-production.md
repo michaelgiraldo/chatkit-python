@@ -18,7 +18,9 @@ ChatKit always picks a **single active locale** and:
 - Uses the **browser locale by default**.
 - Lets you **override the locale on the client** (for example, from your own locale picker) by passing the `locale` option when you initialize ChatKit.
 
-For every request to your ChatKit backend, the client sends an `Accept-Language` header with that single locale value. You can rely on this header to drive your own localization logic on the server.
+Resolve the locale for your backend from the user's preferences or the
+request's `Accept-Language` header. Validate it against the locales your app
+supports and apply a fallback.
 
 At a minimum:
 
@@ -45,9 +47,10 @@ import gettext
 
 from agents import RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
+from chatkit.events import ProgressUpdateEvent
 
 
-LOCALE_DIR = Path(__file__).with_suffix("").parent / "locales"
+LOCALE_DIR = Path(__file__).parent / "locales"
 _translations: dict[str, gettext.NullTranslations] = {}
 
 
@@ -70,9 +73,8 @@ async def load_document(
 ):
     locale = ctx.context.request_context.locale
     _ = get_translations(locale).gettext
-    await ctx.context.stream_progress(
-        icon="document",
-        text=_("Loading document…"),
+    await ctx.context.stream(
+        ProgressUpdateEvent(icon="document", text=_("Loading document…"))
     )
     doc = await get_document_by_id(document_id)
     if not doc:
@@ -94,20 +96,23 @@ On the **client side**, subscribe to ChatKit’s log and error events and forwar
 - Session or request id.
 - The current thread id.
 
-In React, use the `onLog` and `onError` options (mirroring the patterns in the ChatKit JS [Monitor logs](https://openai.github.io/chatkit-js/guides/monitor-logs/) guide):
+In React, use the `onLog` and `onError` callbacks for
+[ChatKit.js events](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/chatkitevents/).
 
 ```tsx
 import { ChatKit, useChatKit } from "@openai/chatkit-react";
 
 export function SupportChat({
-  clientToken,
+  backendUrl,
+  domainKey,
   userId,
 }: {
-  clientToken: string;
+  backendUrl: string;
+  domainKey: string;
   userId: string;
 }) {
   const { control } = useChatKit({
-    api: { clientToken },
+    api: { url: backendUrl, domainKey },
     onLog: ({ name, data }) =>
       sendToTelemetry({
         name,
@@ -130,6 +135,8 @@ export function SupportChat({
 With the web component, listen for `chatkit.log` and `chatkit.error` events:
 
 ```ts
+import type { OpenAIChatKit } from "@openai/chatkit";
+
 const chatkit = document.getElementById("my-chat") as OpenAIChatKit;
 
 chatkit.addEventListener("chatkit.log", ({ detail }) => {
@@ -150,8 +157,6 @@ chatkit.addEventListener("chatkit.error", (event) => {
 ```
 
 These events can include **PII and message contents**, so avoid blanket-forwarding entire payloads; instead, extract and forward only the fields you need (for example, error codes, item ids, thread ids, and high‑level event names) and/or scrub sensitive fields before sending them to your logging provider.
-
-Separately from your own telemetry, the ChatKit iframe sends **its own outbound telemetry** to OpenAI‑controlled endpoints (Datadog and `chatgpt.com`) for monitoring and debugging. These internal logs **do not contain PII or message input/output content** and are used only to monitor the health of the ChatKit experience.
 
 ### Monitor your ChatKit endpoint
 
@@ -186,8 +191,8 @@ The Python SDK expects your own app to handle authentication; `ChatKitServer` wo
 2. Build a `RequestContext` that includes the authenticated user id, org/tenant, and any roles or scopes.
 3. Pass that context into `process_request`.
 
-This example assumes your FastAPI authentication middleware supplies
-`request.user`.
+This example assumes FastAPI authentication middleware that supplies
+`request.user` with the application's user identity.
 
 ```python
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -211,10 +216,11 @@ async def chatkit_endpoint(
     request: Request,
     user_id: str = Depends(get_current_user),
 ) -> Response:
-    context = RequestContext(user_id=user_id, locale="en")
+    context = RequestContext(user_id=user_id, locale=resolve_locale(request))
     return await process_request(server, request, context)
 ```
 
+Implement `resolve_locale` using the preferences and fallback described above.
 Enforce per-user or per-tenant access in your thread store, attachment stores,
 and tools. Check the authenticated request context before returning or changing data.
 
@@ -228,9 +234,9 @@ Because ChatKit threads and items can contain user text, attachments, and tool o
 
 ## Domain keys
 
-Domain keys lock ChatKit down to the hostnames you control. When you embed ChatKit in a web app, the client and iframe can use a domain key to prove that the page is allowed to load ChatKit.
+For a self-hosted backend, ChatKit uses a [domain key](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/customapiconfig/#domainkey) to verify your registered frontend domain. Your backend still authenticates each request.
 
-1. Visit the OpenAI domain allowlist page at `https://platform.openai.com/settings/organization/security/domain-allowlist`.
+1. Open the [domain allowlist](https://platform.openai.com/settings/organization/security/domain-allowlist) for your OpenAI organization.
 2. Register each hostname that will host your ChatKit UI (for example, `app.example.com`, `support.example.com`).
 3. Copy the generated **domain key** for each entry.
 
@@ -245,7 +251,5 @@ const options = {
   },
 };
 ```
-
-The ChatKit iframe will make an outbound request to `https://api.openai.com` to verify the domain key on load. If the key is missing or invalid, ChatKit will refuse to load, preventing unauthorized hostnames from embedding your ChatKit experience.
 
 When you go live, make sure all of your production hostnames are registered in the domain allowlist.

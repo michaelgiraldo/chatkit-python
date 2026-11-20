@@ -115,11 +115,11 @@ async def sample_widget(ctx: RunContextWrapper[AgentContext]):
 
 The examples above return a fully completed static widget. You can also stream an updating widget by yielding new versions of the widget from a generator function. The ChatKit framework will send updates for the parts of the widget that have changed.
 
-!!! note "Text streaming support"
-    A `<Text>` or `<Markdown>` component with a unique `id` can stream appended text. Layout and property changes replace the widget client-side.
+A `Text` or `Markdown` component with a unique `id` can stream appended text.
+Layout and property changes replace the widget client-side.
 
 ```python
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from agents import RunContextWrapper, Runner, function_tool
 from chatkit.agents import AgentContext
@@ -133,16 +133,20 @@ async def draft_message_to_harry(ctx: RunContextWrapper[AgentContext]):
 
     async def widget_generator() -> AsyncGenerator[WidgetRoot, None]:
         message = ""
-        async for event in message_result.stream_events():
-            if (
-                event.type == "raw_response_event"
-                and event.data.type == "response.output_text.delta"
-            ):
-                message += event.data.delta
-                yield build_message_widget(
-                    user_name="Harry Potter",
-                    message=message,
-                )
+        try:
+            async for event in message_result.stream_events():
+                if (
+                    event.type == "raw_response_event"
+                    and event.data.type == "response.output_text.delta"
+                ):
+                    message += event.data.delta
+                    yield build_message_widget(
+                        user_name="Harry Potter",
+                        message=message,
+                    )
+        finally:
+            if not message_result.is_complete:
+                message_result.cancel()
 
         # Final render after streaming completes.
         yield build_message_widget(
@@ -327,16 +331,19 @@ Wrap widgets that collect user input in a `Form` to have their values automatica
 </Form>
 ```
 
-On the server, read the form values from the action payload. Any action originating from inside the form will include the latest field values.
+On the server, read and validate the form values from the action payload.
+Use an app helper to update the todo for the authenticated user, then build
+its updated widget and yield a replacement event.
 
 ```python
 from collections.abc import AsyncIterator
 from typing import Any
 
 from chatkit.actions import Action
-from chatkit.server import ChatKitServer
-from chatkit.events import ThreadStreamEvent
+from chatkit.errors import CustomStreamError
+from chatkit.events import ThreadItemReplacedEvent, ThreadStreamEvent
 from chatkit.models import ThreadMetadata, WidgetItem
+from chatkit.server import ChatKitServer
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
@@ -347,15 +354,31 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
         sender: WidgetItem | None,
         context: RequestContext,
     ) -> AsyncIterator[ThreadStreamEvent]:
-        if action.type == "update_todo":
-            todo_id = action.payload["id"]
-            # Any action that originates from within the Form will
-            # include title and description
-            title = action.payload["title"]
-            description = action.payload["description"]
+        if action.type != "update_todo":
+            return
 
-            # ...
+        payload = action.payload
+        if sender is None or not isinstance(payload, dict):
+            raise CustomStreamError("Expected a todo form.")
+
+        todo_id = payload.get("id")
+        title = payload.get("title")
+        description = payload.get("description", "")
+        if (
+            not isinstance(todo_id, str)
+            or not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(description, str)
+        ):
+            raise CustomStreamError("Expected a todo ID, title, and description.")
+
+        todo = await update_todo(todo_id, title, description, context)
+        yield ThreadItemReplacedEvent(
+            item=sender.model_copy(update={"widget": build_todo_widget(todo)})
+        )
 ```
+
+`build_todo_widget` should return a built `WidgetRoot`.
 
 ### Validation
 
@@ -369,6 +392,6 @@ You can pass `asForm=True` to `Card` and it will behave as a `Form`, running val
 
 ### Payload key collisions
 
-If there is a naming collision with some other existing pre-defined key on your payload, the form value will be ignored. This is probably a bug, so we’ll emit an `error` event when we see this.
+Give form fields names distinct from keys already in the action payload.
 
 

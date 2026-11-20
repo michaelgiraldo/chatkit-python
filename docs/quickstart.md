@@ -13,7 +13,8 @@ make demo
 
 Open [the demo on port 8000](http://127.0.0.1:8000/). The page loads the
 official ChatKit browser client from its CDN and sends requests to
-`/chatkit` on the same local server. Set `DEMO_PORT` to use a different port.
+`/chatkit` on the same local server. To use a different port, run
+`make demo DEMO_PORT=8001` and open that port in the browser.
 
 You can also start the demo with Python 3.14 and pip.
 
@@ -26,7 +27,8 @@ python -m uvicorn docs.examples.quickstart:app --host 127.0.0.1 --port 8000
 
 1. Send `hello`. The reply is **Hello, world!**
 2. Send `widget`, then click **Save demo state**. The card shows **Widget state saved.**
-3. Send `slow`. Click **Stop response** while the reply is still streaming.
+3. Send `slow`. Wait for the first text to appear, then click **Stop response**
+   while the reply is still streaming.
 4. Reload the page and reopen the thread from **Conversation history**. The
    saved widget and the partial reply are still there. Send another message to
    verify that the thread accepts a follow-up.
@@ -37,7 +39,8 @@ The [runnable backend](examples/quickstart.py) receives every ChatKit
 request at `/chatkit`. Its `ChatKitServer.respond(turn)` yields events for
 a `Turn` with the thread, trigger, and request context. The endpoint calls
 `chatkit.fastapi.process_request(server, request, context={})`. The adapter
-closes streams on disconnect and returns JSON errors for invalid requests.
+closes streams on disconnect and returns JSON errors for invalid requests,
+missing resources, and conflicting thread state.
 [FastAPI adapter reference](api/chatkit/fastapi.md)
 
 ## Store chat data
@@ -78,22 +81,21 @@ Install the Agents extra alongside FastAPI to use the model integration.
 python -m pip install '.[fastapi,agents]'
 ```
 
-Replace the fixed reply in the example with an Agents SDK call. Set
-`OPENAI_API_KEY` in your environment before running.
-
-Use ChatKit's Agents SDK helpers to simplify request conversion and streaming. The `simple_to_agent_input` helper translates ChatKit thread items to agent input items, and `stream_agent_response` turns the streamed run into ChatKit events:
-
+For a text-only model-backed demo, replace the example's `respond` method
+with the implementation below. Set `OPENAI_API_KEY` in your environment and
+choose a model your project can use.
 
 ```python
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
 from agents import Agent, Runner
+
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
+from chatkit.events import ThreadStreamEvent
 from chatkit.server import ChatKitServer
 from chatkit.turns import Turn
-from chatkit.events import ThreadStreamEvent
 
 assistant = Agent(
     name="assistant",
@@ -116,7 +118,6 @@ class MyChatKitServer(ChatKitServer[dict[str, object]]):
         )
         input_items = await simple_to_agent_input(list(reversed(items_page.data)))
 
-        # Stream the run through ChatKit events
         agent_context = AgentContext(
             thread=turn.thread, store=self.store, request_context=turn.context
         )
@@ -125,3 +126,8 @@ class MyChatKitServer(ChatKitServer[dict[str, object]]):
             async for event in events:
                 yield event
 ```
+
+The `simple_to_agent_input` helper converts the stored items into model input.
+The stream helper converts agent events into ChatKit events and closes the run
+when the client stops the response. See [Respond to a user message](guides/respond-to-user-message.md)
+for persistent model state and tool continuations.

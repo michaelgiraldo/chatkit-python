@@ -20,7 +20,9 @@ When you set `handler: "client"`, the action flows into the client SDK’s `widg
 
 ### Sync server-handled actions
 
-Normally, widget actions are blocked while a thread is streaming a response. This prevents race conditions, but it can be limiting when a widget action is only going to update itself or trigger side effects outside the thread. To get around this limitation, set `streaming: "false"`, which delivers the action to `ChatKitServer.sync_action(thread, action, sender, context)`. Use this handler to run any side effects and update the widget's UI as needed.
+To run a widget action while a response is streaming, set `"streaming": false` in JSON or `streaming=False` in Python. The client sends a non-streaming request to `ChatKitServer.sync_action(thread, action, sender, context)`.
+
+Return a [`SyncCustomActionResponse`](../api/chatkit/events.md#chatkit.events.SyncCustomActionResponse) with `updated_item` to replace the item in the browser. Call `await self.store.save_item(thread.id, updated_item, context)` if the replacement should survive a reload.
 
 ## Client-sent actions using the chatkit.sendCustomAction() command
 

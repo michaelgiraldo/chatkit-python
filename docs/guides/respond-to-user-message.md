@@ -9,11 +9,11 @@ to install the fork and FastAPI for this example.
 
 ## Build and run your ChatKit server
 
-Your ChatKit server does three main things:
+The adapter and your ChatKit server work together:
 
 1. Accept HTTP requests from your client.
-2. Construct a request context (user id, auth, feature flags, etc.).
-3. Call `ChatKitServer.respond` to produce streamed events.
+2. Build a request context in your app, including the authenticated user ID.
+3. Dispatch the request and call your `respond` hook for turns that generate a reply.
 
 ### Define a request context
 
@@ -70,8 +70,8 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
 | `RetryTurn` | The existing user `.message` that starts the retry. |
 
 Use `on_turn_finished(turn, outcome)` for app work that depends on the
-server's result. ChatKit calls it after the turn's events have been processed
-or after cancellation cleanup. The outcome reports one of four states.
+result. ChatKit calls it when the responder finishes, fails, or is
+cancelled. The outcome reports one of four states.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -110,9 +110,9 @@ async def chatkit_endpoint(request: Request) -> Response:
 ```
 
 The adapter serves JSON or an SSE stream. It returns HTTP 400 for malformed
-JSON, HTTP 422 for an invalid ChatKit payload, and HTTP 404 for missing
-resources reported before streaming. ChatKit's streaming error events are
-sent as part of the SSE response.
+JSON, HTTP 422 for an invalid or unsupported operation, HTTP 404 for a
+missing resource, and HTTP 409 for a conflict with the current thread state.
+Once streaming starts, ChatKit sends error events in the SSE response.
 [FastAPI adapter reference](../api/chatkit/fastapi.md)
 
 ### How request context flows into ChatKit
@@ -187,9 +187,12 @@ synthetic thread. It verifies scoped reads, tied-timestamp pagination,
 concurrent patches, form and tool claims, and retry truncation.
 
 ```python
+import pytest
+
 from chatkit.store_checks import check_thread_store
 
 
+@pytest.mark.asyncio
 async def test_app_store(tmp_path):
     path = tmp_path / "contract.sqlite3"
     await check_thread_store(
@@ -239,9 +242,7 @@ items = list(reversed(items_page.data))
 - Customize for your integration: some item types require app-specific translation into model input (for example: **attachments**, **tags**, and some **hidden context items**). In those cases, subclass `ThreadItemConverter` and call your converter directly instead of `simple_to_agent_input`. (If your thread includes attachments/tags and you haven't implemented the converter hooks, conversion will raise `NotImplementedError`.)
 
 ```python
-from agents import Runner
-
-from chatkit.agent_input import ThreadItemConverter, simple_to_agent_input
+from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import AgentContext
 
 

@@ -111,10 +111,12 @@ Register a client effect handler when initializing ChatKit on the client:
 const chatkit = useChatKit({
   // ...
   onEffect: async ({name, data}) => {
-    if (name === "highlight_text") {
-      const {index, length} = data;
-      highlightArticleText({index, length});
-      // No return value needed
+    if (
+      name === "highlight_text" &&
+      typeof data?.index === "number" &&
+      typeof data.length === "number"
+    ) {
+      highlightArticleText({index: data.index, length: data.length});
     }
   },
 });
@@ -161,13 +163,13 @@ Provide a matching callback when initializing ChatKit on the client. Match the n
 const chatkit = useChatKit({
   // ...
   onClientTool: async ({name, params}) => {
-    if (name === "get_selected_canvas_nodes") {
-      const {project} = params;
-      const nodes = myCanvas.getSelectedNodes(project);
-      return {
-        nodes: nodes.map((node) => ({id: node.id, kind: node.type})),
-      };
+    if (name !== "get_selected_canvas_nodes" || typeof params.project !== "string") {
+      throw new Error("Unexpected client tool request");
     }
+    const nodes = myCanvas.getSelectedNodes(params.project);
+    return {
+      nodes: nodes.map((node) => ({id: node.id, kind: node.type})),
+    };
   },
 });
 ```

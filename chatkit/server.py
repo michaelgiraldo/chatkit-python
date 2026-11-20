@@ -151,7 +151,7 @@ class ChatKitServer[TContext = Any](ABC):
         """Return the configured AttachmentStore or raise if missing."""
         if self.attachment_store is None:
             raise UnsupportedOperationError(
-                "AttachmentStore is not configured. Provide a AttachmentStore to ChatKitServer to handle file operations."
+                "AttachmentStore is not configured. Provide an AttachmentStore to ChatKitServer to handle file operations."
             )
         return self.attachment_store
 
@@ -225,7 +225,7 @@ class ChatKitServer[TContext = Any](ABC):
         """Handle a widget or client-dispatched action and yield response events."""
         raise NotImplementedError(
             "The action() method must be overridden to react to actions. "
-            "See https://github.com/openai/chatkit-python/blob/main/docs/widgets.md#widget-actions"
+            "See https://michaelgiraldo.github.io/chatkit-python/guides/build-interactive-responses-with-widgets/#handle-widget-actions"
         )
 
     async def sync_action(
@@ -238,7 +238,7 @@ class ChatKitServer[TContext = Any](ABC):
         """Handle a widget or client-dispatched action and return a SyncCustomActionResponse."""
         raise NotImplementedError(
             "The sync_action() method must be overridden to react to sync actions. "
-            "See https://github.com/openai/chatkit-python/blob/main/docs/widgets.md#widget-actions"
+            "See https://michaelgiraldo.github.io/chatkit-python/guides/build-interactive-responses-with-widgets/#handle-widget-actions"
         )
 
     def get_stream_options(

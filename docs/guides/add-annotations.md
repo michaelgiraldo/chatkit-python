@@ -24,7 +24,7 @@ Sometimes the default rendering for model-emitted citations is not very helpful.
 Here is a minimal example that enriches file citations with a more helpful title/description using an internal mapping:
 
 ```python
-from chatkit.agents import ResponseStreamConverter, stream_agent_response
+from chatkit.agents import ResponseStreamConverter
 from chatkit.models import Annotation, FileSource
 
 
@@ -33,12 +33,16 @@ class MyResponseStreamConverter(ResponseStreamConverter):
         super().__init__()
         self._file_lookup = file_lookup
 
-    async def file_citation_to_annotation(self, citation):
+    async def file_citation_to_annotation(self, citation) -> Annotation | None:
         info = self._file_lookup.get(citation.file_id, {})
+        filename = info.get("filename") or citation.filename
+        if not filename:
+            return None
+
         return Annotation(
             source=FileSource(
-                filename=info.get("filename", citation.file_id),
-                title=info.get("title"),
+                filename=filename,
+                title=info.get("title") or filename,
                 description=info.get("description"),
             ),
             index=citation.index,
@@ -54,9 +58,10 @@ converter = MyResponseStreamConverter(
         }
     }
 )
-
-stream_agent_response(..., converter=converter)
 ```
+
+Pass `converter=converter` when forwarding events from `stream_agent_response`
+in [your responder](respond-to-user-message.md#run-inference-and-stream-events).
 
 You can also return an `EntitySource` instead of a `FileSource` to control the inline label, handle clicks, and customize the popover preview. For more on entity annotations (including `interactive` click/preview hooks), see [Annotating with custom entities](#annotating-with-custom-entities) below.
 
