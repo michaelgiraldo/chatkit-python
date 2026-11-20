@@ -107,7 +107,9 @@ await store.patch_thread(
 )
 
 # close (final state)
-await store.patch_thread(thread.id, {"status": ClosedStatus(reason="Resolved.")}, context)
+await store.patch_thread(
+    thread.id, {"status": ClosedStatus(reason="Resolved.")}, context
+)
 
 # re-open
 await store.patch_thread(thread.id, {"status": ActiveStatus()}, context)

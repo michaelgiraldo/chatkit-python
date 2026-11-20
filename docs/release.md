@@ -21,6 +21,23 @@ We will increment patch versions for non-breaking changes:
 
 ## Breaking change changelog
 
+### Unreleased
+
+- Client tool callbacks use `AgentContext.request_client_tool` with the
+  Agents SDK's `ToolContext` to bind the browser callback to its invocation.
+- Custom HTTP transports parse the request with `chatkit.protocol.parse_request`,
+  pass the typed request to `ChatKitServer.process`, and serialize the typed
+  response or closeable event stream with the protocol helpers.
+- Thread stores implement atomic `claim_pending_item`, `patch_thread`, and
+  `truncate_after` operations. Inside a responder, yield the event from
+  `ChatKitServer.update_thread` to persist a display change and show it to
+  the client. Use `ThreadStore.patch_thread` for metadata-only writes.
+- Typed widget builders use `.build()` to produce a canonical widget tree
+  for direct item or update construction. Use `WidgetTemplate.build()` for
+  every template root, including entity previews.
+- Install the `agents` extra when using `chatkit.agents`. The `fastapi` extra
+  supplies the HTTP adapter's dependencies and Uvicorn.
+
 ### Turnspan 2 (`1.6.5+turnspan.2`)
 
 - Lists inside cards now parse as typed `ListView` widgets, including their rows

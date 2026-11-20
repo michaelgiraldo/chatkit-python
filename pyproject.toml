@@ -115,7 +115,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.pyright]
 include = ["."]
-exclude = ["**/.venv", "**/.pytest_cache"]
+exclude = ["**/.venv", "**/.pytest_cache", "site"]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.14"
