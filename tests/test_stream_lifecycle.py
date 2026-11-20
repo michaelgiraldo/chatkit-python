@@ -28,7 +28,7 @@ from chatkit.types import (
     UserMessageTextContent,
 )
 from tests._types import RequestContext
-from tests.test_chatkit_server import DEFAULT_CONTEXT, decode_event, make_server
+from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
 
 async def start_stream(server: ChatKitServer[RequestContext]) -> StreamingResult:

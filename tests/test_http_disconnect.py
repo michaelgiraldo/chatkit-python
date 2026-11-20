@@ -34,7 +34,7 @@ from chatkit.types import (
 )
 from docs.examples.chatkit_response import ChatKitStreamingResponse
 from tests._types import RequestContext
-from tests.test_chatkit_server import DEFAULT_CONTEXT, decode_event, make_server
+from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
 
 @pytest.mark.parametrize(

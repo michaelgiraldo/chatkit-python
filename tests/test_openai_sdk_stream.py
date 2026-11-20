@@ -39,7 +39,7 @@ from chatkit.types import (
     UserMessageTextContent,
 )
 from tests._types import RequestContext
-from tests.test_chatkit_server import make_server
+from tests.helpers.server import make_server
 
 
 def _responses_stream(turn: int) -> str:
