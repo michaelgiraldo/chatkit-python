@@ -44,7 +44,10 @@ type TurnInput = UserMessageTurn | ClientToolTurn | StructuredInputTurn | RetryT
 
 @dataclass(frozen=True, slots=True)
 class Turn[TContext]:
-    """A turn's thread, trigger, and app-supplied request context."""
+    """A turn's thread snapshot, trigger, and app-supplied request context.
+
+    Persist thread changes with an explicit patch.
+    """
 
     thread: ThreadMetadata
     input: TurnInput

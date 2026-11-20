@@ -1,13 +1,17 @@
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from .types import (
     Attachment,
     AttachmentCreateParams,
+    ClientToolCallItem,
     Page,
+    StructuredInputItem,
     ThreadItem,
     ThreadMetadata,
+    ThreadStatus,
+    UserMessageItem,
 )
 
 StoreItemType = Literal[
@@ -39,6 +43,63 @@ def default_generate_id(item_type: StoreItemType) -> str:
 
 class NotFoundError(Exception):
     pass
+
+
+class ConflictError(Exception):
+    """The stored state no longer permits the requested operation."""
+
+
+type PendingTurnItem = ClientToolCallItem | StructuredInputItem
+
+
+class ThreadPatch(TypedDict, total=False):
+    """Explicit changes to thread display fields or individual metadata keys."""
+
+    title: str | None
+    status: ThreadStatus
+    allowed_image_domains: list[str] | None
+    metadata_set: dict[str, Any]
+    metadata_delete: tuple[str, ...]
+
+
+def apply_thread_patch(thread: ThreadMetadata, patch: ThreadPatch) -> ThreadMetadata:
+    """Build an updated snapshot from a store's current thread and a patch."""
+    fields = {
+        key: value
+        for key, value in patch.items()
+        if key in ("title", "status", "allowed_image_domains")
+    }
+    metadata = {
+        key: value
+        for key, value in thread.metadata.items()
+        if key not in patch.get("metadata_delete", ())
+    }
+    metadata.update(patch.get("metadata_set", {}))
+    return thread.model_copy(update={**fields, "metadata": metadata})
+
+
+def validate_pending_claim(
+    current: ThreadItem,
+    expected: PendingTurnItem,
+    replacement: PendingTurnItem,
+    *,
+    latest_item_id: str | None = None,
+) -> None:
+    """Validate a claim against the current state inside a store transaction."""
+    if (
+        replacement.id != expected.id
+        or replacement.thread_id != expected.thread_id
+        or replacement.created_at != expected.created_at
+        or replacement.type != expected.type
+        or replacement.status == "pending"
+    ):
+        raise ValueError("A pending claim must complete the same thread item")
+    if current != expected or expected.status != "pending":
+        raise ConflictError(
+            "The thread item is no longer pending in the expected state"
+        )
+    if isinstance(expected, ClientToolCallItem) and expected.id != latest_item_id:
+        raise ConflictError("The client tool call is no longer the latest thread item")
 
 
 class AttachmentStore[TContext = Any](ABC):
@@ -85,7 +146,18 @@ class ThreadStore[TContext = Any](ABC):
 
     @abstractmethod
     async def save_thread(self, thread: ThreadMetadata, context: TContext) -> None:
-        """Insert or update thread metadata by id."""
+        """Save an initial thread snapshot. Use `patch_thread` for live edits."""
+        pass
+
+    @abstractmethod
+    async def patch_thread(
+        self, thread_id: str, patch: ThreadPatch, context: TContext
+    ) -> ThreadMetadata:
+        """Atomically apply a patch to the latest stored thread and return the result.
+
+        Omitted display fields are left alone. Delete metadata keys before applying
+        `metadata_set`. Raise `NotFoundError` for an unavailable thread.
+        """
         pass
 
     @abstractmethod
@@ -133,6 +205,35 @@ class ThreadStore[TContext = Any](ABC):
         self, thread_id: str, item: ThreadItem, context: TContext
     ) -> None:
         """Upsert a thread item by id."""
+        pass
+
+    @abstractmethod
+    async def claim_pending_item(
+        self,
+        thread_id: str,
+        expected: PendingTurnItem,
+        replacement: PendingTurnItem,
+        context: TContext,
+    ) -> None:
+        """Atomically replace a pending item if its stored value matches `expected`.
+
+        The replacement must complete the same thread item. A client tool call must
+        still be the last item in the thread's stable order. Raise `ConflictError`
+        on stale or completed state and `NotFoundError` for an unavailable item or
+        thread. Commit the claim before starting inference.
+        """
+        pass
+
+    @abstractmethod
+    async def truncate_after(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> tuple[UserMessageItem, list[str]]:
+        """Atomically delete the history after a stored user message.
+
+        Use the same stable order as `load_thread_items`. Return the target and
+        the IDs actually removed, newest first. Raise `NotFoundError` for an
+        unavailable target and `ConflictError` when the target is not a user message.
+        """
         pass
 
     @abstractmethod

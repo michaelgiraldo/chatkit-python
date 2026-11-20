@@ -1,13 +1,31 @@
 from collections.abc import Iterable
+from datetime import datetime
 
-from chatkit.store import NotFoundError, ThreadStore
-from chatkit.types import Page, ThreadItem, ThreadMetadata
+from chatkit.store import (
+    ConflictError,
+    NotFoundError,
+    PendingTurnItem,
+    ThreadPatch,
+    ThreadStore,
+    apply_thread_patch,
+    validate_pending_claim,
+)
+from chatkit.types import (
+    ClientToolCallItem,
+    Page,
+    ThreadItem,
+    ThreadMetadata,
+    UserMessageItem,
+)
 
 type Context = dict[str, object]
 
 
 class InMemoryThreadStore(ThreadStore[Context]):
-    """Store threads and items for a single local development process."""
+    """Store threads and items on one local development event loop.
+
+    Mutations run without awaiting so that each one is atomic on that loop.
+    """
 
     def __init__(self):
         self.threads: dict[str, ThreadMetadata] = {}
@@ -20,6 +38,16 @@ class InMemoryThreadStore(ThreadStore[Context]):
 
     async def save_thread(self, thread: ThreadMetadata, context: Context) -> None:
         self.threads[thread.id] = thread.model_copy(deep=True)
+
+    async def patch_thread(
+        self, thread_id: str, patch: ThreadPatch, context: Context
+    ) -> ThreadMetadata:
+        current = self.threads.get(thread_id)
+        if current is None:
+            raise NotFoundError(f"Thread {thread_id} not found")
+        updated = apply_thread_patch(current, patch)
+        self.threads[thread_id] = updated.model_copy(deep=True)
+        return updated.model_copy(deep=True)
 
     async def load_threads(
         self, limit: int, after: str | None, order: str, context: Context
@@ -49,6 +77,48 @@ class InMemoryThreadStore(ThreadStore[Context]):
     ) -> None:
         self.items.setdefault(thread_id, {})[item.id] = item.model_copy(deep=True)
 
+    async def claim_pending_item(
+        self,
+        thread_id: str,
+        expected: PendingTurnItem,
+        replacement: PendingTurnItem,
+        context: Context,
+    ) -> None:
+        if thread_id not in self.threads:
+            raise NotFoundError(f"Thread {thread_id} not found")
+        items = self.items.get(thread_id, {})
+        current = items.get(expected.id)
+        if current is None:
+            raise NotFoundError(f"Item {expected.id} not found in thread {thread_id}")
+        latest_item_id = None
+        if isinstance(expected, ClientToolCallItem):
+            latest_item_id = max(items.values(), key=self._sort_key).id
+        validate_pending_claim(
+            current, expected, replacement, latest_item_id=latest_item_id
+        )
+        items[expected.id] = replacement.model_copy(deep=True)
+
+    async def truncate_after(
+        self, thread_id: str, item_id: str, context: Context
+    ) -> tuple[UserMessageItem, list[str]]:
+        if thread_id not in self.threads:
+            raise NotFoundError(f"Thread {thread_id} not found")
+        items = self.items.get(thread_id, {})
+        item = items.get(item_id)
+        if item is None:
+            raise NotFoundError(f"Item {item_id} not found in thread {thread_id}")
+        if not isinstance(item, UserMessageItem):
+            raise ConflictError("A retry must start from a user message")
+        target = self._sort_key(item)
+        later = sorted(
+            (row for row in items.values() if self._sort_key(row) > target),
+            key=self._sort_key,
+            reverse=True,
+        )
+        for row in later:
+            del items[row.id]
+        return item.model_copy(deep=True), [row.id for row in later]
+
     async def load_item(
         self, thread_id: str, item_id: str, context: Context
     ) -> ThreadItem:
@@ -66,12 +136,14 @@ class InMemoryThreadStore(ThreadStore[Context]):
     ) -> None:
         self.items.get(thread_id, {}).pop(item_id, None)
 
+    @staticmethod
+    def _sort_key(row: ThreadMetadata | ThreadItem) -> tuple[datetime, str]:
+        return row.created_at, row.id
+
     def _page[T: ThreadMetadata | ThreadItem](
         self, rows: Iterable[T], after: str | None, limit: int, order: str
     ) -> Page[T]:
-        ordered = sorted(
-            rows, key=lambda row: (row.created_at, row.id), reverse=order == "desc"
-        )
+        ordered = sorted(rows, key=self._sort_key, reverse=order == "desc")
         start = 0
         if after is not None:
             for index, row in enumerate(ordered):

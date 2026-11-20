@@ -16,7 +16,7 @@ from .errors import (
 )
 from .protocol import encode_message, encode_sse, parse_request
 from .server import ChatKitServer, StreamingResult
-from .store import NotFoundError
+from .store import ConflictError, NotFoundError
 
 
 class ChatKitStreamingResponse(StreamingResponse):
@@ -100,6 +100,11 @@ async def process_request[TContext](
         return JSONResponse({"detail": detail}, status_code=422)
     except NotFoundError:
         return JSONResponse({"detail": "ChatKit resource not found."}, status_code=404)
+    except ConflictError:
+        return JSONResponse(
+            {"detail": "The request conflicts with the current thread state."},
+            status_code=409,
+        )
     except (InvalidOperationError, UnsupportedOperationError) as error:
         return JSONResponse({"detail": str(error)}, status_code=422)
 

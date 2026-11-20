@@ -14,6 +14,7 @@ from chatkit.protocol import encode_message
 from chatkit.server import StreamingResult, stream_widget
 from chatkit.store import (
     AttachmentStore,
+    ConflictError,
     NotFoundError,
     StoreItemType,
     default_generate_id,
@@ -438,10 +439,9 @@ async def test_creates_thread():
 
 async def test_saves_thread_title():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
-        thread = turn.thread
-        thread.title = "Updated title"
-        return
-        yield
+        yield await server.update_thread(
+            turn.thread.id, {"title": "Updated title"}, turn.context
+        )
 
     with make_server(responder) as server:
         events = await server.process_streaming(
@@ -469,10 +469,9 @@ async def test_saves_thread_title():
 
 async def test_saves_thread_metadata():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
-        thread = turn.thread
-        thread.metadata["test_key"] = "test_value"
-        return
-        yield
+        yield await server.update_thread(
+            turn.thread.id, {"metadata_set": {"test_key": "test_value"}}, turn.context
+        )
 
     with make_server(responder) as server:
         events = await server.process_streaming(
@@ -497,10 +496,9 @@ async def test_saves_thread_metadata():
 
 async def test_saves_thread_locked_fields():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
-        thread = turn.thread
-        thread.status = LockedStatus(reason="Because")
-        return
-        yield
+        yield await server.update_thread(
+            turn.thread.id, {"status": LockedStatus(reason="Because")}, turn.context
+        )
 
     with make_server(responder) as server:
         events = await server.process_streaming(
@@ -527,10 +525,11 @@ async def test_saves_thread_locked_fields():
 
 async def test_saves_allowed_image_domains_and_streams_thread_updated():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
-        thread = turn.thread
-        thread.allowed_image_domains = ["example.com", "images.example.com"]
-        return
-        yield
+        yield await server.update_thread(
+            turn.thread.id,
+            {"allowed_image_domains": ["example.com", "images.example.com"]},
+            turn.context,
+        )
 
     with make_server(responder) as server:
         events = await server.process_streaming(
@@ -558,10 +557,9 @@ async def test_saves_allowed_image_domains_and_streams_thread_updated():
 
 async def test_omits_unset_allowed_image_domains_in_created_and_updated_json_events():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
-        thread = turn.thread
-        thread.title = "Updated title"
-        return
-        yield
+        yield await server.update_thread(
+            turn.thread.id, {"title": "Updated title"}, turn.context
+        )
 
     with make_server(responder) as server:
         stream = await server.process(
@@ -607,9 +605,6 @@ async def test_emits_thread_updated_mid_stream_and_persists():
             ),
         )
 
-        # Update the thread mid-stream
-        thread.title = "Mid-stream title"
-
         # Second assistant message, after which thread.updated should be emitted
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
@@ -618,6 +613,10 @@ async def test_emits_thread_updated_mid_stream_and_persists():
                 created_at=datetime.now(),
                 thread_id=thread.id,
             ),
+        )
+
+        yield await server.update_thread(
+            thread.id, {"title": "Mid-stream title"}, turn.context
         )
 
         # Continue streaming after the update event
@@ -2225,7 +2224,7 @@ async def test_retry_after_item_invalid_item():
         assistant_item_id = items.data[0].id
 
         # Try to retry after an assistant message (should fail)
-        with pytest.raises(ValueError, match="must start from a user message"):
+        with pytest.raises(ConflictError, match="user message"):
             await server.process_streaming(
                 ThreadsRetryAfterItemReq(
                     params=ThreadRetryAfterItemParams(

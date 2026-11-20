@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from datetime import datetime
@@ -6,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.store import ConflictError
 from chatkit.turns import (
     ClientToolTurn,
     RetryTurn,
@@ -37,6 +39,8 @@ from chatkit.types import (
     ThreadsCreateReq,
     ThreadsRetryAfterItemReq,
     ThreadStreamEvent,
+    ThreadsUpdateReq,
+    ThreadUpdateParams,
     UserMessageInput,
     UserMessageTextContent,
 )
@@ -218,6 +222,97 @@ async def test_typed_turn_distinguishes_form_submission_and_retry(tmp_path: Path
         initial.input.message.id,
         "retry",
     ]
+
+
+async def test_concurrent_form_submissions_only_resume_once(
+    tmp_path: Path, monkeypatch
+):
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        if isinstance(turn.input, UserMessageTurn):
+            yield ThreadItemDoneEvent(
+                item=StructuredInputItem(
+                    id="form",
+                    thread_id=turn.thread.id,
+                    created_at=datetime.now(),
+                    inputs=[StructuredInputFreeform(id="color", question="Color?")],
+                )
+            )
+
+    server = RecordingServer(tmp_path, respond)
+    await server.consume(create_thread())
+    (initial,) = server.received
+    load_item = server.store.load_item
+    both_read = asyncio.Barrier(2)
+
+    async def load_same_snapshot(thread_id: str, item_id: str, context: RequestContext):
+        item = await load_item(thread_id, item_id, context)
+        await both_read.wait()
+        return item
+
+    monkeypatch.setattr(server.store, "load_item", load_same_snapshot)
+
+    async def submit(color: str):
+        return await server.consume(
+            ThreadsAddStructuredInputReq(
+                params=ThreadAddStructuredInputParams(
+                    thread_id=initial.thread.id,
+                    item_id="form",
+                    input=StructuredInputSubmission(
+                        answers={
+                            "color": StructuredInputAnswerSubmission(values=[color])
+                        }
+                    ),
+                )
+            )
+        )
+
+    async with asyncio.timeout(5):
+        results = await asyncio.gather(
+            submit("red"), submit("blue"), return_exceptions=True
+        )
+
+    assert sum(isinstance(result, ConflictError) for result in results) == 1
+    assert sum(isinstance(result, list) for result in results) == 1
+    _, resumed = server.received
+    assert isinstance(resumed.input, StructuredInputTurn)
+    assert (
+        await load_item(initial.thread.id, "form", DEFAULT_CONTEXT)
+        == resumed.input.item
+    )
+
+
+async def test_turn_metadata_patch_does_not_overwrite_concurrent_title(tmp_path: Path):
+    started = asyncio.Event()
+    renamed = asyncio.Event()
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        assert turn.thread.title is None
+        started.set()
+        await renamed.wait()
+        yield await server.update_thread(
+            turn.thread.id,
+            {"metadata_set": {"provider_response": "example"}},
+            turn.context,
+        )
+
+    server = RecordingServer(tmp_path, respond)
+    async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+        tasks.create_task(server.consume(create_thread()))
+        await started.wait()
+        (active_turn,) = server.received
+        await server.process(
+            ThreadsUpdateReq(
+                params=ThreadUpdateParams(
+                    thread_id=active_turn.thread.id, title="Renamed"
+                )
+            ),
+            DEFAULT_CONTEXT,
+        )
+        renamed.set()
+
+    thread = await server.store.load_thread(active_turn.thread.id, DEFAULT_CONTEXT)
+    assert thread.title == "Renamed"
+    assert thread.metadata == {"provider_response": "example"}
 
 
 async def test_stream_close_reports_cancelled_after_partial_reply_save(tmp_path: Path):

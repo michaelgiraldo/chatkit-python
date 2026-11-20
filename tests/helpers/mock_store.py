@@ -1,15 +1,27 @@
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-from chatkit.store import AttachmentMetadataStore, NotFoundError, ThreadStore
+from chatkit.store import (
+    AttachmentMetadataStore,
+    ConflictError,
+    NotFoundError,
+    PendingTurnItem,
+    ThreadPatch,
+    ThreadStore,
+    apply_thread_patch,
+    validate_pending_claim,
+)
 from chatkit.types import (
     Attachment,
+    ClientToolCallItem,
     Page,
     ThreadItem,
     ThreadMetadata,
+    UserMessageItem,
 )
 from tests._types import RequestContext
 
@@ -39,7 +51,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
         return sqlite3.connect(self.db_path, uri=True)
 
     def _create_tables(self):
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS items (
                 id TEXT PRIMARY KEY,
@@ -70,7 +82,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def load_thread(
         self, thread_id: str, context: RequestContext
     ) -> ThreadMetadata:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             thread_cursor = conn.execute(
                 "SELECT data, created_at FROM threads WHERE id = ? AND user_id = ?",
                 (thread_id, context.user_id),
@@ -83,7 +95,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def save_thread(
         self, thread: ThreadMetadata, context: RequestContext
     ) -> None:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             thread_data = ThreadData(thread=thread)
             conn.execute(
                 "DELETE FROM threads WHERE id = ? AND user_id = ?",
@@ -100,6 +112,29 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
             )
             conn.commit()
 
+    async def patch_thread(
+        self, thread_id: str, patch: ThreadPatch, context: RequestContext
+    ) -> ThreadMetadata:
+        with closing(self._create_connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT data FROM threads WHERE id = ? AND user_id = ?",
+                (thread_id, context.user_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"Thread {thread_id} not found")
+            current = ThreadData.model_validate_json(row[0]).thread
+            updated = apply_thread_patch(current, patch)
+            conn.execute(
+                "UPDATE threads SET data = ? WHERE id = ? AND user_id = ?",
+                (
+                    ThreadData(thread=updated).model_dump_json(),
+                    thread_id,
+                    context.user_id,
+                ),
+            )
+        return updated
+
     async def load_thread_items(
         self,
         thread_id: str,
@@ -110,7 +145,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     ) -> Page[ThreadItem]:
         if order not in ("asc", "desc"):
             raise ValueError(f"Unsupported sort order: {order}")
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             created_after: str | None = None
             if after:
                 cursor_row = conn.execute(
@@ -148,7 +183,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def save_attachment(
         self, attachment: Attachment, context: RequestContext
     ) -> None:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO files (id, user_id, data) VALUES (?, ?, ?)
@@ -166,7 +201,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def load_attachment(
         self, attachment_id: str, context: RequestContext
     ) -> Attachment:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             file_cursor = conn.execute(
                 "SELECT data FROM files WHERE id = ? AND user_id = ?",
                 (attachment_id, context.user_id),
@@ -184,7 +219,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     ) -> Page[ThreadMetadata]:
         if order not in ("asc", "desc"):
             raise ValueError(f"Unsupported sort order: {order}")
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             created_after: str | None = None
             if after:
                 created_of_after_thread = conn.execute(
@@ -224,7 +259,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def add_thread_item(
         self, thread_id: str, item: ThreadItem, context: RequestContext
     ) -> None:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             conn.execute(
                 "INSERT INTO items (id, thread_id, user_id, created_at, data) VALUES (?, ?, ?, ?, ?)",
                 (
@@ -240,7 +275,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def save_item(
         self, thread_id: str, item: ThreadItem, context: RequestContext
     ) -> None:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO items (id, thread_id, user_id, created_at, data)
@@ -261,10 +296,90 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
             )
             conn.commit()
 
+    async def claim_pending_item(
+        self,
+        thread_id: str,
+        expected: PendingTurnItem,
+        replacement: PendingTurnItem,
+        context: RequestContext,
+    ) -> None:
+        with closing(self._create_connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            scope = (thread_id, context.user_id)
+            self._require_thread(conn, *scope)
+            params = (expected.id, *scope)
+            row = conn.execute(
+                "SELECT data FROM items WHERE id = ? AND thread_id = ? AND user_id = ?",
+                params,
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(
+                    f"Item {expected.id} not found in thread {thread_id}"
+                )
+
+            latest_item_id = None
+            if isinstance(expected, ClientToolCallItem):
+                latest = conn.execute(
+                    """SELECT id FROM items WHERE thread_id = ? AND user_id = ?
+                    ORDER BY created_at DESC, id DESC LIMIT 1""",
+                    scope,
+                ).fetchone()
+                if latest is not None:
+                    latest_item_id = latest[0]
+            validate_pending_claim(
+                ItemData.model_validate_json(row[0]).item,
+                expected,
+                replacement,
+                latest_item_id=latest_item_id,
+            )
+            conn.execute(
+                "UPDATE items SET data = ? WHERE id = ? AND thread_id = ? AND user_id = ?",
+                (ItemData(item=replacement).model_dump_json(), *params),
+            )
+
+    async def truncate_after(
+        self, thread_id: str, item_id: str, context: RequestContext
+    ) -> tuple[UserMessageItem, list[str]]:
+        with closing(self._create_connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            scope = (thread_id, context.user_id)
+            self._require_thread(conn, *scope)
+            row = conn.execute(
+                """SELECT data, created_at FROM items
+                WHERE id = ? AND thread_id = ? AND user_id = ?""",
+                (item_id, *scope),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"Item {item_id} not found in thread {thread_id}")
+            item = ItemData.model_validate_json(row[0]).item
+            if not isinstance(item, UserMessageItem):
+                raise ConflictError("A retry must start from a user message")
+            params = (*scope, row[1], item_id)
+            later_items = (
+                "WHERE thread_id = ? AND user_id = ? AND (created_at, id) > (?, ?)"
+            )
+            removed = [
+                later[0]
+                for later in conn.execute(
+                    f"SELECT id FROM items {later_items} ORDER BY created_at DESC, id DESC",
+                    params,
+                )
+            ]
+            conn.execute(f"DELETE FROM items {later_items}", params)
+        return item, removed
+
+    @staticmethod
+    def _require_thread(conn: sqlite3.Connection, thread_id: str, user_id: str) -> None:
+        row = conn.execute(
+            "SELECT 1 FROM threads WHERE id = ? AND user_id = ?", (thread_id, user_id)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Thread {thread_id} not found")
+
     async def load_item(
         self, thread_id: str, item_id: str, context: RequestContext
     ) -> ThreadItem:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             cursor = conn.execute(
                 "SELECT data FROM items WHERE id = ? AND thread_id = ? AND user_id = ?",
                 (item_id, thread_id, context.user_id),
@@ -274,7 +389,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
             return ItemData.model_validate_json(cursor[0]).item
 
     async def delete_thread(self, thread_id: str, context: RequestContext) -> None:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             conn.execute(
                 "DELETE FROM threads WHERE id = ? AND user_id = ?",
                 (thread_id, context.user_id),
@@ -288,7 +403,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def delete_attachment(
         self, attachment_id: str, context: RequestContext
     ) -> None:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             conn.execute(
                 "DELETE FROM files WHERE id = ? AND user_id = ?",
                 (attachment_id, context.user_id),
@@ -298,7 +413,7 @@ class SQLiteStore(ThreadStore[RequestContext], AttachmentMetadataStore[RequestCo
     async def delete_thread_item(
         self, thread_id: str, item_id: str, context: RequestContext
     ) -> None:
-        with self._create_connection() as conn:
+        with closing(self._create_connection()) as conn, conn:
             conn.execute(
                 "DELETE FROM items WHERE id = ? AND thread_id = ? AND user_id = ?",
                 (item_id, thread_id, context.user_id),

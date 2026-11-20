@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
@@ -5,14 +6,23 @@ from datetime import datetime, timedelta
 import pytest
 from pydantic import AnyUrl
 
-from chatkit.store import AttachmentMetadataStore, NotFoundError, ThreadStore
+from chatkit.store import (
+    AttachmentMetadataStore,
+    ConflictError,
+    NotFoundError,
+    PendingTurnItem,
+    ThreadStore,
+)
 from chatkit.types import (
     AssistantMessageContent,
     AssistantMessageItem,
+    ClientToolCallItem,
     FileAttachment,
     ImageAttachment,
     InferenceOptions,
+    LockedStatus,
     Page,
+    StructuredInputItem,
     ThreadItem,
     ThreadMetadata,
     UserMessageItem,
@@ -125,6 +135,160 @@ class ThreadStoreContract(ABC):
     @abstractmethod
     def teardown_method(self, method):
         pass
+
+    @pytest.mark.asyncio
+    async def test_thread_patch_changes_only_selected_fields_and_keys(self):
+        thread = make_thread()
+        thread.allowed_image_domains = ["example.com"]
+        await self.store.save_thread(thread, DEFAULT_CONTEXT)
+        await self.store.patch_thread(
+            thread.id,
+            {"title": "Renamed", "status": LockedStatus(), "metadata_set": {"keep": 1}},
+            DEFAULT_CONTEXT,
+        )
+        patched = await self.store.patch_thread(
+            thread.id,
+            {
+                "allowed_image_domains": None,
+                "metadata_delete": ("test",),
+                "metadata_set": {"response_id": "response_1", "nullable": None},
+            },
+            DEFAULT_CONTEXT,
+        )
+        assert patched.title == "Renamed"
+        assert patched.status == LockedStatus()
+        assert patched.allowed_image_domains is None
+        assert patched.created_at == thread.created_at
+        assert patched.metadata == {
+            "keep": 1,
+            "response_id": "response_1",
+            "nullable": None,
+        }
+        assert await self.store.load_thread(thread.id, DEFAULT_CONTEXT) == patched
+        cleared = await self.store.patch_thread(
+            thread.id, {"title": None}, DEFAULT_CONTEXT
+        )
+        assert cleared.title is None
+        with pytest.raises(NotFoundError):
+            await self.store.patch_thread(
+                thread.id, {"title": "Other"}, ALTERNATIVE_CONTEXT
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool", [False, True])
+    async def test_pending_item_can_only_be_claimed_once(self, tool: bool):
+        thread = make_thread()
+        await self.store.save_thread(thread, DEFAULT_CONTEXT)
+        pending: PendingTurnItem
+        if tool:
+            pending = ClientToolCallItem(
+                id="pending",
+                thread_id=thread.id,
+                created_at=thread.created_at,
+                call_id="call_example",
+                name="example",
+                arguments={},
+            )
+            first = pending.model_copy(update={"status": "completed", "output": 1})
+            second = pending.model_copy(update={"status": "completed", "output": 2})
+        else:
+            pending = StructuredInputItem(
+                id="pending",
+                thread_id=thread.id,
+                created_at=thread.created_at,
+                inputs=[],
+            )
+            first = pending.model_copy(update={"status": "answered"})
+            second = pending.model_copy(update={"status": "skipped"})
+        await self.store.add_thread_item(thread.id, pending, DEFAULT_CONTEXT)
+        with pytest.raises(NotFoundError):
+            await self.store.claim_pending_item(
+                thread.id, pending, first, ALTERNATIVE_CONTEXT
+            )
+        results = await asyncio.gather(
+            self.store.claim_pending_item(thread.id, pending, first, DEFAULT_CONTEXT),
+            self.store.claim_pending_item(thread.id, pending, second, DEFAULT_CONTEXT),
+            return_exceptions=True,
+        )
+        assert results.count(None) == 1
+        assert sum(isinstance(result, ConflictError) for result in results) == 1
+        winner = (first, second)[results.index(None)]
+        assert (
+            await self.store.load_item(thread.id, pending.id, DEFAULT_CONTEXT) == winner
+        )
+
+    @pytest.mark.asyncio
+    async def test_client_tool_claim_checks_latest_item_in_stable_order(self):
+        thread = make_thread()
+        await self.store.save_thread(thread, DEFAULT_CONTEXT)
+        pending = ClientToolCallItem(
+            id="a",
+            thread_id=thread.id,
+            created_at=thread.created_at,
+            call_id="call_example",
+            name="example",
+            arguments={},
+        )
+        await self.store.add_thread_item(thread.id, pending, DEFAULT_CONTEXT)
+        await self.store.add_thread_item(
+            thread.id,
+            AssistantMessageItem(
+                id="b", thread_id=thread.id, created_at=thread.created_at, content=[]
+            ),
+            DEFAULT_CONTEXT,
+        )
+        completed = pending.model_copy(update={"status": "completed", "output": "ok"})
+        with pytest.raises(ConflictError):
+            await self.store.claim_pending_item(
+                thread.id, pending, completed, DEFAULT_CONTEXT
+            )
+        assert (
+            await self.store.load_item(thread.id, pending.id, DEFAULT_CONTEXT)
+            == pending
+        )
+
+    @pytest.mark.asyncio
+    async def test_truncate_after_retries_from_user_message_in_stable_order(self):
+        thread = make_thread()
+        await self.store.save_thread(thread, DEFAULT_CONTEXT)
+        target = UserMessageItem(
+            id="b",
+            thread_id=thread.id,
+            created_at=thread.created_at,
+            content=[],
+            inference_options=InferenceOptions(),
+        )
+        for item_id in ("d", "a", "c"):
+            await self.store.add_thread_item(
+                thread.id,
+                AssistantMessageItem(
+                    id=item_id,
+                    thread_id=thread.id,
+                    created_at=thread.created_at,
+                    content=[],
+                ),
+                DEFAULT_CONTEXT,
+            )
+        await self.store.add_thread_item(thread.id, target, DEFAULT_CONTEXT)
+
+        with pytest.raises(ConflictError):
+            await self.store.truncate_after(thread.id, "a", DEFAULT_CONTEXT)
+        with pytest.raises(NotFoundError):
+            await self.store.truncate_after(thread.id, target.id, ALTERNATIVE_CONTEXT)
+        assert await self.store.truncate_after(
+            thread.id, target.id, DEFAULT_CONTEXT
+        ) == (
+            target,
+            ["d", "c"],
+        )
+        surviving_items = await self.store.load_thread_items(
+            thread.id,
+            None,
+            10,
+            "asc",
+            DEFAULT_CONTEXT,
+        )
+        assert [item.id for item in surviving_items.data] == ["a", "b"]
 
     @pytest.mark.asyncio
     async def test_save_and_load_thread_metadata(self):

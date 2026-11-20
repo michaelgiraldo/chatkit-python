@@ -25,8 +25,9 @@ from .logger import logger
 from .store import (
     AttachmentMetadataStore,
     AttachmentStore,
-    NotFoundError,
+    ConflictError,
     StoreItemType,
+    ThreadPatch,
     ThreadStore,
     default_generate_id,
 )
@@ -367,6 +368,13 @@ class ChatKitServer[TContext = Any](ABC):
         """
         pass
 
+    async def update_thread(
+        self, thread_id: str, patch: ThreadPatch, context: TContext
+    ) -> ThreadUpdatedEvent:
+        """Apply a patch and return an event that a responder can yield to the client."""
+        updated = await self.store.patch_thread(thread_id, patch, context)
+        return ThreadUpdatedEvent(thread=self._to_thread_response(updated))
+
     async def add_feedback(  # noqa: B027
         self,
         thread_id: str,
@@ -559,12 +567,10 @@ class ChatKitServer[TContext = Any](ABC):
                 ]
                 return items
             case ThreadsUpdateReq():
-                thread = await self.store.load_thread(
-                    request.params.thread_id, context=context
+                updated = await self.update_thread(
+                    request.params.thread_id, {"title": request.params.title}, context
                 )
-                thread.title = request.params.title
-                await self.store.save_thread(thread, context=context)
-                return self._to_thread_response(thread)
+                return updated.thread
             case ThreadsDeleteReq():
                 await self.store.delete_thread(
                     request.params.thread_id, context=context
@@ -625,19 +631,15 @@ class ChatKitServer[TContext = Any](ABC):
                         "The thread is not waiting for a client tool result."
                     )
 
-                tool_call.output = request.params.result
-                tool_call.status = "completed"
-
-                await self.store.save_item(thread.id, tool_call, context=context)
-
-                # Safety against dangling pending tool calls if there are
-                # multiple in a row, which should be impossible, and
-                # integrations should ultimately filter out pending tool calls
-                # when creating input response messages.
-                await self._cleanup_pending_client_tool_call(thread, context)
+                completed = tool_call.model_copy(
+                    update={"output": request.params.result, "status": "completed"}
+                )
+                await self.store.claim_pending_item(
+                    thread.id, tool_call, completed, context
+                )
 
                 return self._process_turn(
-                    Turn(thread, ClientToolTurn(tool_call), context)
+                    Turn(thread, ClientToolTurn(completed), context)
                 )
 
             case ThreadsAddStructuredInputReq():
@@ -654,9 +656,12 @@ class ChatKitServer[TContext = Any](ABC):
                         "The requested item does not accept structured input."
                     )
 
-                updated_item = await self._apply_structured_input_submission(
+                updated_item = self._apply_structured_input_submission(
                     item,
                     request.params.input,
+                )
+                await self.store.claim_pending_item(
+                    thread.id, item, updated_item, context
                 )
 
                 return self._process_turn(
@@ -668,28 +673,9 @@ class ChatKitServer[TContext = Any](ABC):
                     request.params.thread_id, context=context
                 )
 
-                # Collect items to remove (all items after the user message)
-                items_to_remove: list[ThreadItem] = []
-                user_message_item = None
-
-                async for item in self._paginate_thread_items_reverse(
-                    request.params.thread_id, context
-                ):
-                    if item.id == request.params.item_id:
-                        if not isinstance(item, UserMessageItem):
-                            raise InvalidOperationError(
-                                "A retry must start from a user message."
-                            )
-                        user_message_item = item
-                        break
-                    items_to_remove.append(item)
-
-                if user_message_item is None:
-                    raise NotFoundError("The item to retry does not exist.")
-                for item in items_to_remove:
-                    await self.store.delete_thread_item(
-                        request.params.thread_id, item.id, context=context
-                    )
+                user_message_item, _ = await self.store.truncate_after(
+                    thread_metadata.id, request.params.item_id, context
+                )
                 return self._process_turn(
                     Turn(thread_metadata, RetryTurn(user_message_item), context)
                 )
@@ -756,13 +742,13 @@ class ChatKitServer[TContext = Any](ABC):
             context,
         )
 
-    async def _apply_structured_input_submission(
+    def _apply_structured_input_submission(
         self,
         item: StructuredInputItem,
         submission: StructuredInputSubmission,
     ) -> StructuredInputItem:
         if item.status != "pending":
-            raise InvalidOperationError("The thread is not waiting for this form.")
+            raise ConflictError("The thread is not waiting for this form.")
 
         updated_item = item.model_copy(deep=True)
         questions_by_id = {question.id: question for question in updated_item.inputs}
@@ -796,23 +782,6 @@ class ChatKitServer[TContext = Any](ABC):
         updated_item.status = submission.status
         return updated_item
 
-    async def _cleanup_pending_client_tool_call(
-        self, thread: ThreadMetadata, context: TContext
-    ) -> None:
-        items = await self.store.load_thread_items(
-            thread.id, None, DEFAULT_PAGE_SIZE, "desc", context
-        )
-        for tool_call in items.data:
-            if not isinstance(tool_call, ClientToolCallItem):
-                continue
-            if tool_call.status == "pending":
-                logger.warning(
-                    f"Client tool call {tool_call.call_id} was not completed, ignoring"
-                )
-                await self.store.delete_thread_item(
-                    thread.id, tool_call.id, context=context
-                )
-
     async def _process_new_thread_item_respond(
         self,
         thread: ThreadMetadata,
@@ -843,9 +812,6 @@ class ChatKitServer[TContext = Any](ABC):
         self, turn: Turn[TContext]
     ) -> AsyncIterator[ThreadStreamEvent]:
         async def respond_events() -> AsyncIterator[ThreadStreamEvent]:
-            if isinstance(turn.input, StructuredInputTurn):
-                # Persist the replacement in the event pipeline before responding.
-                yield ThreadItemReplacedEvent(item=turn.input.item)
             async with _closing_stream(aiter(self.respond(turn))) as events:
                 async for event in events:
                     yield event
@@ -856,8 +822,16 @@ class ChatKitServer[TContext = Any](ABC):
             if isinstance(turn.input, UserMessageTurn):
                 # The message is already saved. Closing at this event still finishes the turn.
                 yield ThreadItemDoneEvent(item=turn.input.message)
+            # The store already applied this replacement when it claimed the form.
+            form_update = (
+                ThreadItemReplacedEvent(item=turn.input.item)
+                if isinstance(turn.input, StructuredInputTurn)
+                else None
+            )
             async with _closing_stream(
-                self._process_events(turn.thread, turn.context, respond_events)
+                self._process_events(
+                    turn.thread, turn.context, respond_events, form_update=form_update
+                )
             ) as events:
                 async for event in events:
                     match event:
@@ -898,6 +872,8 @@ class ChatKitServer[TContext = Any](ABC):
         thread: ThreadMetadata,
         context: TContext,
         stream: Callable[[], AsyncIterator[ThreadStreamEvent]],
+        *,
+        form_update: ThreadItemReplacedEvent | None = None,
     ) -> AsyncIterator[ThreadStreamEvent]:
         await asyncio.sleep(0)  # allow the response to start streaming
 
@@ -906,14 +882,14 @@ class ChatKitServer[TContext = Any](ABC):
             stream_options=self.get_stream_options(thread, context)
         )
 
-        last_thread = thread.model_copy(deep=True)
-
         # Keep track of items that were streamed but not yet saved
         # so that we can persist them when the stream is cancelled.
         pending_items: dict[str, ThreadItem] = {}
         hidden_item_ids: set[str] = set()
 
         try:
+            if form_update is not None:
+                yield form_update
             async with _closing_stream(aiter(stream())) as events:
                 while (event := await anext(events, None)) is not None:
                     if isinstance(event, ThreadItemAddedEvent):
@@ -969,18 +945,6 @@ class ChatKitServer[TContext = Any](ABC):
                     ):
                         yield event
 
-                    # in case user updated the thread while streaming
-                    if thread != last_thread:
-                        last_thread = thread.model_copy(deep=True)
-                        await self.store.save_thread(thread, context=context)
-                        yield ThreadUpdatedEvent(
-                            thread=self._to_thread_response(thread)
-                        )
-            # Closing a responder can update the thread.
-            if thread != last_thread:
-                last_thread = thread.model_copy(deep=True)
-                await self.store.save_thread(thread, context=context)
-                yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
         except asyncio.CancelledError, GeneratorExit:
             await self.handle_stream_cancelled(
                 thread, list(pending_items.values()), context
@@ -1003,11 +967,6 @@ class ChatKitServer[TContext = Any](ABC):
                 allow_retry=True,
             )
             logger.exception(e)
-
-        if thread != last_thread:
-            # in case user updated the thread at the end of the stream
-            await self.store.save_thread(thread, context=context)
-            yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
 
     def _apply_assistant_message_update(
         self,
@@ -1100,22 +1059,6 @@ class ChatKitServer[TContext = Any](ABC):
             context=context,
         )
         return Thread(**thread_meta.model_dump(), items=thread_items)
-
-    async def _paginate_thread_items_reverse(
-        self, thread_id: str, context: TContext
-    ) -> AsyncIterator[ThreadItem]:
-        """Paginate through thread items in reverse order (newest first)."""
-        after = None
-        while True:
-            items = await self.store.load_thread_items(
-                thread_id, after, DEFAULT_PAGE_SIZE, "desc", context
-            )
-            for item in items.data:
-                yield item
-
-            if not items.has_more:
-                break
-            after = items.after
 
     def _to_thread_response(self, thread: ThreadMetadata | Thread) -> Thread:
         items = (

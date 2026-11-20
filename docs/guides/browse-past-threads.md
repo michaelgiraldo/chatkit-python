@@ -32,7 +32,7 @@ Threads start untitled. Give them short, descriptive titles so the history list 
 
 ### Set a title directly
 
-Set `turn.thread.title` in your responder:
+Call `update_thread` in your responder and yield the returned event.
 
 ```python
 from chatkit.server import ChatKitServer
@@ -43,10 +43,13 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
     async def respond(self, turn: Turn[RequestContext]):
         ...
         if not turn.thread.title:
-            turn.thread.title = "Order #1234"
+            yield await self.update_thread(
+                turn.thread.id, {"title": "Order #1234"}, turn.context
+            )
 ```
 
-ChatKit persists the changed thread and emits a `ThreadUpdatedEvent` so connected clients update the title in their history views.
+ChatKit applies the patch to the latest stored thread. Yielding the
+`ThreadUpdatedEvent` updates the title in the connected client's history view.
 
 ### Auto-generate a title after the first turn
 
@@ -71,7 +74,10 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
             items = await self.store.load_thread_items(
                 turn.thread.id, after=None, limit=6, order="desc", context=turn.context
             )
-            turn.thread.title = await generate_short_title(list(reversed(items.data)))
+            title = await generate_short_title(list(reversed(items.data)))
+            yield await self.update_thread(
+                turn.thread.id, {"title": title}, turn.context
+            )
 ```
 
 Use any model call you like for `generate_short_title`: run a tiny Agent, a simple completion, or your own heuristic. Keep titles brief (for example, 3–6 words).
@@ -96,16 +102,15 @@ There are two ways to stop new user messages: temporarily lock a thread or perma
 from chatkit.types import ActiveStatus, LockedStatus, ClosedStatus
 
 # lock (temporary pause)
-thread.status = LockedStatus(reason="Escalated to support.")
-await store.save_thread(thread, context=context)
+await store.patch_thread(
+    thread.id, {"status": LockedStatus(reason="Escalated to support.")}, context
+)
 
 # close (final state)
-thread.status = ClosedStatus(reason="Resolved.")
-await store.save_thread(thread, context=context)
+await store.patch_thread(thread.id, {"status": ClosedStatus(reason="Resolved.")}, context)
 
 # re-open
-thread.status = ActiveStatus()
-await store.save_thread(thread, context=context)
+await store.patch_thread(thread.id, {"status": ActiveStatus()}, context)
 ```
 
 When you persist a new status during `respond`, ChatKit emits a `ThreadUpdatedEvent` so all viewers see the updated state.

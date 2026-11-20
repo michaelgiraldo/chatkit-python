@@ -144,7 +144,11 @@ response or stream.
 
 Implement `ThreadStore` to persist threads, messages, tool calls, and widgets.
 The [in-memory example](../examples/in_memory_thread_store.py) implements all
-thread and item methods. To support uploads, supply an
+thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
+`truncate_after` as short atomic operations in your database. Use
+`patch_thread` to edit saved fields, and yield the result of
+`ChatKitServer.update_thread` when a connected client should see an edit.
+To support uploads, supply an
 `AttachmentMetadataStore` for records and an `AttachmentStore` for file
 operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-strategy)
 
@@ -307,9 +311,11 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
         self, turn: Turn[MyRequestContext]
     ) -> AsyncIterator[ThreadStreamEvent]:
         thread, context = turn.thread, turn.context
-        saved_id = thread.metadata.pop("last_response_id", None)
+        saved_id = thread.metadata.get("last_response_id")
         if saved_id is not None:
-            await self.store.save_thread(thread, context=context)
+            await self.store.patch_thread(
+                thread.id, {"metadata_delete": ("last_response_id",)}, context
+            )
 
         previous_response_id = None
         if (
@@ -345,8 +351,11 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
         self, turn: Turn[MyRequestContext], outcome: TurnOutcome
     ) -> None:
         if outcome is TurnOutcome.COMPLETED and turn.context.staged_response_id:
-            turn.thread.metadata["last_response_id"] = turn.context.staged_response_id
-            await self.store.save_thread(turn.thread, context=turn.context)
+            await self.store.patch_thread(
+                turn.thread.id,
+                {"metadata_set": {"last_response_id": turn.context.staged_response_id}},
+                turn.context,
+            )
 ```
 
 `result.last_response_id` becomes available as the runner receives model
