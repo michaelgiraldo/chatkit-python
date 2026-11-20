@@ -2,9 +2,18 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
   merge_group:
     types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   UV_FROZEN: "1"
@@ -15,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -26,10 +35,108 @@ jobs:
         run: make sync
 
       - name: Lint
-        run: make lint
+        run: make format-check lint
 
       - name: Type check
         run: make pyright
 
       - name: Test
         run: make test
+
+      - name: Build docs
+        run: make docs-check
+
+      - name: Build distributions
+        run: make build
+
+      - name: Check wheel installs
+        run: |
+          wheel="$(realpath dist/*.whl)"
+          python_version="$(cat .python-version)"
+          uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "$wheel" \
+            python -I - <<'PY'
+          from importlib.util import find_spec
+
+          import chatkit.server
+          import chatkit.widgets
+
+          for dependency in ("agents", "openai", "fastapi", "uvicorn", "jinja2", "chatkit.types"):
+              assert find_spec(dependency) is None, dependency
+          PY
+          uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "$wheel" \
+            python -I tests/check_wheel_types.py .venv/bin/pyright
+          uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "${wheel}[fastapi]" \
+            python -I - <<'PY'
+          from importlib.util import find_spec
+
+          import uvicorn
+          from fastapi import FastAPI
+
+          from chatkit.fastapi import process_request
+
+          assert callable(process_request)
+          FastAPI()
+          for dependency in ("agents", "openai"):
+              assert find_spec(dependency) is None, dependency
+          PY
+          uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "${wheel}[agents]" \
+            python -I - <<'PY'
+          from importlib.util import find_spec
+
+          import agents
+          import openai
+
+          from chatkit.agent_input import ThreadItemConverter
+          from chatkit.agents import stream_agent_response
+
+          assert callable(stream_agent_response)
+          assert callable(ThreadItemConverter().to_agent_input)
+          assert find_spec("fastapi") is None
+          PY
+          uv --no-config run --no-project --isolated --python "$python_version" \
+            --default-index https://pypi.org/simple --with "${wheel}[templates]" \
+            python -I - <<'PY'
+          from importlib.util import find_spec
+
+          from chatkit.templates import WidgetTemplate
+
+          template = WidgetTemplate({
+              "version": "1.0", "name": "Example",
+              "template": '{"type":"Card","children":[]}',
+          })
+          assert template.build().type == "Card"
+          for dependency in ("agents", "fastapi"):
+              assert find_spec(dependency) is None, dependency
+          PY
+
+      - name: Upload validated docs
+        if: >-
+          github.repository == 'michaelgiraldo/chatkit-python' &&
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy-docs:
+    name: Deploy docs
+    needs: ci
+    if: >-
+      github.repository == 'michaelgiraldo/chatkit-python' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy validated docs
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -1,15 +1,29 @@
 from abc import ABC
-from enum import Enum
+from enum import StrEnum
+
+from pydantic import ValidationError
+
+
+class InvalidRequestError(ValueError):
+    """The request body could not be parsed as a ChatKit operation."""
+
+    def __init__(self, validation_error: ValidationError):
+        super().__init__("Invalid ChatKit request body")
+        self.validation_error = validation_error
+
+
+class InvalidOperationError(ValueError):
+    """The validated request cannot be applied to the target resource."""
+
+
+class UnsupportedOperationError(RuntimeError):
+    """The requested capability has not been configured on the server."""
 
 
 # Not a closed enum, new error codes can and will be added as needed
-class ErrorCode(str, Enum):
+class ErrorCode(StrEnum):
     STREAM_ERROR = "stream.error"
 
-
-DEFAULT_STATUS: dict[ErrorCode, int] = {
-    ErrorCode.STREAM_ERROR: 500,
-}
 
 DEFAULT_ALLOW_RETRY: dict[ErrorCode, bool] = {
     ErrorCode.STREAM_ERROR: True,
@@ -35,7 +49,6 @@ class StreamError(BaseStreamError):
         allow_retry: bool | None = None,
     ):
         self.code = code
-        self.status_code = DEFAULT_STATUS.get(code, 500)
         if allow_retry is None:
             self.allow_retry = DEFAULT_ALLOW_RETRY.get(code, False)
         else:

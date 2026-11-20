@@ -1,393 +1,34 @@
+import asyncio
 import sqlite3
-from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+from threading import Barrier
 
 import pytest
-from helpers.mock_store import SQLiteStore
-from pydantic import AnyUrl
 
-from chatkit.store import NotFoundError, Store
-from chatkit.types import (
-    AssistantMessageContent,
-    AssistantMessageItem,
-    FileAttachment,
-    ImageAttachment,
-    InferenceOptions,
-    ThreadItem,
-    ThreadMetadata,
-    UserMessageItem,
-    UserMessageTextContent,
-    WidgetItem,
-)
-from chatkit.widgets import Card, Col, Text
+from chatkit.models import AssistantMessageItem, StructuredInputItem, ThreadMetadata
+from chatkit.store import ConflictError
+from chatkit.store_checks import check_thread_store
+from docs.examples.sqlite_thread_store import SQLiteThreadStore
 from tests._types import RequestContext
+from tests.helpers.mock_store import SQLiteStore
+from tests.helpers.storage_contract import (
+    ALTERNATIVE_CONTEXT,
+    DEFAULT_CONTEXT,
+    AttachmentMetadataStoreContract,
+    ThreadStoreContract,
+    make_thread,
+)
 
 
-def make_thread(thread_id="test_thread", created_at=None):
-    if created_at is None:
-        created_at = datetime.now()
-    return ThreadMetadata(
-        id=thread_id,
-        title="Test Thread",
-        created_at=created_at,
-        metadata={"test": "test"},
-    )
-
-
-def make_thread_items() -> list[ThreadItem]:
-    now = datetime.now()
-    user_msg = UserMessageItem(
-        id="msg_100000",
-        content=[UserMessageTextContent(text="Hello!")],
-        attachments=[
-            FileAttachment(
-                id="file_1",
-                type="file",
-                mime_type="text/plain",
-                name="test.txt",
-                metadata={"source": "test"},
-            )
-        ],
-        inference_options=InferenceOptions(),
-        thread_id="test_thread",
-        created_at=now,
-    )
-    assistant_msg = AssistantMessageItem(
-        id="msg_000001",
-        content=[AssistantMessageContent(text="Hi there!")],
-        thread_id="test_thread",
-        created_at=now + timedelta(seconds=1),
-    )
-    widget = WidgetItem(
-        id="widget_1",
-        type="widget",
-        thread_id="test_thread",
-        created_at=now + timedelta(seconds=2),
-        widget=Card(
-            children=[
-                Col(
-                    padding={"x": 4, "y": 3},
-                    border={"bottom": 1},
-                    children=[
-                        Text(
-                            value="Title",
-                            weight="medium",
-                            size="sm",
-                            color="secondary",
-                        ),
-                        Text(
-                            value="test",
-                        ),
-                    ],
-                ),
-            ]
-        ),
-    )
-
-    return [user_msg, assistant_msg, widget]
-
-
-DEFAULT_CONTEXT = RequestContext(user_id="test_user")
-ALTERNATIVE_CONTEXT = RequestContext(user_id="alternative_user")
-
-
-class TestStore(ABC):
-    store: Store
-
-    @abstractmethod
-    def setup_method(self, method):
-        pass
-
-    @abstractmethod
-    def teardown_method(self, method):
-        pass
-
-    @pytest.mark.asyncio
-    async def test_save_and_load_thread_metadata(self):
-        thread = make_thread()
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        loaded_meta = await self.store.load_thread(thread.id, DEFAULT_CONTEXT)
-        assert loaded_meta.id == thread.id
-        assert loaded_meta.title == thread.title
-        assert loaded_meta.metadata == thread.metadata
-
-    @pytest.mark.asyncio
-    async def test_save_and_load_thread_metadata_null_title(self):
-        thread = ThreadMetadata(
-            id="test_thread",
-            title=None,
-            created_at=datetime.now(),
-            metadata={"test": "test"},
-        )
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        loaded_meta = await self.store.load_thread(thread.id, DEFAULT_CONTEXT)
-        assert loaded_meta.id == thread.id
-        assert loaded_meta.title is None
-        assert loaded_meta.metadata == thread.metadata
-
-    @pytest.mark.asyncio
-    async def test_update_thread_metadata(self):
-        thread = make_thread()
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        thread.title = "Updated Title"
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        loaded_meta = await self.store.load_thread(thread.id, DEFAULT_CONTEXT)
-        assert loaded_meta.title == "Updated Title"
-
-    @pytest.mark.asyncio
-    async def test_save_and_load_thread_items(self):
-        thread = make_thread()
-        items = make_thread_items()
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        for item in items:
-            await self.store.add_thread_item(thread.id, item, DEFAULT_CONTEXT)
-        loaded_items = (
-            await self.store.load_thread_items(
-                thread.id, None, 10, "asc", DEFAULT_CONTEXT
-            )
-        ).data
-        assert loaded_items == items
-
-    @pytest.mark.asyncio
-    async def test_overwrite_thread_metadata(self):
-        thread = make_thread()
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        thread.title = "Updated Title"
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        loaded_meta = await self.store.load_thread(thread.id, DEFAULT_CONTEXT)
-        assert loaded_meta.title == "Updated Title"
-
-    @pytest.mark.asyncio
-    async def test_save_and_load_file(self):
-        file = FileAttachment(
-            id="file_1",
-            type="file",
-            mime_type="text/plain",
-            name="test.txt",
-        )
-        await self.store.save_attachment(file, DEFAULT_CONTEXT)
-        loaded = await self.store.load_attachment(file.id, DEFAULT_CONTEXT)
-        assert loaded == file
-
-    @pytest.mark.asyncio
-    async def test_save_and_load_image(self):
-        image = ImageAttachment(
-            id="image_1",
-            type="image",
-            mime_type="image/png",
-            name="test.png",
-            preview_url=AnyUrl("https://example.com/test.png"),
-            metadata={"source": "test"},
-        )
-        await self.store.save_attachment(image, DEFAULT_CONTEXT)
-        loaded = await self.store.load_attachment(image.id, DEFAULT_CONTEXT)
-        assert loaded == image
-
-    @pytest.mark.asyncio
-    async def test_load_threads(self):
-        now = datetime.now()
-        thread1 = make_thread(thread_id="thread1", created_at=now)
-        thread2 = make_thread(
-            thread_id="thread2", created_at=now + timedelta(seconds=1)
-        )
-        thread3 = make_thread(
-            thread_id="thread3", created_at=now + timedelta(seconds=2)
-        )
-        await self.store.save_thread(thread1, DEFAULT_CONTEXT)
-        await self.store.save_thread(thread2, DEFAULT_CONTEXT)
-        await self.store.save_thread(thread3, DEFAULT_CONTEXT)
-
-        page1 = await self.store.load_threads(
-            limit=2, after=None, order="asc", context=DEFAULT_CONTEXT
-        )
-        assert [t.id for t in page1.data] == ["thread1", "thread2"]
-        assert page1.has_more is True
-        assert page1.after == "thread2"
-
-        page2 = await self.store.load_threads(
-            limit=2, after=page1.data[-1].id, order="asc", context=DEFAULT_CONTEXT
-        )
-        assert [t.id for t in page2.data] == ["thread3"]
-        assert page2.has_more is False
-        assert not page2.after
-
-    @pytest.mark.asyncio
-    async def test_thread_items_ordering(self):
-        thread = make_thread()
-        now = datetime.now()
-        items = [
-            UserMessageItem(
-                id="msg1",
-                content=[UserMessageTextContent(text="A")],
-                attachments=[],
-                inference_options=InferenceOptions(),
-                thread_id=thread.id,
-                created_at=now,
-            ),
-            UserMessageItem(
-                id="msg2",
-                content=[UserMessageTextContent(text="B")],
-                attachments=[],
-                inference_options=InferenceOptions(),
-                thread_id=thread.id,
-                created_at=now + timedelta(seconds=1),
-            ),
-            UserMessageItem(
-                id="msg3",
-                content=[UserMessageTextContent(text="C")],
-                attachments=[],
-                inference_options=InferenceOptions(),
-                thread_id=thread.id,
-                created_at=now + timedelta(seconds=2),
-            ),
-        ]
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        for item in items:
-            await self.store.add_thread_item(thread.id, item, DEFAULT_CONTEXT)
-
-        asc = await self.store.load_thread_items(
-            thread.id, after=None, limit=3, order="asc", context=DEFAULT_CONTEXT
-        )
-        desc = await self.store.load_thread_items(
-            thread.id, after=None, limit=3, order="desc", context=DEFAULT_CONTEXT
-        )
-        assert [i.id for i in asc.data] == ["msg1", "msg2", "msg3"]
-        assert [i.id for i in desc.data] == ["msg3", "msg2", "msg1"]
-
-    @pytest.mark.asyncio
-    async def test_thread_items_offset(self):
-        thread = make_thread()
-        now = datetime.now()
-        items = [
-            UserMessageItem(
-                id=f"msg{i}",
-                content=[UserMessageTextContent(text=str(i))],
-                attachments=[],
-                inference_options=InferenceOptions(),
-                thread_id=thread.id,
-                created_at=now + timedelta(seconds=i),
-            )
-            for i in range(5)
-        ]
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        for item in items:
-            await self.store.add_thread_item(thread.id, item, DEFAULT_CONTEXT)
-
-        after = await self.store.load_thread_items(
-            thread.id, after="msg1", limit=3, order="asc", context=DEFAULT_CONTEXT
-        )
-        assert [i.id for i in after.data] == ["msg2", "msg3", "msg4"]
-        assert after.has_more is False
-        assert not after.after
-
-        after_limit = await self.store.load_thread_items(
-            thread.id, after=None, limit=2, order="asc", context=DEFAULT_CONTEXT
-        )
-        assert [i.id for i in after_limit.data] == ["msg0", "msg1"]
-        assert after_limit.has_more is True
-        assert after_limit.after == "msg1"
-
-    @pytest.mark.asyncio
-    async def test_save_and_load_item(self):
-        thread = make_thread()
-        now = datetime.now()
-        assistant_msg = AssistantMessageItem(
-            id="msg_000001",
-            content=[],
-            thread_id=thread.id,
-            created_at=now,
-        )
-        widget = WidgetItem(
-            id="widget_1",
-            type="widget",
-            thread_id=thread.id,
-            created_at=now + timedelta(seconds=1),
-            widget=Card(children=[Text(value="Test")]),
-        )
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        await self.store.add_thread_item(thread.id, assistant_msg, DEFAULT_CONTEXT)
-        await self.store.add_thread_item(thread.id, widget, DEFAULT_CONTEXT)
-
-        assistant_msg.content = [
-            AssistantMessageContent(text="This is an assistant message.")
-        ]
-        await self.store.save_item(thread.id, assistant_msg, DEFAULT_CONTEXT)
-        loaded_assistant = await self.store.load_item(
-            thread.id, assistant_msg.id, DEFAULT_CONTEXT
-        )
-        assert isinstance(loaded_assistant, AssistantMessageItem)
-        assert loaded_assistant.id == assistant_msg.id
-        assert loaded_assistant.content[0] == AssistantMessageContent(
-            text="This is an assistant message."
-        )
-
-        await self.store.save_item(thread.id, widget, DEFAULT_CONTEXT)
-        loaded_widget = await self.store.load_item(
-            thread.id, widget.id, DEFAULT_CONTEXT
-        )
-        assert isinstance(loaded_widget, WidgetItem)
-        assert loaded_widget.id == widget.id
-
-    @pytest.mark.asyncio
-    async def test_load_nonexistent_item(self):
-        thread = make_thread()
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-        with pytest.raises(NotFoundError):
-            await self.store.load_item(thread.id, "does_not_exist", DEFAULT_CONTEXT)
-
-    @pytest.mark.asyncio
-    async def test_thread_isolation_by_user(self):
-        # Create a thread for DEFAULT_CONTEXT
-        thread = make_thread(thread_id="user1_thread")
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-
-        # Should be accessible by the same user
-        loaded_default = await self.store.load_thread(thread.id, DEFAULT_CONTEXT)
-        assert loaded_default.title == thread.title
-
-        # Should not be accessible by another user
-        with pytest.raises(NotFoundError):
-            await self.store.load_thread(thread.id, ALTERNATIVE_CONTEXT)
-
-    @pytest.mark.asyncio
-    async def test_thread_items_isolation_by_user(self):
-        thread = make_thread(thread_id="shared_thread")
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
-
-        # Add items for DEFAULT_CONTEXT
-        items_default = make_thread_items()
-        for item in items_default:
-            await self.store.add_thread_item(thread.id, item, DEFAULT_CONTEXT)
-
-        # Should be accessible by the same user
-        loaded_items_default = (
-            await self.store.load_thread_items(
-                thread.id, None, 10, "asc", DEFAULT_CONTEXT
-            )
-        ).data
-        assert loaded_items_default == items_default
-
-        # Should not be accessible by another user (should return empty list)
-        loaded_items_alternative = (
-            await self.store.load_thread_items(
-                thread.id, None, 10, "asc", ALTERNATIVE_CONTEXT
-            )
-        ).data
-        assert loaded_items_alternative == []
-
-        # Try to load a specific item with another user's context (should raise ValueError)
-        with pytest.raises(NotFoundError):
-            await self.store.load_item(
-                thread.id, items_default[0].id, ALTERNATIVE_CONTEXT
-            )
-
-
-class TestSqliteStore(TestStore):
+class TestSqliteStore(ThreadStoreContract, AttachmentMetadataStoreContract):
     def setup_method(self, method):
         db_path = f"file:{method.__name__}?mode=memory&cache=shared"
         # Keep the shared in-memory database from being deleted when the last connection is closed
         self.db = sqlite3.connect(db_path, uri=True)
-        self.store = SQLiteStore(db_path)
+        store = SQLiteStore(db_path)
+        self.store = store
+        self.attachment_metadata_store = store
 
     def teardown_method(self, method):
         self.db.close()
@@ -397,6 +38,7 @@ class TestSqliteStore(TestStore):
         ctx = DEFAULT_CONTEXT
         thread_id = self.store.generate_thread_id(ctx)
         assert thread_id.startswith("thr_")
+        assert len(thread_id.removeprefix("thr_")) == 32
 
         thread = make_thread(thread_id=thread_id)
         assert self.store.generate_item_id("message", thread, ctx).startswith("msg_")
@@ -405,7 +47,7 @@ class TestSqliteStore(TestStore):
         assert self.store.generate_item_id("workflow", thread, ctx).startswith("wf_")
 
 
-class TestSqliteStoreCustomIds(TestStore):
+class TestSqliteStoreCustomIds(ThreadStoreContract, AttachmentMetadataStoreContract):
     def setup_method(self, method):
         db_path = f"file:{method.__name__}_custom?mode=memory&cache=shared"
         # Keep the shared in-memory database from being deleted when the last connection is closed
@@ -426,7 +68,9 @@ class TestSqliteStoreCustomIds(TestStore):
                 self.counter += 1
                 return f"{item_type}_custom_{self.counter}_{thread.id}"
 
-        self.store = CustomSQLiteStore(db_path)
+        store = CustomSQLiteStore(db_path)
+        self.store = store
+        self.attachment_metadata_store = store
 
     def teardown_method(self, method):
         self.db.close()
@@ -455,3 +99,84 @@ class TestSqliteStoreCustomIds(TestStore):
         assert msg_id2 == "message_custom_6_thr_custom_5"
         assert tool_call_id2 == "tool_call_custom_7_thr_custom_5"
         assert task_id2 == "task_custom_8_thr_custom_5"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_claim_and_patch_across_independent_connections(tmp_path: Path):
+    db_path = str(tmp_path / "concurrent.sqlite")
+    first_store, second_store = SQLiteStore(db_path), SQLiteStore(db_path)
+    thread = make_thread()
+    ctx = DEFAULT_CONTEXT
+    await first_store.save_thread(thread, ctx)
+    pending = StructuredInputItem(
+        id="form", thread_id=thread.id, created_at=thread.created_at, inputs=[]
+    )
+    await first_store.add_thread_item(thread.id, pending, ctx)
+
+    barrier = Barrier(2, timeout=5)
+
+    def claim_and_patch(store: SQLiteStore, value: str) -> bool:
+        async def update() -> bool:
+            replacement = pending.model_copy(update={"status": value})
+            try:
+                await store.claim_pending_item(thread.id, pending, replacement, ctx)
+            except ConflictError:
+                claimed = False
+            else:
+                claimed = True
+            await store.patch_thread(thread.id, {"metadata_set": {value: True}}, ctx)
+            return claimed
+
+        barrier.wait()
+        return asyncio.run(update())
+
+    answered, skipped = await asyncio.gather(
+        asyncio.to_thread(claim_and_patch, first_store, "answered"),
+        asyncio.to_thread(claim_and_patch, second_store, "skipped"),
+    )
+    assert answered != skipped
+    item = await first_store.load_item(thread.id, pending.id, ctx)
+    assert isinstance(item, StructuredInputItem)
+    assert item.status == ("answered" if answered else "skipped")
+    patched = await first_store.load_thread(thread.id, ctx)
+    assert patched.metadata == {"test": "test", "answered": True, "skipped": True}
+
+
+@pytest.mark.asyncio
+async def test_app_store_checks_work_with_independent_instances(tmp_path: Path):
+    path = tmp_path / "contract.sqlite3"
+    await check_thread_store(
+        SQLiteThreadStore[RequestContext](path),
+        DEFAULT_CONTEXT,
+        other_context=ALTERNATIVE_CONTEXT,
+        peer=SQLiteThreadStore[RequestContext](path),
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_backed_example_reopens_with_stable_timestamp_order(tmp_path: Path):
+    path = tmp_path / "turns.sqlite3"
+    thread = make_thread()
+    store = SQLiteThreadStore[RequestContext](path)
+    await store.save_thread(thread, DEFAULT_CONTEXT)
+    instant = datetime.now(UTC)
+    for item_id, offset in (("b", timedelta()), ("a", timedelta(hours=-3))):
+        await store.add_thread_item(
+            thread.id,
+            AssistantMessageItem(
+                id=item_id,
+                thread_id=thread.id,
+                created_at=instant.astimezone(timezone(offset)),
+                content=[],
+            ),
+            DEFAULT_CONTEXT,
+        )
+
+    reopened = SQLiteThreadStore[RequestContext](path)
+    assert await reopened.load_thread(thread.id, DEFAULT_CONTEXT) == thread
+    page = await reopened.load_thread_items(thread.id, None, 1, "asc", DEFAULT_CONTEXT)
+    assert [item.id for item in page.data] == ["a"]
+    second_page = await reopened.load_thread_items(
+        thread.id, page.after, 1, "asc", DEFAULT_CONTEXT
+    )
+    assert [item.id for item in second_page.data] == ["b"]

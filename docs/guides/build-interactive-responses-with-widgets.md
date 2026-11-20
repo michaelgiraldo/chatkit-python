@@ -17,50 +17,84 @@ When the layout and bindings look correct, click **Export** to download the gene
 
 ## Build widgets with `WidgetTemplate`
 
-Load the `.widget` file with `WidgetTemplate.from_file` and hydrate it with runtime data. Placeholders inside the `.widget` template (Jinja-style `{{ }}` expressions) are rendered before the widget is streamed.
+Add the `templates` extra to your Turnspan installation to render exported
+`.widget` files. Load the file with `WidgetTemplate.from_file` and pass your
+runtime data to `.build()`.
+Relative paths resolve from the working directory. Use an explicit path based
+on `__file__` for templates stored beside your Python module.
 
 ```python
-from chatkit.widgets import WidgetTemplate
+from pathlib import Path
 
-message_template = WidgetTemplate.from_file("widgets/channel_message.widget")
+from chatkit.templates import WidgetTemplate
+
+message_template = WidgetTemplate.from_file(
+    Path(__file__).parent / "widgets" / "channel_message.widget"
+)
 
 
 def build_message_widget(user_name: str, message: str):
     # Replace this helper with whatever your integration uses to build widgets.
-    return message_template.build(
-        {
-            "user_name": user_name,
-            "message": message,
-        }
-    )
+    return message_template.build({
+        "user_name": user_name,
+        "message": message,
+    })
 ```
 
-`WidgetTemplate.build` accepts plain dicts or Pydantic models. Use `.build_basic` if you're working with a `BasicRoot` widget outside of streaming.
+`WidgetTemplate.build` accepts plain dicts or Pydantic models and returns a
+`WidgetRoot`. Use it for `Basic` entity preview templates as well.
+
+## Build widgets in Python
+
+Use named builders for editor completion and field validation when writing
+widgets in code. `stream_widget` accepts a `Card` or `ListView` directly. Call
+`.build()` to get the `WidgetRoot` for a manually constructed `WidgetItem` or
+root replacement event. A child builder such as `Text` also provides `.build()`
+for manually constructed component replacement events.
+
+```python
+from chatkit.widgets import Card, Text
+
+widget = Card(children=[Text(value="Your order is ready.")]).build()
+```
 
 ## Stream widgets from `respond`
 
-Use `stream_widget` to emit a one-off widget or stream updates from an async generator.
+Use `stream_widget` to emit a one-off widget or stream updates from an async
+generator. Add this method to your server subclass using your app's
+`RequestContext` type.
 
 ```python
-from chatkit.server import stream_widget
+from collections.abc import AsyncIterator
+from contextlib import aclosing
+
+from chatkit.turns import Turn
+from chatkit.events import ThreadStreamEvent
+from chatkit.widget_stream import stream_widget
 
 
-async def respond(...):
+async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
     user_name = "Harry Potter"
     message = "Yer a wizard, Harry"
     message_widget = build_message_widget(user_name=user_name, message=message)
-    async for event in stream_widget(
-        thread,
-        message_widget,
-        copy_text=f"Message to {user_name}: {message}",
-        generate_id=lambda item_type: self.store.generate_item_id(
-            item_type, thread, context
-        ),
-    ):
-        yield event
+    async with aclosing(
+        stream_widget(
+            turn.thread,
+            message_widget,
+            copy_text=f"Message to {user_name}: {message}",
+            generate_id=lambda item_type: self.store.generate_item_id(
+                item_type, turn.thread, turn.context
+            ),
+        )
+    ) as events:
+        async for event in events:
+            yield event
 ```
 
-To stream gradual updates, yield successive widget states from an async generator; `stream_widget` diffs and emits `ThreadItemUpdatedEvent`s for you.
+To stream gradual updates, yield successive widget states from an async
+generator. `stream_widget` emits updates for each change. A producer that
+yields zero states produces no widget. Use `aclosing` when forwarding events
+so a disconnect also closes the widget producer.
 
 ## Stream widgets from tools
 
@@ -73,7 +107,7 @@ from chatkit.agents import AgentContext
 
 @function_tool(description_override="Display a sample widget to the user.")
 async def sample_widget(ctx: RunContextWrapper[AgentContext]):
-    message_widget = build_message_widget(...)
+    message_widget = build_message_widget(user_name="Harry Potter", message="Hello!")
     await ctx.context.stream_widget(message_widget)
 ```
 
@@ -81,36 +115,38 @@ async def sample_widget(ctx: RunContextWrapper[AgentContext]):
 
 The examples above return a fully completed static widget. You can also stream an updating widget by yielding new versions of the widget from a generator function. The ChatKit framework will send updates for the parts of the widget that have changed.
 
-!!! note "Text streaming support"
-    Currently, only `<Text>` and `<Markdown>` components marked with an `id` have their text updates streamed. Other diffs will forgo the streaming UI and replace and rerender parts of the widget client-side.
+A `Text` or `Markdown` component with a unique `id` can stream appended text.
+Layout and property changes replace the widget client-side.
 
 ```python
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
-from agents import RunContextWrapper, function_tool
-from chatkit.agents import AgentContext, Runner
-from chatkit.widgets import WidgetRoot
+from agents import RunContextWrapper, Runner, function_tool
+from chatkit.agents import AgentContext
+from chatkit.widget_models import WidgetRoot
 
 
 @function_tool
 async def draft_message_to_harry(ctx: RunContextWrapper[AgentContext]):
     # message_generator is your model/tool function that streams text
-    message_result = Runner.run_streamed(
-        message_generator, "Draft a message to Harry."
-    )
+    message_result = Runner.run_streamed(message_generator, "Draft a message to Harry.")
 
     async def widget_generator() -> AsyncGenerator[WidgetRoot, None]:
         message = ""
-        async for event in message_result.stream_events():
-            if (
-                event.type == "raw_response_event"
-                and event.data.type == "response.output_text.delta"
-            ):
-                message += event.data.delta
-                yield build_message_widget(
-                    user_name="Harry Potter",
-                    message=message,
-                )
+        try:
+            async for event in message_result.stream_events():
+                if (
+                    event.type == "raw_response_event"
+                    and event.data.type == "response.output_text.delta"
+                ):
+                    message += event.data.delta
+                    yield build_message_widget(
+                        user_name="Harry Potter",
+                        message=message,
+                    )
+        finally:
+            if not message_result.is_complete:
+                message_result.cancel()
 
         # Final render after streaming completes.
         yield build_message_widget(
@@ -163,38 +199,49 @@ Example widget definition with a client action handler:
 Implement `ChatKitServer.action` to process incoming actions. The `sender` argument is the widget item that triggered the action (if available).
 
 ```python
+from contextlib import aclosing
 from datetime import datetime
 
-from chatkit.server import ChatKitServer, stream_widget
-from chatkit.types import HiddenContextItem, WidgetItem
+from chatkit.errors import CustomStreamError
+from chatkit.server import ChatKitServer
+from chatkit.widget_stream import stream_widget
+from chatkit.models import HiddenContextItem
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
     async def action(self, thread, action, sender, context):
         if action.type == "send_message":
-            await send_to_chat(action.payload["text"])
+            payload = action.payload
+            if not isinstance(payload, dict) or not isinstance(
+                text := payload.get("text"), str
+            ):
+                raise CustomStreamError("Expected a text message.")
+            await send_to_chat(text)
 
             # Record the user action so the model can see it on the next turn.
             hidden = HiddenContextItem(
-                id="generated-item-id",
+                id=self.store.generate_item_id("message", thread, context),
                 thread_id=thread.id,
                 created_at=datetime.now(),
-                content=f"User sent message: {action.payload['text']}",
+                content=f"User sent message: {text}",
             )
             # HiddenContextItems need to be manually saved because ChatKitServer
             # only auto-saves streamed items, and HiddenContextItem should never be streamed to the client.
             await self.store.add_thread_item(thread.id, hidden, context)
 
             # Stream an updated widget back to the client.
-            updated_widget = build_message_widget(text=action.payload["text"])
-            async for event in stream_widget(
-                thread,
-                updated_widget,
-                generate_id=lambda item_type: self.store.generate_item_id(
-                    item_type, thread, context
-                ),
-            ):
-                yield event
+            updated_widget = build_message_widget(user_name="Support", message=text)
+            async with aclosing(
+                stream_widget(
+                    thread,
+                    updated_widget,
+                    generate_id=lambda item_type: self.store.generate_item_id(
+                        item_type, thread, context
+                    ),
+                )
+            ) as events:
+                async for event in events:
+                    yield event
 ```
 
 Treat action payloads as untrusted input from the client.
@@ -284,13 +331,19 @@ Wrap widgets that collect user input in a `Form` to have their values automatica
 </Form>
 ```
 
-On the server, read the form values from the action payload. Any action originating from inside the form will include the latest field values.
+On the server, read and validate the form values from the action payload.
+Use an app helper to update the todo for the authenticated user, then build
+its updated widget and yield a replacement event.
 
 ```python
 from collections.abc import AsyncIterator
+from typing import Any
 
+from chatkit.actions import Action
+from chatkit.errors import CustomStreamError
+from chatkit.events import ThreadItemReplacedEvent, ThreadStreamEvent
+from chatkit.models import ThreadMetadata, WidgetItem
 from chatkit.server import ChatKitServer
-from chatkit.types import Action, ThreadMetadata, ThreadStreamEvent, WidgetItem
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
@@ -301,15 +354,31 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
         sender: WidgetItem | None,
         context: RequestContext,
     ) -> AsyncIterator[ThreadStreamEvent]:
-        if action.type == "update_todo":
-            todo_id = action.payload["id"]
-            # Any action that originates from within the Form will
-            # include title and description
-            title = action.payload["title"]
-            description = action.payload["description"]
+        if action.type != "update_todo":
+            return
 
-            # ...
+        payload = action.payload
+        if sender is None or not isinstance(payload, dict):
+            raise CustomStreamError("Expected a todo form.")
+
+        todo_id = payload.get("id")
+        title = payload.get("title")
+        description = payload.get("description", "")
+        if (
+            not isinstance(todo_id, str)
+            or not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(description, str)
+        ):
+            raise CustomStreamError("Expected a todo ID, title, and description.")
+
+        todo = await update_todo(todo_id, title, description, context)
+        yield ThreadItemReplacedEvent(
+            item=sender.model_copy(update={"widget": build_todo_widget(todo)})
+        )
 ```
+
+`build_todo_widget` should return a built `WidgetRoot`.
 
 ### Validation
 
@@ -323,6 +392,6 @@ You can pass `asForm=True` to `Card` and it will behave as a `Form`, running val
 
 ### Payload key collisions
 
-If there is a naming collision with some other existing pre-defined key on your payload, the form value will be ignored. This is probably a bug, so we’ll emit an `error` event when we see this.
+Give form fields names distinct from keys already in the action payload.
 
 

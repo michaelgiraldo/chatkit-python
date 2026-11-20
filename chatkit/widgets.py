@@ -1,33 +1,18 @@
-from __future__ import annotations
-
-import inspect
-import json
 from datetime import datetime
-from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal, NotRequired, TypedDict
 
-from jinja2 import Environment, StrictUndefined, Template
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    SerializeAsAny,
     model_serializer,
 )
-from typing_extensions import NotRequired, TypedDict, deprecated
 
-from .actions import ActionConfig
-from .icons import IconName
-
-_jinja_env = Environment(undefined=StrictUndefined)
-
-_direct_usage_of_named_widget_types_deprecated = deprecated(
-    "Direct usage of named widget classes is deprecated. "
-    "Use WidgetTemplate to build widgets from .widget files instead. "
-    "Visit https://widgets.chatkit.studio/ to author widget files."
-)
+from . import actions, icons, widget_models
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class ThemeColor(TypedDict):
     """Color values for light and dark themes."""
 
@@ -37,7 +22,6 @@ class ThemeColor(TypedDict):
     """Color to use when the theme is light."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Spacing(TypedDict):
     """Shorthand spacing values applied to a widget."""
 
@@ -55,11 +39,10 @@ class Spacing(TypedDict):
     """Vertical spacing; accepts a spacing unit or CSS string."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Border(TypedDict):
     """Border style definition for an edge."""
 
-    size: int
+    size: int | float
     """Thickness of the border in px."""
     color: NotRequired[str | ThemeColor]
     """Border color; accepts border color token, a primitive color token, a CSS string, or theme-aware `{ light, dark }`.
@@ -76,25 +59,23 @@ class Border(TypedDict):
     """Border line style."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Borders(TypedDict):
     """Composite border configuration applied across edges."""
 
-    top: NotRequired[int | Border]
+    top: NotRequired[int | float | Border]
     """Top border or thickness in px."""
-    right: NotRequired[int | Border]
+    right: NotRequired[int | float | Border]
     """Right border or thickness in px."""
-    bottom: NotRequired[int | Border]
+    bottom: NotRequired[int | float | Border]
     """Bottom border or thickness in px."""
-    left: NotRequired[int | Border]
+    left: NotRequired[int | float | Border]
     """Left border or thickness in px."""
-    x: NotRequired[int | Border]
+    x: NotRequired[int | float | Border]
     """Horizontal borders or thickness in px."""
-    y: NotRequired[int | Border]
+    y: NotRequired[int | float | Border]
     """Vertical borders or thickness in px."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class MinMax(TypedDict):
     """Integer minimum/maximum bounds."""
 
@@ -104,7 +85,6 @@ class MinMax(TypedDict):
     """Maximum value (inclusive)."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class EditableProps(TypedDict):
     """Editable field options for text widgets."""
 
@@ -159,19 +139,8 @@ ControlSize = Literal["3xs", "2xs", "xs", "sm", "md", "lg", "xl", "2xl", "3xl"]
 """Button and input size variants."""
 
 
-def _drop_none(x):
-    """Recursively remove ``None`` values when serializing widgets."""
-    if isinstance(x, dict):
-        return {
-            k: _drop_none(v) for k, v in x.items() if k == "children" or v is not None
-        }
-    if isinstance(x, list):
-        return [_drop_none(v) for v in x if v is not None]
-    return x
-
-
 class WidgetComponentBase(BaseModel):
-    """Base Pydantic model for all ChatKit widget components."""
+    """Base model for typed Python widget builders."""
 
     model_config = ConfigDict(serialize_by_alias=True)
 
@@ -179,22 +148,43 @@ class WidgetComponentBase(BaseModel):
     id: str | None = None
     type: str = Field(...)
 
+    def build(self) -> widget_models.WidgetComponent:
+        """Build the widget node used for events and storage."""
+        return widget_models.WidgetComponent.model_validate(
+            self.model_dump(mode="json", exclude_none=True)
+        )
+
     # For nested model dumps (e.g. if Widget is not the top-level model)
     @model_serializer(mode="wrap")
     def serialize(self, next_):
         dumped = next_(self)
-        # Recursively filter out None values when serialized.
-        # Do this explicitly instead of overriding model_dump_json and model_dump;
-        # the overrides will not be invoked unless the widget is the top-level model.
-        dumped = _drop_none(dumped)
-        # include type even when exlude_defaults is True
-        if isinstance(dumped, dict):
-            dumped["type"] = self.type
-
-        return dumped
+        fields = {name: value for name, value in dumped.items() if value is not None}
+        fields["type"] = self.type
+        return fields
 
 
-@_direct_usage_of_named_widget_types_deprecated
+def _parse_widget_child(value: object) -> object:
+    return (
+        widget_models.WidgetComponent.model_validate(value)
+        if isinstance(value, dict)
+        else value
+    )
+
+
+_WidgetChild = Annotated[
+    SerializeAsAny[widget_models.WidgetComponent | WidgetComponentBase],
+    BeforeValidator(_parse_widget_child),
+]
+
+
+class _WidgetRootBuilder(WidgetComponentBase):
+    def build(self) -> widget_models.WidgetRoot:
+        """Build the widget tree used for events and storage."""
+        return widget_models.WidgetRoot.model_validate(
+            self.model_dump(mode="json", exclude_none=True)
+        )
+
+
 class WidgetStatusWithFavicon(TypedDict):
     """Widget status representation using a favicon."""
 
@@ -206,13 +196,12 @@ class WidgetStatusWithFavicon(TypedDict):
     """Show a frame around the favicon for contrast."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class WidgetStatusWithIcon(TypedDict):
     """Widget status representation using an icon."""
 
     text: str
     """Status text to display."""
-    icon: NotRequired[WidgetIcon]
+    icon: NotRequired[icons.IconName]
     """Icon to render at the start of the status."""
 
 
@@ -220,14 +209,13 @@ WidgetStatus = WidgetStatusWithFavicon | WidgetStatusWithIcon
 """Union for representing widget status messaging."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class ListViewItem(WidgetComponentBase):
     """Single row inside a ``ListView`` component."""
 
     type: Literal["ListViewItem"] = Field(default="ListViewItem", frozen=True)  # pyright: ignore
-    children: list["WidgetComponent"]
+    children: list[_WidgetChild]
     """Content for the list item."""
-    onClickAction: ActionConfig | None = None
+    onClickAction: actions.ActionConfig | None = None
     """Optional action triggered when the list item is clicked."""
     gap: int | str | None = None
     """Gap between children within the list item; spacing unit or CSS string."""
@@ -235,8 +223,7 @@ class ListViewItem(WidgetComponentBase):
     """Y-axis alignment for content within the list item."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
-class ListView(WidgetComponentBase):
+class ListView(_WidgetRootBuilder):
     """Container component for rendering collections of list items."""
 
     type: Literal["ListView"] = Field(default="ListView", frozen=True)  # pyright: ignore
@@ -250,24 +237,22 @@ class ListView(WidgetComponentBase):
     """Force light or dark theme for this subtree."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class CardAction(TypedDict):
     """Configuration for confirm/cancel actions within a card."""
 
     label: str
     """Button label shown in the card footer."""
-    action: ActionConfig
+    action: actions.ActionConfig
     """Declarative action dispatched to the host application."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
-class Card(WidgetComponentBase):
+class Card(_WidgetRootBuilder):
     """Versatile container used for structuring widget content."""
 
     type: Literal["Card"] = Field(default="Card", frozen=True)  # pyright: ignore
     asForm: bool | None = None
     """Treat the card as an HTML form so confirm/cancel capture form data."""
-    children: list["WidgetComponent"]
+    children: list[_WidgetChild]
     """Child components rendered inside the card."""
     background: str | ThemeColor | None = None
     """Background color; accepts background color token, a primitive color token, a CSS string, or theme-aware `{ light, dark }`.
@@ -276,6 +261,8 @@ class Card(WidgetComponentBase):
 
     Primitive color token: e.g. `red-100`, `blue-900`, `gray-500`
     """
+    border: int | float | Border | Borders | None = None
+    """Card border as a thickness in px, a border style, or per-edge settings."""
     size: Literal["sm", "md", "lg", "full"] | None = None
     """Visual size of the card; accepts a size token. No preset default is documented."""
     padding: float | str | Spacing | None = None
@@ -292,7 +279,6 @@ class Card(WidgetComponentBase):
     """Force light or dark theme for this subtree."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Markdown(WidgetComponentBase):
     """Widget rendering Markdown content, optionally streamed."""
 
@@ -303,7 +289,6 @@ class Markdown(WidgetComponentBase):
     """Applies streaming-friendly transitions for incremental updates."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Text(WidgetComponentBase):
     """Widget rendering plain text with typography controls."""
 
@@ -342,7 +327,6 @@ class Text(WidgetComponentBase):
     """Enable inline editing for this text node."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Title(WidgetComponentBase):
     """Widget rendering prominent headline text."""
 
@@ -369,7 +353,6 @@ class Title(WidgetComponentBase):
     """Limit text to a maximum number of lines (line clamp)."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Caption(WidgetComponentBase):
     """Widget rendering supporting caption text."""
 
@@ -396,7 +379,6 @@ class Caption(WidgetComponentBase):
     """Limit text to a maximum number of lines (line clamp)."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Badge(WidgetComponentBase):
     """Small badge indicating status or categorization."""
 
@@ -415,11 +397,10 @@ class Badge(WidgetComponentBase):
     """Determines if the badge should be fully rounded (pill)."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class BoxBase(BaseModel):
     """Shared layout props for flexible container widgets."""
 
-    children: list["WidgetComponent"] | None = None
+    children: list[_WidgetChild] | None = None
     """Child components to render inside the container."""
     align: Alignment | None = None
     """Cross-axis alignment of children."""
@@ -468,7 +449,6 @@ class BoxBase(BaseModel):
     """Aspect ratio of the box (e.g., 16/9); number or CSS string."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Box(WidgetComponentBase, BoxBase):
     """Generic flex container with direction control."""
 
@@ -477,32 +457,28 @@ class Box(WidgetComponentBase, BoxBase):
     """Flex direction for content within this container."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Row(WidgetComponentBase, BoxBase):
     """Horizontal flex container."""
 
     type: Literal["Row"] = Field(default="Row", frozen=True)  # pyright: ignore
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Col(WidgetComponentBase, BoxBase):
     """Vertical flex container."""
 
     type: Literal["Col"] = Field(default="Col", frozen=True)  # pyright: ignore
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Form(WidgetComponentBase, BoxBase):
     """Form wrapper capable of submitting ``onSubmitAction``."""
 
     type: Literal["Form"] = Field(default="Form", frozen=True)  # pyright: ignore
-    onSubmitAction: ActionConfig | None = None
+    onSubmitAction: actions.ActionConfig | None = None
     """Action dispatched when the form is submitted."""
     direction: Literal["row", "col"] | None = None
     """Flex direction for laying out form children."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Divider(WidgetComponentBase):
     """Visual divider separating content sections."""
 
@@ -522,12 +498,11 @@ class Divider(WidgetComponentBase):
     """Flush the divider to the container edge, removing surrounding padding."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Icon(WidgetComponentBase):
     """Icon component referencing a built-in icon name."""
 
     type: Literal["Icon"] = Field(default="Icon", frozen=True)  # pyright: ignore
-    name: WidgetIcon
+    name: icons.IconName
     """Name of the icon to display."""
     color: str | ThemeColor | None = None
     """
@@ -541,7 +516,6 @@ class Icon(WidgetComponentBase):
     """Size of the icon; accepts an icon size token."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Image(WidgetComponentBase):
     """Image component with sizing and fitting controls."""
 
@@ -606,7 +580,6 @@ class Image(WidgetComponentBase):
     """Flex growth/shrink factor."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Button(WidgetComponentBase):
     """Button component optionally wired to an action."""
 
@@ -615,11 +588,11 @@ class Button(WidgetComponentBase):
     """Configure the button as a submit button for the nearest form."""
     label: str | None = None
     """Text to display inside the button."""
-    onClickAction: ActionConfig | None = None
+    onClickAction: actions.ActionConfig | None = None
     """Action dispatched on click."""
-    iconStart: WidgetIcon | None = None
+    iconStart: icons.IconName | None = None
     """Icon shown before the label; can be used for icon-only buttons."""
-    iconEnd: WidgetIcon | None = None
+    iconEnd: icons.IconName | None = None
     """Optional icon shown after the label."""
     style: Literal["primary", "secondary"] | None = None
     """Convenience preset for button style."""
@@ -653,7 +626,6 @@ class Button(WidgetComponentBase):
     """Disable interactions and apply disabled styles."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Spacer(WidgetComponentBase):
     """Flexible spacer used to push content apart."""
 
@@ -662,7 +634,6 @@ class Spacer(WidgetComponentBase):
     """Minimum size the spacer should occupy along the flex direction."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class SelectOption(TypedDict):
     """Selectable option used by the ``Select`` widget."""
 
@@ -676,7 +647,6 @@ class SelectOption(TypedDict):
     """Displayed as secondary text below the option `label`."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Select(WidgetComponentBase):
     """Select dropdown component."""
 
@@ -685,7 +655,7 @@ class Select(WidgetComponentBase):
     """The name of the form control field used when submitting forms."""
     options: list[SelectOption]
     """List of selectable options."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the value changes."""
     placeholder: str | None = None
     """Placeholder text shown when no value is selected."""
@@ -707,14 +677,13 @@ class Select(WidgetComponentBase):
     """Enables the search input. Defaults to enabling search when there are more than 15 options."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class DatePicker(WidgetComponentBase):
     """Date picker input component."""
 
     type: Literal["DatePicker"] = Field(default="DatePicker", frozen=True)  # pyright: ignore
     name: str
     """The name of the form control field used when submitting forms."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the date value changes."""
     placeholder: str | None = None
     """Placeholder text shown when no date is selected."""
@@ -742,7 +711,6 @@ class DatePicker(WidgetComponentBase):
     """Disable interactions and apply disabled styles."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Checkbox(WidgetComponentBase):
     """Checkbox input component."""
 
@@ -753,7 +721,7 @@ class Checkbox(WidgetComponentBase):
     """Optional label text rendered next to the checkbox."""
     defaultChecked: bool | None = None
     """The initial checked state of the checkbox."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the checked state changes."""
     disabled: bool | None = None
     """Disable interactions and apply disabled styles."""
@@ -761,7 +729,6 @@ class Checkbox(WidgetComponentBase):
     """Mark the checkbox as required for form submission."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Input(WidgetComponentBase):
     """Single-line text input component."""
 
@@ -798,7 +765,6 @@ class Input(WidgetComponentBase):
     """Determines if the input should be fully rounded (pill)."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Label(WidgetComponentBase):
     """Form label associated with a field."""
 
@@ -823,7 +789,6 @@ class Label(WidgetComponentBase):
     """
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class RadioOption(TypedDict):
     """Option inside a ``RadioGroup`` widget."""
 
@@ -835,7 +800,6 @@ class RadioOption(TypedDict):
     """Disables a specific radio option."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class RadioGroup(WidgetComponentBase):
     """Grouped radio input control."""
 
@@ -846,7 +810,7 @@ class RadioGroup(WidgetComponentBase):
     """Array of options to render as radio items."""
     ariaLabel: str | None = None
     """Accessible label for the radio group; falls back to `name`."""
-    onChangeAction: ActionConfig | None = None
+    onChangeAction: actions.ActionConfig | None = None
     """Action dispatched when the selected value changes."""
     defaultValue: str | None = None
     """Initial selected value of the radio group."""
@@ -858,7 +822,6 @@ class RadioGroup(WidgetComponentBase):
     """Mark the group as required for form submission."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Textarea(WidgetComponentBase):
     """Multiline text input component."""
 
@@ -895,16 +858,14 @@ class Textarea(WidgetComponentBase):
     """Allow password managers / autofill extensions to appear."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Transition(WidgetComponentBase):
     """Wrapper enabling transitions for a child component."""
 
     type: Literal["Transition"] = Field(default="Transition", frozen=True)  # pyright: ignore
-    children: WidgetComponent | None
+    children: _WidgetChild | None
     """The child component to animate layout changes for."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class Chart(WidgetComponentBase):
     """Data visualization component for simple bar/line/area charts."""
 
@@ -949,7 +910,6 @@ class Chart(WidgetComponentBase):
     """Aspect ratio of the chart area (e.g., 16/9); number or CSS string."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class XAxisConfig(TypedDict):
     """Configuration object for the X axis."""
 
@@ -981,7 +941,6 @@ CurveType = Literal[
 """Interpolation curve types for `area` and `line` series."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class BarSeries(BaseModel):
     """A bar series plotted from a numeric `dataKey`. Supports stacking."""
 
@@ -1004,7 +963,6 @@ class BarSeries(BaseModel):
     """
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class AreaSeries(BaseModel):
     """An area series plotted from a numeric `dataKey`. Supports stacking and curves."""
 
@@ -1029,7 +987,6 @@ class AreaSeries(BaseModel):
     """Interpolation curve type used to connect points."""
 
 
-@_direct_usage_of_named_widget_types_deprecated
 class LineSeries(BaseModel):
     """A line series plotted from a numeric `dataKey`. Supports curves."""
 
@@ -1059,135 +1016,5 @@ Series = Annotated[
 """Union of all supported chart series types."""
 
 
-class DynamicWidgetComponent(WidgetComponentBase):
-    """
-    A widget component with a statically defined base shape but dynamically
-    defined additional fields loaded from a widget template or JSON schema.
-    """
-
-    model_config = ConfigDict(extra="allow")
-    children: DynamicWidgetComponent | list[DynamicWidgetComponent] | None = None
-
-
-StrictWidgetComponent = Annotated[
-    Text
-    | Title
-    | Caption
-    | Chart
-    | Badge
-    | Markdown
-    | Box
-    | Row
-    | Col
-    | Divider
-    | Icon
-    | Image
-    | ListViewItem
-    | Button
-    | Checkbox
-    | Spacer
-    | Select
-    | DatePicker
-    | Form
-    | Input
-    | Label
-    | RadioGroup
-    | Textarea
-    | Transition,
-    Field(discriminator="type"),
-]
-
-
-class BasicRoot(DynamicWidgetComponent):
-    """Layout root capable of nesting components or other roots."""
-
-    type: Literal["Basic"] = Field(default="Basic", frozen=True)  # pyright: ignore
-
-
-StrictWidgetRoot = Annotated[
-    Card | ListView | BasicRoot,
-    Field(discriminator="type"),
-]
-
-
-class DynamicWidgetRoot(DynamicWidgetComponent):
-    """Dynamic root widget restricted to root types."""
-
-    type: Literal["Card", "ListView", "Basic"]  # pyright: ignore
-
-
-WidgetComponent = StrictWidgetComponent | DynamicWidgetComponent
-"""Union of all renderable widget components."""
-
-WidgetRoot = StrictWidgetRoot | DynamicWidgetRoot
-"""Union of all renderable top-level widgets."""
-
-
-WidgetIcon = IconName
-"""Icon names accepted by widgets that render icons."""
-
-
-class WidgetTemplate:
-    """
-    Utility for loading and building widgets from a .widget file.
-
-    Example using .widget file on disc:
-    ```python
-    template = WidgetTemplate.from_file("path/to/my_widget.widget")
-    widget = template.build({"name": "Harry Potter"})
-    ```
-
-    Example using already parsed widget definition:
-    ```python
-    template = WidgetTemplate(definition={"version": "1.0", "name": "...", "template": Template(...), "jsonSchema": {...}})
-    widget = template.build({"name": "Harry Potter"})
-    ```
-    """
-
-    def __init__(self, definition: dict[str, Any]):
-        self.version = definition["version"]
-        if self.version != "1.0":
-            raise ValueError(f"Unsupported widget spec version: {self.version}")
-
-        self.name = definition["name"]
-        template = definition["template"]
-        if isinstance(template, Template):
-            self.template = template
-        else:
-            self.template = _jinja_env.from_string(template)
-        self.data_schema = definition.get("jsonSchema", {})
-
-    @classmethod
-    def from_file(cls, file_path: str) -> WidgetTemplate:
-        path = Path(file_path)
-        if not path.is_absolute():
-            caller_frame = inspect.stack()[1]
-            caller_path = Path(caller_frame.filename).resolve()
-            path = caller_path.parent / path
-
-        with path.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
-
-        return cls(payload)
-
-    def build(
-        self, data: dict[str, Any] | BaseModel | None = None
-    ) -> DynamicWidgetRoot:
-        """Render the widget template with the given data and return a DynamicWidgetRoot instance."""
-        rendered = self.template.render(**self._normalize_data(data))
-        widget_dict = json.loads(rendered)
-        return DynamicWidgetRoot.model_validate(widget_dict)
-
-    @deprecated("WidgetTemplate.build_basic is deprecated. Use WidgetTemplate.build instead.")
-    def build_basic(self, data: dict[str, Any] | BaseModel | None = None) -> BasicRoot:
-        """Deprecated alias for building Basic root widgets."""
-        rendered = self.template.render(**self._normalize_data(data))
-        widget_dict = json.loads(rendered)
-        return BasicRoot.model_validate(widget_dict)
-
-    def _normalize_data(
-        self, data: dict[str, Any] | BaseModel | None
-    ) -> dict[str, Any]:
-        if data is None:
-            return {}
-        return data.model_dump() if isinstance(data, BaseModel) else data
+type WidgetRootInput = widget_models.WidgetRoot | Card | ListView
+"""Canonical widget or typed builder accepted by streaming helpers."""

@@ -20,21 +20,37 @@ ChatKit exposes lifecycle events for thread loading and response streaming. Use 
 
 ## Wire it all together in `useChatKit`
 
-Here’s a minimal React inbox that mirrors thread and loading state:
+This React inbox mirrors thread changes and loading state. Supply your app's
+`Toolbar` and persist `onActiveThreadChange` in your router or session state.
+Pass the saved ID back as `savedThreadId` when mounting a new instance.
 
 ```tsx
+import {useState} from "react";
 import {ChatKit, useChatKit} from "@openai/chatkit-react";
 
-export function Inbox({clientToken}: { clientToken: string }) {
+export function Inbox({
+  backendUrl,
+  domainKey,
+  savedThreadId,
+  onActiveThreadChange,
+}: {
+  backendUrl: string;
+  domainKey: string;
+  savedThreadId: string | null;
+  onActiveThreadChange: (threadId: string | null) => void;
+}) {
+  const [isLoading, setIsLoading] = useState(false);
+  const [isResponding, setIsResponding] = useState(false);
   const {
     control,
     sendUserMessage,
     focusComposer,
     setThreadId,
   } = useChatKit({
-    // ... your normal options (api, history, composer, etc.)
+    api: {url: backendUrl, domainKey},
+    initialThread: savedThreadId,
 
-    onThreadChange: ({threadId}) => setActiveThread(threadId),
+    onThreadChange: ({threadId}) => onActiveThreadChange(threadId),
 
     onThreadLoadStart: () => setIsLoading(true),
     onThreadLoadEnd: () => setIsLoading(false),
@@ -49,7 +65,7 @@ export function Inbox({clientToken}: { clientToken: string }) {
     <>
       <Toolbar
         disabled={isBusy}
-        onNewThread={() => !isBusy && setThreadId(undefined)}
+        onNewThread={() => !isBusy && setThreadId(null)}
         onFocusComposer={() => !isBusy && focusComposer()}
         onSendQuickMessage={(text) =>
           !isBusy && sendUserMessage({text})

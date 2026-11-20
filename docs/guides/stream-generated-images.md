@@ -78,28 +78,25 @@ class MyResponseStreamConverter(ResponseStreamConverter):
 
 ### Pass your converter to `stream_agent_response`
 
-Create your converter and pass it into `stream_agent_response`. The returned URL will be what gets persisted on the `GeneratedImageItem`.
+Inside `respond`, build `input_items` from your thread history as shown in
+[Respond to a user message](respond-to-user-message.md#load-thread-history-recommended-default).
+Pass your converter into `stream_agent_response` to persist the returned URL
+on the `GeneratedImageItem`.
 
 ```python
+from contextlib import aclosing
+
 from agents import Runner
 
 from chatkit.agents import AgentContext, stream_agent_response
 
+agent_context = AgentContext(thread=thread, store=self.store, request_context=context)
+result = Runner.run_streamed(agent, input_items, context=agent_context)
 
-async def respond(...):
-    agent_context = AgentContext(
-        thread=thread,
-        store=self.store,
-        request_context=context,
-        previous_response_id=thread.previous_response_id,
-    )
-    result = Runner.run_streamed(agent, input_items, context=agent_context)
-
-    async for event in stream_agent_response(
-        agent_context,
-        result,
-        converter=MyResponseStreamConverter(),
-    ):
+async with aclosing(
+    stream_agent_response(agent_context, result, converter=MyResponseStreamConverter())
+) as events:
+    async for event in events:
         yield event
 ```
 
@@ -129,8 +126,8 @@ import base64
 from openai.types.responses import ResponseInputImageParam, ResponseInputTextParam
 from openai.types.responses.response_input_item_param import Message
 
-from chatkit.agents import ThreadItemConverter
-from chatkit.types import GeneratedImageItem
+from chatkit.agent_input import ThreadItemConverter
+from chatkit.models import GeneratedImageItem
 
 
 class MyThreadItemConverter(ThreadItemConverter):
@@ -190,14 +187,17 @@ image_tool = ImageGenerationTool(
 
 Pass the same `partial_images` value to `ResponseStreamConverter` (or your subclass). ChatKit uses it to compute a `progress` value (between 0 and 1) for each partial image update.
 
+Use the forwarding block below inside `respond`, with a converter such as
+`MyResponseStreamConverter(partial_images=3)`. The `aclosing` block closes the
+model stream when the user presses Stop or the client disconnects.
+
+<!-- fmt: off -->
+
 ```python
-async for event in stream_agent_response(
-    agent_context,
-    result,
-    converter=MyResponseStreamConverter(partial_images=3),
-):
-    yield event
+--8<-- "docs/examples/stream_image_previews.py"
 ```
+
+<!-- fmt: on -->
 
 During the run, ChatKit will emit:
 

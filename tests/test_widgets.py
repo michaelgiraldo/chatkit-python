@@ -1,134 +1,133 @@
 import json
-from datetime import datetime
-from typing import Any, Literal
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 
-from chatkit.server import diff_widget
-from chatkit.types import WidgetItem
-from chatkit.widgets import (
-    BasicRoot,
-    Card,
-    DynamicWidgetComponent,
-    DynamicWidgetRoot,
-    Text,
-    WidgetRoot,
-    WidgetTemplate,
+from chatkit.actions import ActionConfig
+from chatkit.events import ThreadCreatedEvent, ThreadItemDoneEvent, ThreadStreamEvent
+from chatkit.models import (
+    InferenceOptions,
+    Thread,
+    UserMessageInput,
+    UserMessageTextContent,
+    WidgetItem,
 )
+from chatkit.requests import (
+    ThreadCreateParams,
+    ThreadGetByIdParams,
+    ThreadsCreateReq,
+    ThreadsGetByIdReq,
+)
+from chatkit.templates import WidgetTemplate
+from chatkit.turns import Turn
+from chatkit.widget_models import WidgetRoot
+from chatkit.widgets import Card, ListView, ListViewItem, Text
+from tests._types import RequestContext
+from tests.helpers.server import make_server
+
+
+def test_typed_builders_keep_nested_list_view_and_click_actions():
+    action = ActionConfig(type="line.select", payload={"value": "blue"})
+    named_row = ListViewItem(
+        id="blue_row", onClickAction=action, children=[Text(value="Blue line")]
+    )
+    assert named_row.onClickAction == action
+    card = Card(children=[ListView(id="nested_list", children=[named_row])]).build()
+
+    assert isinstance(card.children, list)
+    (child,) = card.children
+    assert child.type == "ListView"
+    assert child.id == "nested_list"
+    assert isinstance(child.children, list)
+    (row,) = child.children
+    assert row.type == "ListViewItem"
+    assert row.id == "blue_row"
+    assert row.model_dump()["onClickAction"] == action.model_dump()
+    assert row.model_dump()["children"] == [{"type": "Text", "value": "Blue line"}]
+    assert WidgetRoot.model_validate_json(card.model_dump_json()) == card
 
 
 @pytest.mark.parametrize(
-    "before, after, expected",
+    "border",
     [
-        (Card(children=[]), Card(children=[]), []),
-        (
-            Card(children=[Text(id="text", value="Hello", streaming=True)]),
-            Card(children=[Text(id="text", value="Hello, world!", streaming=True)]),
-            ["widget.streaming_text.value_delta"],
-        ),
-        (
-            Card(children=[Text(id="text", value="Hello", streaming=True)]),
-            Card(children=[Text(id="text", value="Hello, world!", streaming=False)]),
-            ["widget.root.updated"],
-        ),
-        (
-            Card(children=[Text(value="Hello")]),
-            Card(children=[Text(value="world!")]),
-            ["widget.root.updated"],
-        ),
-        # DynamicWidgetRoot tests
-        (
-            DynamicWidgetRoot(type="Card", children=[]),
-            DynamicWidgetRoot(type="Card", children=[]),
-            [],
-        ),
-        (
-            DynamicWidgetRoot(
-                type="Card",
-                children=[
-                    DynamicWidgetComponent.model_validate({
-                        "type": "Text",
-                        "id": "text",
-                        "value": "Hello",
-                        "streaming": True,
-                    })
-                ],
-            ),
-            DynamicWidgetRoot(
-                type="Card",
-                children=[
-                    DynamicWidgetComponent.model_validate({
-                        "type": "Text",
-                        "id": "text",
-                        "value": "Hello, world!",
-                        "streaming": True,
-                    })
-                ],
-            ),
-            ["widget.streaming_text.value_delta"],
-        ),
-        (
-            DynamicWidgetRoot(
-                type="Card",
-                children=[
-                    DynamicWidgetComponent.model_validate({
-                        "type": "Text",
-                        "id": "text",
-                        "value": "Hello",
-                        "streaming": True,
-                    })
-                ],
-            ),
-            DynamicWidgetRoot(
-                type="Card",
-                children=[
-                    DynamicWidgetComponent.model_validate({
-                        "type": "Text",
-                        "id": "text",
-                        "value": "Hello, world!",
-                        "streaming": False,
-                    })
-                ],
-            ),
-            ["widget.root.updated"],
-        ),
-        (
-            DynamicWidgetRoot(
-                type="Card",
-                children=[
-                    DynamicWidgetComponent.model_validate({
-                        "type": "Text",
-                        "value": "Hello",
-                    })
-                ],
-            ),
-            DynamicWidgetRoot(
-                type="Card",
-                children=[
-                    DynamicWidgetComponent.model_validate({
-                        "type": "Text",
-                        "value": "world!",
-                    })
-                ],
-            ),
-            ["widget.root.updated"],
-        ),
+        1.5,
+        {"size": 0.5, "color": {"light": "#ccc", "dark": "#333"}, "style": "dashed"},
+        {"top": 0.5, "bottom": {"size": 1.5, "color": "strong"}},
     ],
 )
-def test_diff(
-    before: WidgetRoot,
-    after: WidgetRoot,
-    expected: list[
-        Literal[
-            "widget.streaming_text.value_delta",
-            "widget.root.updated",
+async def test_widget_tree_survives_thread_reload(border):
+    payload = {
+        "type": "Card",
+        "border": border,
+        "extension": {"positions": ["start", None, "end"]},
+        "children": [
+            {
+                "type": "ListView",
+                "children": [
+                    {
+                        "type": "ListViewItem",
+                        "onClickAction": {
+                            "type": "line.select",
+                            "payload": {"selection": None},
+                        },
+                        "children": [
+                            {"type": "Text", "value": "Blue line", "futureProp": None}
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    template = WidgetTemplate({
+        "version": "1.0",
+        "name": "Bordered card",
+        "template": json.dumps(payload),
+    })
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        yield ThreadItemDoneEvent(
+            item=WidgetItem(
+                id="bordered-card",
+                thread_id=turn.thread.id,
+                created_at=datetime.now(),
+                widget=template.build(),
+            )
+        )
+
+    with make_server(respond) as server:
+        events = await server.process_streaming(
+            ThreadsCreateReq(
+                params=ThreadCreateParams(
+                    input=UserMessageInput(
+                        content=[UserMessageTextContent(text="Show a card")],
+                        attachments=[],
+                        inference_options=InferenceOptions(),
+                    )
+                )
+            )
+        )
+        thread_id = next(
+            event.thread.id for event in events if isinstance(event, ThreadCreatedEvent)
+        )
+        (streamed_item,) = [
+            event.item
+            for event in events
+            if isinstance(event, ThreadItemDoneEvent)
+            and isinstance(event.item, WidgetItem)
         ]
-    ],
-):
-    diff = diff_widget(before, after)
-    assert len(diff) == len(expected)
-    for i in range(len(diff)):
-        assert diff[i].type == expected[i]
+        thread = await server.process_non_streaming(
+            ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
+        )
+        assert isinstance(thread, Thread)
+
+    (stored_item,) = [
+        item for item in thread.items.data if isinstance(item, WidgetItem)
+    ]
+    for item in (streamed_item, stored_item):
+        assert type(item.widget) is WidgetRoot
+        assert item.widget.model_dump(mode="json") == payload
+        assert json.loads(item.model_dump_json(exclude_none=True))["widget"] == payload
 
 
 def test_json_dump_excludes_none_fields():
@@ -161,7 +160,7 @@ def test_json_dump_excludes_none_fields():
 def test_json_dump_excludes_none_fields_nested():
     widget = Card(children=[Text(value="Hello")])
     widget_item = WidgetItem(
-        thread_id="1", widget=widget, id="1", created_at=datetime.now()
+        thread_id="1", widget=widget.build(), id="1", created_at=datetime.now(UTC)
     )
 
     json_str = widget_item.model_dump_json()
@@ -187,102 +186,3 @@ def test_json_dump_excludes_none_fields_nested():
     assert "streaming" not in text_dump
     assert "color" not in text_dump
     assert "key" not in text_dump
-
-
-@pytest.mark.parametrize(
-    "widget_name, data",
-    [
-        ("list_view_no_data", None),
-        ("card_no_data", None),
-        (
-            "list_view_with_data",
-            {
-                "items": [
-                    {
-                        "id": "blue",
-                        "label": "Blue line",
-                        "color": "blue-500",
-                    },
-                    {
-                        "id": "orange",
-                        "label": "Orange line",
-                        "color": "orange-500",
-                    },
-                    {
-                        "id": "purple",
-                        "label": "Purple line",
-                        "color": "purple-500",
-                    },
-                ],
-            },
-        ),
-        (
-            "card_with_data",
-            {
-                "channel": "#proj-chatkit",
-                "time": "4:48 PM",
-                "user": {
-                    "image": "/pam.png",
-                    "name": "Pam Beesly",
-                },
-            },
-        ),
-    ],
-)
-def test_widget_template_from_file(
-    widget_name: str,
-    data: dict[str, Any] | None,
-):
-    template = WidgetTemplate.from_file(f"assets/widgets/{widget_name}.widget")
-
-    with open(f"tests/assets/widgets/{widget_name}.json", "r") as file:
-        expected_widget_dict = json.load(file)
-
-    widget = template.build(data)
-
-    assert isinstance(widget, DynamicWidgetRoot)
-    assert widget.model_dump(exclude_none=True) == expected_widget_dict
-
-
-def test_widget_template_build_with_basic_root():
-    template = WidgetTemplate.from_file("assets/widgets/basic_root.widget")
-
-    with open("tests/assets/widgets/basic_root.json", "r") as file:
-        expected_widget_dict = json.load(file)
-
-    widget = template.build(
-        {
-            "name": "Harry Potter",
-            "bio": "The boy who lived",
-        },
-    )
-
-    assert isinstance(widget, DynamicWidgetRoot)
-    assert widget.type == "Basic"
-    assert widget.model_dump(exclude_none=True) == expected_widget_dict
-
-    widget_item = WidgetItem(
-        thread_id="1", widget=widget, id="1", created_at=datetime.now()
-    )
-    assert widget_item.widget.type == "Basic"
-
-
-def test_widget_template_build_basic_is_deprecated():
-    template = WidgetTemplate.from_file("assets/widgets/basic_root.widget")
-
-    with open("tests/assets/widgets/basic_root.json", "r") as file:
-        expected_widget_dict = json.load(file)
-
-    with pytest.warns(
-        DeprecationWarning,
-        match="WidgetTemplate.build_basic is deprecated. Use WidgetTemplate.build instead.",
-    ):
-        widget = template.build_basic(
-            {
-                "name": "Harry Potter",
-                "bio": "The boy who lived",
-            },
-        )
-
-    assert isinstance(widget, BasicRoot)
-    assert widget.model_dump(exclude_none=True) == expected_widget_dict

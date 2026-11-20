@@ -6,7 +6,7 @@ At a high level:
 
 - `composer.tools` controls which tools appear in the composer tool menu (the plus button).
 - `composer.models` controls which models appear in the model picker in the composer below the text input.
-- The selected tool and model arrive as `inference_options` on the `UserMessageItem` in your `respond` method.
+- The selected tool and model arrive on the message in a `UserMessageTurn` or `RetryTurn`.
 
 ## Configure tools in the composer
 
@@ -47,15 +47,13 @@ const chatkit = useChatKit({
   composer: {
     models: [
       {
-        id: "gpt-4.1-mini",
-        label: "Fast",
-        description: "Answers right away",
+        id: "gpt-6-luna",
+        label: "GPT-6 Luna",
+        default: true,
       },
       {
-        id: "gpt-4.1",
-        label: "Quality",
-        description: "All rounder"
-        default: true,
+        id: "gpt-6-sol",
+        label: "GPT-6 Sol",
       },
     ],
   },
@@ -69,25 +67,39 @@ The selected model id flows through to your server so you can route requests to 
 On the server, `UserMessageItem.inference_options` carries the tool choice and model id for that turn.
 
 ```python
-from chatkit.types import InferenceOptions
+from collections.abc import AsyncIterator
+
+from chatkit.errors import CustomStreamError
+from chatkit.events import ThreadStreamEvent
+from chatkit.models import InferenceOptions
+from chatkit.server import ChatKitServer
+from chatkit.turns import RetryTurn, Turn, UserMessageTurn
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
     async def respond(
-        self,
-        thread: ThreadMetadata,
-        input_user_message: UserMessageItem | None,
-        context: RequestContext,
+        self, turn: Turn[RequestContext]
     ) -> AsyncIterator[ThreadStreamEvent]:
-        options = input_user_message and input_user_message.inference_options
+        options = InferenceOptions()
+        if isinstance(turn.input, (UserMessageTurn, RetryTurn)):
+            options = turn.input.message.inference_options
 
-        model = options.model if options and options.model else "gpt-4.1-mini"
-        tool_choice = options.tool_choice.id if options and options.tool_choice else None
+        model = options.model or "gpt-6-luna"
+        if model not in {"gpt-6-luna", "gpt-6-sol"}:
+            raise CustomStreamError("Select an available model.")
 
-        # Use `model` and `tool_choice` when building your model request...
+        tool_choice = options.tool_choice.id if options.tool_choice else None
+        if tool_choice not in {None, "summarize", "search_tickets"}:
+            raise CustomStreamError("Select an available tool.")
+
+        async for event in self.stream_inference(turn, model, tool_choice):
+            yield event
 ```
 
-If the user doesn’t pick anything explicit, `inference_options` may be `None` or have `model` / `tool_choice` unset; fall back to your defaults.
+Implement `stream_inference` using your app's inference pipeline and yield
+ChatKit events from it. The `InferenceOptions` object can leave `model` or
+`tool_choice` unset. Apply defaults and validate any client-supplied choice
+against the models and tools the authenticated user can use.
 
 ## Fork your inference pipeline based on user choices
 
@@ -115,8 +127,6 @@ You control which tools each agent exposes; the composer’s tool menu just lets
 Use the selected model id to pick an underlying model or configuration when you call the OpenAI Responses API (or another provider):
 
 ```python
-model = inference.model if inference and inference.model else "gpt-4.1-mini"
-
 response = await client.responses.create(
     model=model,
     input=...,

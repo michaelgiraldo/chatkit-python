@@ -1,261 +1,133 @@
 # Quick start
 
-To get a basic ChatKit app running—a React chat UI talking to a Python server—clone and run the starter app:
-
-
-```sh
-git clone https://github.com/openai/openai-chatkit-starter-app.git
-cd openai-chatkit-starter-app/chatkit
-npm install
-npm run dev
-```
-
-The sections below explain the core components and steps behind the starter app.
-
-## Render chat UI
-
-!!! note "Quick start uses React"
-    This section shows the React integration using `@openai/chatkit-react`.  
-    If you’re not using React, you can render ChatKit directly with vanilla JavaScript using `@openai/chatkit`. See the [ChatKit.js quick start](https://openai.github.io/chatkit-js/quickstart/) for details.
-
-Install the React bindings:
-
-```sh
-npm install @openai/chatkit-react
-```
-
-In your index.html, load ChatKit.js:
-
-```html
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <script src="https://cdn.platform.openai.com/deployments/chatkit/chatkit.js"></script>
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
-</html>
-```
-
-Wire up a minimal React app. Point `api.url` at your ChatKit server endpoint and pass the domain key you configured there.
-
-```tsx
-import {ChatKit, useChatKit} from "@openai/chatkit-react";
-
-export function App() {
-  const chatkit = useChatKit({
-    api: {
-      url: "http://localhost:8000/chatkit",
-      domainKey: "local-dev", // domain keys are optional in dev
-    },
-  });
-
-  return <ChatKit control={chatkit.control} />;
-}
-```
-
-The chat UI will render, but sending messages will fail until you start the server below and provide a store for threads and messages.
+Run the self-hosted ChatKit demo from this checkout. It uses sample replies and
+widgets and runs without an API key.
 
 ## Run your ChatKit server
 
-Install the ChatKit Python package and expose a single `/chatkit` endpoint that forwards requests to a `ChatKitServer` instance.
+Install `uv`, then run this command from the root of the checkout.
 
 ```sh
-pip install openai-chatkit
+make demo
 ```
 
-Create `main.py` with a minimal server that is hard-coded to always reply “Hello, world!”—you'll replace this with an actual call to a model in [Respond to a user message](guides/respond-to-user-message.md).
+Open [the demo on port 8000](http://127.0.0.1:8000/). The page loads the
+official ChatKit browser client from its CDN and sends requests to
+`/chatkit` on the same local server. To use a different port, run
+`make demo DEMO_PORT=8001` and open that port in the browser.
 
-```python
-# Other imports omitted for brevity; see the starter repo for a runnable file with all imports.
-from chatkit.server import ChatKitServer
+You can also start the demo with Python 3.14 and pip.
 
-app = FastAPI()
-
-
-class MyChatKitServer(ChatKitServer[dict]):
-    async def respond(
-        self,
-        thread: ThreadMetadata,
-        input_user_message: UserMessageItem | None,
-        context: dict,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        # Streams a fixed "Hello, world!" assistant message
-        yield ThreadItemDoneEvent(
-            item=AssistantMessageItem(
-                thread_id=thread.id,
-                id=self.store.generate_item_id("message", thread, context),
-                created_at=datetime.now(),
-                content=[AssistantMessageContent(text="Hello, world!")],
-            ),
-        )
-
-# Create your server by passing a store implementation.
-# MyChatKitStore is defined in the next section.
-server = MyChatKitServer(store=MyChatKitStore())
-
-
-@app.post("/chatkit")
-async def chatkit(request: Request):
-    result = await server.process(await request.body(), context={})
-    if isinstance(result, StreamingResult):
-        return StreamingResponse(result, media_type="text/event-stream")
-    return Response(content=result.json, media_type="application/json")
+```sh
+python -m pip install '.[fastapi]'
+python -m uvicorn docs.examples.quickstart:app --host 127.0.0.1 --port 8000
 ```
 
-All ChatKit requests go to this single endpoint. Set `api.url` on the React side to match (`/chatkit` here), and `ChatKitServer` routes each request internally.
+## Try the browser flow
 
+1. Send `hello`. The reply is **Hello, world!**
+2. Send `widget`, then click **Save demo state**. The card shows **Widget state saved.**
+3. Send `slow`. Wait for the first text to appear, then click **Stop response**
+   while the reply is still streaming.
+4. Reload the page and reopen the thread from **Conversation history**. The
+   saved widget and the partial reply are still there. Send another message to
+   verify that the thread accepts a follow-up.
+
+## How the demo works
+
+The [runnable backend](examples/quickstart.py) receives every ChatKit
+request at `/chatkit`. Its `ChatKitServer.respond(turn)` yields events for
+a `Turn` with the thread, trigger, and request context. The endpoint calls
+`chatkit.fastapi.process_request(server, request, context={})`. The adapter
+closes streams on disconnect and returns JSON errors for invalid requests,
+missing resources, and conflicting thread state.
+[FastAPI adapter reference](api/chatkit/fastapi.md)
 
 ## Store chat data
 
-ChatKit servers require a store to load and save threads, messages, and other items.
+The backend uses an [in-memory ThreadStore](examples/in_memory_thread_store.py)
+for threads and their items. Data lasts for the current process. For production,
+use a durable store that scopes each operation to the authenticated request
+context. Configure [attachment storage](guides/accept-rich-user-input.md#configure-an-upload-strategy)
+when your app supports files.
 
-For this quickstart, use a small in-memory store so conversations persist while the process is running, without introducing a database. This keeps the example minimal while still matching real ChatKit behavior.
+## Verify your backend
 
+With the demo server running, send a test message directly to the backend.
 
-```python
-from collections import defaultdict
-from chatkit.store import NotFoundError, Store
-from chatkit.types import Attachment, Page, ThreadItem, ThreadMetadata
-
-
-class MyChatKitStore(Store[dict]):
-    def __init__(self):
-        self.threads: dict[str, ThreadMetadata] = {}
-        self.items: dict[str, list[ThreadItem]] = defaultdict(list)
-
-    async def load_thread(self, thread_id: str, context: dict) -> ThreadMetadata:
-        if thread_id not in self.threads:
-            raise NotFoundError(f"Thread {thread_id} not found")
-        return self.threads[thread_id]
-
-    async def save_thread(self, thread: ThreadMetadata, context: dict) -> None:
-        self.threads[thread.id] = thread
-
-    async def load_threads(
-        self, limit: int, after: str | None, order: str, context: dict
-    ) -> Page[ThreadMetadata]:
-        threads = list(self.threads.values())
-        return self._paginate(
-            threads, after, limit, order, sort_key=lambda t: t.created_at, cursor_key=lambda t: t.id
-        )
-
-    async def load_thread_items(
-        self, thread_id: str, after: str | None, limit: int, order: str, context: dict
-    ) -> Page[ThreadItem]:
-        items = self.items.get(thread_id, [])
-        return self._paginate(
-            items, after, limit, order, sort_key=lambda i: i.created_at, cursor_key=lambda i: i.id
-        )
-
-    async def add_thread_item(
-        self, thread_id: str, item: ThreadItem, context: dict
-    ) -> None:
-        self.items[thread_id].append(item)
-
-    async def save_item(
-        self, thread_id: str, item: ThreadItem, context: dict
-    ) -> None:
-        items = self.items[thread_id]
-        for idx, existing in enumerate(items):
-            if existing.id == item.id:
-                items[idx] = item
-                return
-        items.append(item)
-
-    async def load_item(
-        self, thread_id: str, item_id: str, context: dict
-    ) -> ThreadItem:
-        for item in self.items.get(thread_id, []):
-            if item.id == item_id:
-                return item
-        raise NotFoundError(f"Item {item_id} not found in thread {thread_id}")
-
-    async def delete_thread(self, thread_id: str, context: dict) -> None:
-        self.threads.pop(thread_id, None)
-        self.items.pop(thread_id, None)
-
-    async def delete_thread_item(
-        self, thread_id: str, item_id: str, context: dict
-    ) -> None:
-        self.items[thread_id] = [
-            item for item in self.items.get(thread_id, []) if item.id != item_id
-        ]
-
-    def _paginate(self, rows: list, after: str | None, limit: int, order: str, sort_key, cursor_key):
-        sorted_rows = sorted(rows, key=sort_key, reverse=order == "desc")
-        start = 0
-        if after:
-            for idx, row in enumerate(sorted_rows):
-                if cursor_key(row) == after:
-                    start = idx + 1
-                    break
-        data = sorted_rows[start : start + limit]
-        has_more = start + limit < len(sorted_rows)
-        next_after = cursor_key(data[-1]) if has_more and data else None
-        return Page(data=data, has_more=has_more, after=next_after)
-
-    # Attachments are intentionally not implemented for the quickstart
-
-    async def save_attachment(
-        self, attachment: Attachment, context: dict
-    ) -> None:
-        raise NotImplementedError()
-
-    async def load_attachment(
-        self, attachment_id: str, context: dict
-    ) -> Attachment:
-        raise NotImplementedError()
-
-    async def delete_attachment(self, attachment_id: str, context: dict) -> None:
-        raise NotImplementedError()
-
+```sh
+curl --no-buffer --fail-with-body http://127.0.0.1:8000/chatkit \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "type": "threads.create",
+    "params": {
+      "input": {
+        "content": [{"type": "input_text", "text": "Hi there!"}],
+        "attachments": [],
+        "inference_options": {}
+      }
+    }
+  }'
 ```
 
-This store implements only the methods required for basic chat while the server is running; persistence across restarts and attachments are intentionally omitted.
-
-For production, replace this with a database-backed store (for example, Postgres or MySQL) so threads and items persist across restarts.
-
+Look for a `thread.item.done` event with `item.type` set to `assistant_message`
+and the text `Hello, world!`. The hardcoded responder runs without an API key.
 
 ## Generate model responses
 
-Replace the hardcoded "Hello, World!" reply from [Run your ChatKit server](#run-your-chatkit-server) with an Agents SDK call to generate real responses. Set `OPENAI_API_KEY` in your environment before running.
+Install the Agents extra alongside FastAPI to use the model integration.
 
-Use ChatKit's Agents SDK helpers to simplify request conversion and streaming. The `simple_to_agent_input` helper translates ChatKit thread items to agent input items, and `stream_agent_response` turns the streamed run into ChatKit events:
+```sh
+python -m pip install '.[fastapi,agents]'
+```
 
+For a text-only model-backed demo, replace the example's `respond` method
+with the implementation below. Set `OPENAI_API_KEY` in your environment and
+choose a model your project can use.
 
 ```python
+from collections.abc import AsyncIterator
+from contextlib import aclosing
+
 from agents import Agent, Runner
-from chatkit.agents import AgentContext, simple_to_agent_input, stream_agent_response
+
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import AgentContext, stream_agent_response
+from chatkit.events import ThreadStreamEvent
+from chatkit.server import ChatKitServer
+from chatkit.turns import Turn
 
 assistant = Agent(
     name="assistant",
     instructions="You are a helpful assistant.",
-    model="gpt-4.1-mini",
+    model="gpt-6-luna",
 )
 
-class MyChatKitServer(ChatKitServer[dict]):
+
+class MyChatKitServer(ChatKitServer[dict[str, object]]):
     async def respond(
-        self,
-        thread: ThreadMetadata,
-        input_user_message: UserMessageItem | None,
-        context: dict,
+        self, turn: Turn[dict[str, object]]
     ) -> AsyncIterator[ThreadStreamEvent]:
-        # Convert recent thread items (which includes the user message) to model input
+        # Read the newest page and pass it to the model in chronological order.
         items_page = await self.store.load_thread_items(
-            thread.id,
+            turn.thread.id,
             after=None,
             limit=20,
-            order="asc",
-            context=context,
+            order="desc",
+            context=turn.context,
         )
-        input_items = await simple_to_agent_input(items_page.data)
+        input_items = await simple_to_agent_input(list(reversed(items_page.data)))
 
-        # Stream the run through ChatKit events
-        agent_context = AgentContext(thread=thread, store=self.store, request_context=context)
+        agent_context = AgentContext(
+            thread=turn.thread, store=self.store, request_context=turn.context
+        )
         result = Runner.run_streamed(assistant, input_items, context=agent_context)
-        async for event in stream_agent_response(agent_context, result):
-            yield event
+        async with aclosing(stream_agent_response(agent_context, result)) as events:
+            async for event in events:
+                yield event
 ```
+
+The `simple_to_agent_input` helper converts the stored items into model input.
+The stream helper converts agent events into ChatKit events and closes the run
+when the client stops the response. See [Respond to a user message](guides/respond-to-user-message.md)
+for persistent model state and tool continuations.

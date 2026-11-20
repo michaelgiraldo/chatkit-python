@@ -28,13 +28,12 @@ chatkit*.db
 
 uploads/
 
-# MkDocs build output
+# Documentation build output
 site/
 
 # Editors & OS
 .DS_Store
 .idea/
 .vscode/
-.python-version
 .cache/
 .ipynb_checkpoints/

@@ -1,71 +1,77 @@
 import asyncio
 import base64
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
-from contextlib import contextmanager
-from datetime import datetime
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from typing import (
     Any,
-    AsyncGenerator,
-    AsyncIterable,
-    Callable,
-    Generic,
+    assert_never,
 )
 
-import agents
-from agents.models.chatcmpl_helpers import (
-    HEADERS_OVERRIDE as chat_completions_headers_override,
-)
-from agents.models.openai_responses import (
-    _HEADERS_OVERRIDE as responses_headers_override,
-)
-from pydantic import BaseModel, TypeAdapter
-from typing_extensions import TypeVar, assert_never
+from pydantic import BaseModel
 
-from chatkit.errors import CustomStreamError, StreamError
+from chatkit.errors import (
+    CustomStreamError,
+    ErrorCode,
+    InvalidOperationError,
+    StreamError,
+    UnsupportedOperationError,
+)
 
-from .logger import logger
-from .store import AttachmentStore, Store, StoreItemType, default_generate_id
-from .types import (
-    Action,
-    AssistantMessageContent,
+from ._stream import _close_stream, _closing_stream
+from .actions import Action
+from .events import (
     AssistantMessageContentPartAdded,
     AssistantMessageContentPartAnnotationAdded,
     AssistantMessageContentPartDone,
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
-    AttachmentsCreateReq,
-    AttachmentsDeleteReq,
-    AudioInput,
-    ChatKitReq,
-    ClientToolCallItem,
-    ErrorCode,
     ErrorEvent,
-    FeedbackKind,
-    HiddenContextItem,
-    InputTranscribeReq,
-    ItemsFeedbackReq,
-    ItemsListReq,
-    NonStreamingReq,
-    Page,
-    SDKHiddenContextItem,
-    StreamingReq,
     StreamOptions,
     StreamOptionsEvent,
-    StructuredInputAnswer,
-    StructuredInputItem,
-    StructuredInputMultipleChoice,
-    StructuredInputSubmission,
     SyncCustomActionResponse,
-    Thread,
     ThreadCreatedEvent,
-    ThreadItem,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemRemovedEvent,
     ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
+    ThreadStreamEvent,
+    ThreadUpdatedEvent,
+    WorkflowTaskAdded,
+    WorkflowTaskUpdated,
+)
+from .logger import logger
+from .models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
+    Attachment,
+    AudioInput,
+    ClientToolCallItem,
+    FeedbackKind,
+    Page,
+    SDKHiddenContextItem,
+    StructuredInputAnswer,
+    StructuredInputItem,
+    StructuredInputMultipleChoice,
+    Thread,
+    ThreadItem,
     ThreadMetadata,
+    TranscriptionResult,
+    UserMessageInput,
+    UserMessageItem,
+    WidgetItem,
+    WorkflowItem,
+)
+from .requests import (
+    AttachmentsCreateReq,
+    AttachmentsDeleteReq,
+    ChatKitReq,
+    InputTranscribeReq,
+    ItemsFeedbackReq,
+    ItemsListReq,
+    NonStreamingReq,
+    StreamingReq,
+    StructuredInputSubmission,
     ThreadsAddClientToolOutputReq,
     ThreadsAddStructuredInputReq,
     ThreadsAddUserMessageReq,
@@ -76,249 +82,131 @@ from .types import (
     ThreadsListReq,
     ThreadsRetryAfterItemReq,
     ThreadsSyncCustomActionReq,
-    ThreadStreamEvent,
     ThreadsUpdateReq,
-    ThreadUpdatedEvent,
-    TranscriptionResult,
-    UserMessageInput,
-    UserMessageItem,
-    WidgetComponentUpdated,
-    WidgetItem,
-    WidgetRootUpdated,
-    WidgetStreamingTextValueDelta,
-    WorkflowItem,
-    WorkflowTaskAdded,
-    WorkflowTaskUpdated,
     is_streaming_req,
 )
-from .version import __version__
-from .widgets import WidgetComponent, WidgetComponentBase, WidgetRoot
+from .store import (
+    HIDDEN_ITEM_TYPES,
+    AttachmentMetadataStore,
+    AttachmentStore,
+    ConflictError,
+    ThreadPatch,
+    ThreadStore,
+)
+from .turns import (
+    ClientToolTurn,
+    RetryTurn,
+    StructuredInputTurn,
+    Turn,
+    TurnOutcome,
+    UserMessageTurn,
+)
 
 DEFAULT_PAGE_SIZE = 20
-DEFAULT_ERROR_MESSAGE = "An error occurred when generating a response."
 
 
-def diff_widget(
-    before: WidgetRoot, after: WidgetRoot
-) -> list[WidgetStreamingTextValueDelta | WidgetRootUpdated | WidgetComponentUpdated]:
-    """
-    Compare two WidgetRoots and return a list of deltas.
-    """
-
-    def is_streaming_text(component: WidgetComponentBase) -> bool:
-        return getattr(component, "type", None) in {"Markdown", "Text"} and isinstance(
-            getattr(component, "value", None), str
-        )
-
-    def full_replace(before: WidgetComponentBase, after: WidgetComponentBase) -> bool:
-        if (
-            before.type != after.type
-            or before.id != after.id
-            or before.key != after.key
-        ):
-            return True
-
-        def full_replace_value(before_value: Any, after_value: Any) -> bool:
-            if isinstance(before_value, list) and isinstance(after_value, list):
-                if len(before_value) != len(after_value):
-                    return True
-                for nth_before_value, nth_after_value in zip(before_value, after_value):
-                    if full_replace_value(nth_before_value, nth_after_value):
-                        return True
-            elif before_value != after_value:
-                if isinstance(before_value, WidgetComponentBase) and isinstance(
-                    after_value, WidgetComponentBase
-                ):
-                    return full_replace(before_value, after_value)
-                else:
-                    return True
-            return False
-
-        for field in before.model_fields_set.union(after.model_fields_set):
-            if (
-                is_streaming_text(before)
-                and is_streaming_text(after)
-                and field == "value"
-                and getattr(after, "value", "").startswith(getattr(before, "value", ""))
-            ):
-                # Appends to the value prop of Markdown or Text do not trigger a full replace
-                continue
-            if full_replace_value(getattr(before, field), getattr(after, field)):
-                return True
-
-        return False
-
-    if full_replace(before, after):
-        return [WidgetRootUpdated(widget=after)]
-
-    deltas: list[
-        WidgetStreamingTextValueDelta | WidgetComponentUpdated | WidgetRootUpdated
-    ] = []
-
-    def find_all_streaming_text_components(
-        component: WidgetComponent | WidgetRoot,
-    ) -> dict[str, WidgetComponentBase]:
-        components = {}
-
-        def recurse(component: WidgetComponent | WidgetRoot):
-            if is_streaming_text(component) and component.id:
-                components[component.id] = component
-
-            if hasattr(component, "children"):
-                children = getattr(component, "children", None) or []
-                for child in children:
-                    recurse(child)
-
-        recurse(component)
-        return components
-
-    before_nodes = find_all_streaming_text_components(before)
-    after_nodes = find_all_streaming_text_components(after)
-
-    for id, after_node in after_nodes.items():
-        before_node = before_nodes.get(id)
-        if before_node is None:
-            raise ValueError(
-                f"Node {id} was not present when the widget was initially rendered. All nodes with ID must persist across all widget updates."
-            )
-
-        before_value = str(getattr(before_node, "value", None))
-        after_value = str(getattr(after_node, "value", None))
-
-        if before_value != after_value:
-            if not after_value.startswith(before_value):
-                raise ValueError(
-                    f"Node {id} was updated with a new value that is not a prefix of the initial value. All widget updates must be cumulative."
-                )
-            done = not getattr(after_node, "streaming", False)
-            deltas.append(
-                WidgetStreamingTextValueDelta(
-                    component_id=id,
-                    delta=after_value[len(before_value) :],
-                    done=done,
-                )
-            )
-
-    return deltas
+def _stream_error_event(error: CustomStreamError | StreamError) -> ErrorEvent:
+    if isinstance(error, CustomStreamError):
+        return ErrorEvent(message=error.message, allow_retry=error.allow_retry)
+    return ErrorEvent(code=error.code, allow_retry=error.allow_retry)
 
 
-async def stream_widget(
-    thread: ThreadMetadata,
-    widget: WidgetRoot | AsyncGenerator[WidgetRoot, None],
-    copy_text: str | None = None,
-    generate_id: Callable[[StoreItemType], str] = default_generate_id,
-) -> AsyncIterator[ThreadStreamEvent]:
-    """Stream a widget root (or async sequence of roots) as ThreadStreamEvents."""
-    item_id = generate_id("message")
+class StreamingResult(AsyncIterator[ThreadStreamEvent]):
+    """A single-owner event stream. Close it when consumption ends early."""
 
-    if not isinstance(widget, AsyncGenerator):
-        yield ThreadItemDoneEvent(
-            item=WidgetItem(
-                id=item_id,
-                thread_id=thread.id,
-                created_at=datetime.now(),
-                widget=widget,
-                copy_text=copy_text,
-            ),
-        )
-        return
+    def __init__(self, stream: AsyncIterator[ThreadStreamEvent]):
+        self._stream = stream
 
-    initial_state = await widget.__anext__()
+    async def __anext__(self) -> ThreadStreamEvent:
+        return await anext(self._stream)
 
-    item = WidgetItem(
-        id=item_id,
-        created_at=datetime.now(),
-        widget=initial_state,
-        copy_text=copy_text,
-        thread_id=thread.id,
-    )
-
-    yield ThreadItemAddedEvent(item=item)
-
-    last_state = initial_state
-
-    while widget:
-        try:
-            new_state = await widget.__anext__()
-            for update in diff_widget(last_state, new_state):
-                yield ThreadItemUpdatedEvent(
-                    item_id=item_id,
-                    update=update,
-                )
-            last_state = new_state
-        except StopAsyncIteration:
-            break
-
-    yield ThreadItemDoneEvent(
-        item=item.model_copy(update={"widget": last_state}),
-    )
+    async def aclose(self) -> None:
+        """Close the stream and run its cleanup."""
+        await _close_stream(self._stream)
 
 
-@contextmanager
-def agents_sdk_user_agent_override():
-    ua = f"Agents/Python {agents.__version__} ChatKit/Python {__version__}"
-    chat_completions_token = chat_completions_headers_override.set({"User-Agent": ua})
-    responses_token = responses_headers_override.set({"User-Agent": ua})
-
-    yield
-
-    chat_completions_headers_override.reset(chat_completions_token)
-    responses_headers_override.reset(responses_token)
+class EmptyResult(BaseModel):
+    """An acknowledgement without response fields."""
 
 
-class StreamingResult(AsyncIterable[bytes]):
-    def __init__(self, stream: AsyncGenerator[bytes, None]):
-        self.json_events = stream
-
-    async def __aiter__(self):
-        async for event in self.json_events:
-            yield event
-
-
-class NonStreamingResult:
-    def __init__(self, result: bytes):
-        self.json = result
+type ImmediateResult = (
+    Thread
+    | Page[Thread]
+    | Page[ThreadItem]
+    | Attachment
+    | TranscriptionResult
+    | SyncCustomActionResponse
+    | EmptyResult
+)
 
 
-TContext = TypeVar("TContext", default=Any)
-
-
-class ChatKitServer(ABC, Generic[TContext]):
+class ChatKitServer[TContext = Any](ABC):
     def __init__(
         self,
-        store: Store[TContext],
+        store: ThreadStore[TContext],
         attachment_store: AttachmentStore[TContext] | None = None,
+        *,
+        attachment_metadata_store: AttachmentMetadataStore[TContext] | None = None,
     ):
-        """Create a ChatKitServer with the backing Store and optional AttachmentStore."""
+        """Configure thread persistence and optional attachment capabilities."""
         self.store = store
         self.attachment_store = attachment_store
+        self.attachment_metadata_store = attachment_metadata_store
 
     def _get_attachment_store(self) -> AttachmentStore[TContext]:
         """Return the configured AttachmentStore or raise if missing."""
         if self.attachment_store is None:
-            raise RuntimeError(
-                "AttachmentStore is not configured. Provide a AttachmentStore to ChatKitServer to handle file operations."
+            raise UnsupportedOperationError(
+                "AttachmentStore is not configured. Provide an AttachmentStore to ChatKitServer to handle file operations."
             )
         return self.attachment_store
 
+    def _get_attachment_metadata_store(self) -> AttachmentMetadataStore[TContext]:
+        if self.attachment_metadata_store is None:
+            raise UnsupportedOperationError(
+                "AttachmentMetadataStore is not configured. Pass "
+                "attachment_metadata_store to ChatKitServer to use attachments."
+            )
+        return self.attachment_metadata_store
+
     @abstractmethod
-    def respond(
-        self,
-        thread: ThreadMetadata,
-        input_user_message: UserMessageItem | None,
-        context: TContext,
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        """Stream `ThreadStreamEvent` instances for a new user message.
+    def respond(self, turn: Turn[TContext]) -> AsyncIterator[ThreadStreamEvent]:
+        """Stream events for a new message, a resumed turn, or a retry."""
+        pass
 
-        Args:
-            thread: Metadata for the thread being processed.
-            input_user_message: The incoming message the server should respond to, if any.
-            context: Arbitrary per-request context provided by the caller.
+    async def prepare_user_message(
+        self, thread: ThreadMetadata, item: UserMessageItem, context: TContext
+    ) -> UserMessageItem:
+        """Validate or enrich a new user message before the server saves it.
 
-        Returns:
-            An async iterator that yields events representing the server's response.
+        The thread snapshot and resolved attachments are available. For a new
+        thread, the snapshot has an ID and has yet to be saved. Return the item
+        with its original ID, thread ID, and creation time.
+
+        Raise `InvalidOperationError` for a request error (HTTP 422 with the
+        FastAPI adapter), or `CustomStreamError` for a user-facing error event.
+        A rejected message produces no thread, attachment, or message writes.
+        Retries and continuations use their stored inputs.
+        """
+        return item
+
+    async def on_turn_finished(  # noqa: B027
+        self, turn: Turn[TContext], outcome: TurnOutcome
+    ) -> None:
+        """Observe a turn's terminal outcome after server persistence or cleanup.
+
+        A waiting turn has emitted a persisted pending tool call or structured input.
+        Completion describes server processing, not delivery to a browser. Exceptions
+        raised by this hook are logged.
         """
         pass
+
+    async def update_thread(
+        self, thread_id: str, patch: ThreadPatch, context: TContext
+    ) -> ThreadUpdatedEvent:
+        """Apply a patch and return an event that a responder can yield to the client."""
+        updated = await self.store.patch_thread(thread_id, patch, context)
+        return ThreadUpdatedEvent(thread=self._to_thread_response(updated))
 
     async def add_feedback(  # noqa: B027
         self,
@@ -359,7 +247,7 @@ class ChatKitServer(ABC, Generic[TContext]):
         """Handle a widget or client-dispatched action and yield response events."""
         raise NotImplementedError(
             "The action() method must be overridden to react to actions. "
-            "See https://github.com/openai/chatkit-python/blob/main/docs/widgets.md#widget-actions"
+            "See https://michaelgiraldo.github.io/chatkit-python/guides/build-interactive-responses-with-widgets/#handle-widget-actions"
         )
 
     async def sync_action(
@@ -372,7 +260,7 @@ class ChatKitServer(ABC, Generic[TContext]):
         """Handle a widget or client-dispatched action and return a SyncCustomActionResponse."""
         raise NotImplementedError(
             "The sync_action() method must be overridden to react to sync actions. "
-            "See https://github.com/openai/chatkit-python/blob/main/docs/widgets.md#widget-actions"
+            "See https://michaelgiraldo.github.io/chatkit-python/guides/build-interactive-responses-with-widgets/#handle-widget-actions"
         )
 
     def get_stream_options(
@@ -418,7 +306,7 @@ class ChatKitServer(ABC, Generic[TContext]):
             thread.id,
             SDKHiddenContextItem(
                 thread_id=thread.id,
-                created_at=datetime.now(),
+                created_at=datetime.now(UTC),
                 id=self.store.generate_item_id("sdk_hidden_context", thread, context),
                 content="The user cancelled the stream. Stop responding to the prior request.",
             ),
@@ -426,28 +314,32 @@ class ChatKitServer(ABC, Generic[TContext]):
         )
 
     async def process(
-        self, request: str | bytes | bytearray, context: TContext
-    ) -> StreamingResult | NonStreamingResult:
-        """Parse an incoming ChatKit request and route it to streaming or non-streaming handlers."""
-        parsed_request = TypeAdapter[ChatKitReq](ChatKitReq).validate_json(request)
-        logger.info(f"Received request op: {parsed_request.type}")
+        self, request: ChatKitReq, context: TContext
+    ) -> StreamingResult | ImmediateResult:
+        """Process a validated request. Resolve streaming inputs before returning."""
+        logger.info("Received request op: %s", request.type)
+        if not is_streaming_req(request):
+            return await self._process_non_streaming(request, context)
+        try:
+            events = await self._prepare_streaming(request, context)
+        except (CustomStreamError, StreamError) as error:
+            event = _stream_error_event(error)
 
-        if is_streaming_req(parsed_request):
-            return StreamingResult(self._process_streaming(parsed_request, context))
-        else:
-            return NonStreamingResult(
-                await self._process_non_streaming(parsed_request, context)
-            )
+            async def rejection() -> AsyncIterator[ThreadStreamEvent]:
+                yield event
+
+            events = rejection()
+        return StreamingResult(events)
 
     async def _process_non_streaming(
         self, request: NonStreamingReq, context: TContext
-    ) -> bytes:
+    ) -> ImmediateResult:
         match request:
             case ThreadsGetByIdReq():
                 thread = await self._load_full_thread(
                     request.params.thread_id, context=context
                 )
-                return self._serialize(self._to_thread_response(thread))
+                return self._to_thread_response(thread)
             case ThreadsListReq():
                 params = request.params
                 threads = await self.store.load_threads(
@@ -456,14 +348,10 @@ class ChatKitServer(ABC, Generic[TContext]):
                     order=params.order,
                     context=context,
                 )
-                return self._serialize(
-                    Page(
-                        has_more=threads.has_more,
-                        after=threads.after,
-                        data=[
-                            self._to_thread_response(thread) for thread in threads.data
-                        ],
-                    )
+                return Page(
+                    has_more=threads.has_more,
+                    after=threads.after,
+                    data=[self._to_thread_response(thread) for thread in threads.data],
                 )
             case ItemsFeedbackReq():
                 await self.add_feedback(
@@ -472,101 +360,80 @@ class ChatKitServer(ABC, Generic[TContext]):
                     request.params.kind,
                     context,
                 )
-                return b"{}"
+                return EmptyResult()
             case AttachmentsCreateReq():
                 attachment_store = self._get_attachment_store()
+                metadata_store = self._get_attachment_metadata_store()
                 attachment = await attachment_store.create_attachment(
                     request.params, context
                 )
-                await self.store.save_attachment(attachment, context=context)
-                return self._serialize(attachment)
+                await metadata_store.save_attachment(attachment, context=context)
+                return attachment
             case AttachmentsDeleteReq():
                 attachment_store = self._get_attachment_store()
+                metadata_store = self._get_attachment_metadata_store()
                 await attachment_store.delete_attachment(
                     request.params.attachment_id, context=context
                 )
-                await self.store.delete_attachment(
+                await metadata_store.delete_attachment(
                     request.params.attachment_id, context=context
                 )
-                return b"{}"
+                return EmptyResult()
             case InputTranscribeReq():
-                audio_bytes = base64.b64decode(request.params.audio_base64)
-                transcription_result = await self.transcribe(
+                if type(self).transcribe is ChatKitServer.transcribe:
+                    raise UnsupportedOperationError("Transcription is unavailable.")
+                try:
+                    audio_bytes = base64.b64decode(
+                        request.params.audio_base64, validate=True
+                    )
+                except ValueError as error:
+                    raise InvalidOperationError(
+                        "Audio must be Base64 encoded."
+                    ) from error
+                return await self.transcribe(
                     AudioInput(data=audio_bytes, mime_type=request.params.mime_type),
                     context=context,
                 )
-                return self._serialize(transcription_result)
             case ItemsListReq():
                 items_list_params = request.params
-                items = await self.store.load_thread_items(
+                return await self.store.load_thread_items(
                     items_list_params.thread_id,
                     limit=items_list_params.limit or DEFAULT_PAGE_SIZE,
                     order=items_list_params.order,
                     after=items_list_params.after,
                     context=context,
+                    include_hidden=False,
                 )
-                # filter out hidden context items
-                items.data = [
-                    item
-                    for item in items.data
-                    if not isinstance(item, (HiddenContextItem, SDKHiddenContextItem))
-                ]
-                return self._serialize(items)
             case ThreadsUpdateReq():
-                thread = await self.store.load_thread(
-                    request.params.thread_id, context=context
+                updated = await self.update_thread(
+                    request.params.thread_id, {"title": request.params.title}, context
                 )
-                thread.title = request.params.title
-                await self.store.save_thread(thread, context=context)
-                return self._serialize(self._to_thread_response(thread))
+                return updated.thread
             case ThreadsDeleteReq():
                 await self.store.delete_thread(
                     request.params.thread_id, context=context
                 )
-                return b"{}"
+                return EmptyResult()
             case ThreadsSyncCustomActionReq():
                 return await self._process_sync_custom_action(request, context)
             case _:
                 assert_never(request)
 
-    async def _process_streaming(
+    async def _prepare_streaming(
         self, request: StreamingReq, context: TContext
-    ) -> AsyncGenerator[bytes, None]:
-        try:
-            async for event in self._process_streaming_impl(request, context):
-                b = self._serialize(event)
-                yield b"data: " + b + b"\n\n"
-        except asyncio.CancelledError:
-            # Let cancellation bubble up without logging as an error.
-            raise
-        except Exception:
-            logger.exception("Error while generating streamed response")
-            raise
-
-    async def _process_streaming_impl(
-        self, request: StreamingReq, context: TContext
-    ) -> AsyncGenerator[ThreadStreamEvent, None]:
+    ) -> AsyncIterator[ThreadStreamEvent]:
         match request:
             case ThreadsCreateReq():
-                thread = Thread(
+                thread = ThreadMetadata(
                     id=self.store.generate_thread_id(context),
-                    created_at=datetime.now(),
-                    items=Page(),
+                    created_at=datetime.now(UTC),
                 )
-                await self.store.save_thread(
-                    ThreadMetadata(**thread.model_dump()),
-                    context=context,
-                )
-                yield ThreadCreatedEvent(thread=self._to_thread_response(thread))
                 user_message = await self._build_user_message_item(
                     request.params.input, thread, context
                 )
-                async for event in self._process_new_thread_item_respond(
-                    thread,
-                    user_message,
-                    context,
-                ):
-                    yield event
+                return self._process_new_thread_item_respond(
+                    thread, user_message, context, create_thread=True
+                )
 
             case ThreadsAddUserMessageReq():
                 thread = await self.store.load_thread(
@@ -575,12 +442,11 @@ class ChatKitServer(ABC, Generic[TContext]):
                 user_message = await self._build_user_message_item(
                     request.params.input, thread, context
                 )
-                async for event in self._process_new_thread_item_respond(
+                return self._process_new_thread_item_respond(
                     thread,
                     user_message,
                     context,
-                ):
-                    yield event
+                )
 
             case ThreadsAddClientToolOutputReq():
                 thread = await self.store.load_thread(
@@ -599,27 +465,20 @@ class ChatKitServer(ABC, Generic[TContext]):
                     None,
                 )
                 if not tool_call:
-                    raise ValueError(
-                        f"Last thread item in {thread.id} was not a ClientToolCallItem"
+                    raise InvalidOperationError(
+                        "The thread is not waiting for a client tool result."
                     )
 
-                tool_call.output = request.params.result
-                tool_call.status = "completed"
+                completed = tool_call.model_copy(
+                    update={"output": request.params.result, "status": "completed"}
+                )
+                await self.store.claim_pending_item(
+                    thread.id, tool_call, completed, context
+                )
 
-                await self.store.save_item(thread.id, tool_call, context=context)
-
-                # Safety against dangling pending tool calls if there are
-                # multiple in a row, which should be impossible, and
-                # integrations should ultimately filter out pending tool calls
-                # when creating input response messages.
-                await self._cleanup_pending_client_tool_call(thread, context)
-
-                async for event in self._process_events(
-                    thread,
-                    context,
-                    lambda: self.respond(thread, None, context),
-                ):
-                    yield event
+                return self._process_turn(
+                    Turn(thread, ClientToolTurn(completed), context)
+                )
 
             case ThreadsAddStructuredInputReq():
                 thread = await self.store.load_thread(
@@ -631,68 +490,39 @@ class ChatKitServer(ABC, Generic[TContext]):
                     context=context,
                 )
                 if not isinstance(item, StructuredInputItem):
-                    raise ValueError(
-                        f"Item {request.params.item_id} is not a StructuredInputItem"
+                    raise InvalidOperationError(
+                        "The requested item does not accept structured input."
                     )
 
-                updated_item = await self._apply_structured_input_submission(
+                updated_item = self._apply_structured_input_submission(
                     item,
                     request.params.input,
                 )
+                await self.store.claim_pending_item(
+                    thread.id, item, updated_item, context
+                )
 
-                async def stream_structured_input_response() -> AsyncIterator[
-                    ThreadStreamEvent
-                ]:
-                    # Keep this replacement inside _process_events so it is persisted
-                    # through the same event pipeline as other thread item replacements.
-                    yield ThreadItemReplacedEvent(item=updated_item)
-                    async for event in self.respond(thread, None, context):
-                        yield event
-
-                async for event in self._process_events(
-                    thread,
-                    context,
-                    stream_structured_input_response,
-                ):
-                    yield event
+                return self._process_turn(
+                    Turn(thread, StructuredInputTurn(updated_item), context)
+                )
 
             case ThreadsRetryAfterItemReq():
                 thread_metadata = await self.store.load_thread(
                     request.params.thread_id, context=context
                 )
 
-                # Collect items to remove (all items after the user message)
-                items_to_remove: list[ThreadItem] = []
-                user_message_item = None
+                user_message_item = await self.store.truncate_after(
+                    thread_metadata.id, request.params.item_id, context
+                )
+                return self._process_turn(
+                    Turn(thread_metadata, RetryTurn(user_message_item), context)
+                )
 
-                async for item in self._paginate_thread_items_reverse(
-                    request.params.thread_id, context
-                ):
-                    if item.id == request.params.item_id:
-                        if not isinstance(item, UserMessageItem):
-                            raise ValueError(
-                                f"Item {request.params.item_id} is not a user message"
-                            )
-                        user_message_item = item
-                        break
-                    items_to_remove.append(item)
-
-                if user_message_item:
-                    for item in items_to_remove:
-                        await self.store.delete_thread_item(
-                            request.params.thread_id, item.id, context=context
-                        )
-                    async for event in self._process_events(
-                        thread_metadata,
-                        context,
-                        lambda: self.respond(
-                            thread_metadata,
-                            user_message_item,
-                            context,
-                        ),
-                    ):
-                        yield event
             case ThreadsCustomActionReq():
+                if type(self).action is ChatKitServer.action:
+                    raise UnsupportedOperationError(
+                        "Streaming actions are unavailable."
+                    )
                 thread_metadata = await self.store.load_thread(
                     request.params.thread_id, context=context
                 )
@@ -706,14 +536,11 @@ class ChatKitServer(ABC, Generic[TContext]):
                     )
 
                 if item and not isinstance(item, WidgetItem):
-                    # shouldn't happen if the caller is using the API correctly.
-                    yield ErrorEvent(
-                        code=ErrorCode.STREAM_ERROR,
-                        allow_retry=False,
+                    raise InvalidOperationError(
+                        "A custom action needs a widget sender."
                     )
-                    return
 
-                async for event in self._process_events(
+                return self._process_events(
                     thread_metadata,
                     context,
                     lambda: self.action(
@@ -722,15 +549,16 @@ class ChatKitServer(ABC, Generic[TContext]):
                         item,
                         context,
                     ),
-                ):
-                    yield event
+                )
 
             case _:
                 assert_never(request)
 
     async def _process_sync_custom_action(
         self, request: ThreadsSyncCustomActionReq, context: TContext
-    ) -> bytes:
+    ) -> SyncCustomActionResponse:
+        if type(self).sync_action is ChatKitServer.sync_action:
+            raise UnsupportedOperationError("Synchronous actions are unavailable.")
         thread_metadata = await self.store.load_thread(
             request.params.thread_id, context=context
         )
@@ -744,29 +572,24 @@ class ChatKitServer(ABC, Generic[TContext]):
             )
 
         if item and not isinstance(item, WidgetItem):
-            raise ValueError("threads.sync_custom_action requires a widget sender item")
-
-        return self._serialize(
-            await self.sync_action(
-                thread_metadata,
-                request.params.action,
-                item,
-                context,
-            )
+            raise InvalidOperationError("A custom action needs a widget sender.")
+        return await self.sync_action(
+            thread_metadata,
+            request.params.action,
+            item,
+            context,
         )
 
-    async def _apply_structured_input_submission(
+    def _apply_structured_input_submission(
         self,
         item: StructuredInputItem,
         submission: StructuredInputSubmission,
     ) -> StructuredInputItem:
         if item.status != "pending":
-            raise ValueError(f"Structured input item {item.id} is not pending")
+            raise ConflictError("The thread is not waiting for this form.")
 
         updated_item = item.model_copy(deep=True)
-        questions_by_id = {
-            question.id: question for question in updated_item.inputs
-        }
+        questions_by_id = {question.id: question for question in updated_item.inputs}
         submitted_question_ids = set(submission.answers)
         unknown_question_ids = submitted_question_ids.difference(questions_by_id)
         if unknown_question_ids:
@@ -779,10 +602,10 @@ class ChatKitServer(ABC, Generic[TContext]):
             answer = submission.answers.get(question.id)
 
             if (
-                submission.status == "skipped" or
-                answer is None or
-                answer.skipped or
-                not answer.values
+                submission.status == "skipped"
+                or answer is None
+                or answer.skipped
+                or not answer.values
             ):
                 question.answer = StructuredInputAnswer(skipped=True)
                 continue
@@ -797,48 +620,98 @@ class ChatKitServer(ABC, Generic[TContext]):
         updated_item.status = submission.status
         return updated_item
 
-    async def _cleanup_pending_client_tool_call(
-        self, thread: ThreadMetadata, context: TContext
-    ) -> None:
-        items = await self.store.load_thread_items(
-            thread.id, None, DEFAULT_PAGE_SIZE, "desc", context
-        )
-        for tool_call in items.data:
-            if not isinstance(tool_call, ClientToolCallItem):
-                continue
-            if tool_call.status == "pending":
-                logger.warning(
-                    f"Client tool call {tool_call.call_id} was not completed, ignoring"
-                )
-                await self.store.delete_thread_item(
-                    thread.id, tool_call.id, context=context
-                )
-
     async def _process_new_thread_item_respond(
         self,
         thread: ThreadMetadata,
         item: UserMessageItem,
         context: TContext,
+        *,
+        create_thread: bool = False,
     ) -> AsyncIterator[ThreadStreamEvent]:
+        if create_thread:
+            await self.store.save_thread(thread, context=context)
+            yield ThreadCreatedEvent(thread=self._to_thread_response(thread))
+
         # Store the updated attachments (now that they have a thread id).
         for attachment in item.attachments:
-            await self.store.save_attachment(attachment, context=context)
+            await self._get_attachment_metadata_store().save_attachment(
+                attachment, context=context
+            )
 
         await self.store.add_thread_item(thread.id, item, context=context)
-        yield ThreadItemDoneEvent(item=item)
 
-        async for event in self._process_events(
-            thread,
-            context,
-            lambda: self.respond(thread, item, context),
-        ):
-            yield event
+        async with _closing_stream(
+            self._process_turn(Turn(thread, UserMessageTurn(item), context))
+        ) as events:
+            async for event in events:
+                yield event
+
+    async def _process_turn(
+        self, turn: Turn[TContext]
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        async def respond_events() -> AsyncIterator[ThreadStreamEvent]:
+            async with _closing_stream(aiter(self.respond(turn))) as events:
+                async for event in events:
+                    yield event
+
+        outcome = TurnOutcome.COMPLETED
+        pending_inputs: set[str] = set()
+        try:
+            if isinstance(turn.input, UserMessageTurn):
+                # The message is already saved. Closing at this event still finishes the turn.
+                yield ThreadItemDoneEvent(item=turn.input.message)
+            # The store already applied this replacement when it claimed the form.
+            form_update = (
+                ThreadItemReplacedEvent(item=turn.input.item)
+                if isinstance(turn.input, StructuredInputTurn)
+                else None
+            )
+            async with _closing_stream(
+                self._process_events(
+                    turn.thread, turn.context, respond_events, form_update=form_update
+                )
+            ) as events:
+                async for event in events:
+                    match event:
+                        case ErrorEvent():
+                            outcome = TurnOutcome.FAILED
+                        case (
+                            ThreadItemDoneEvent(item=item)
+                            | ThreadItemReplacedEvent(item=item)
+                        ):
+                            if (
+                                isinstance(
+                                    item, (ClientToolCallItem, StructuredInputItem)
+                                )
+                                and item.status == "pending"
+                            ):
+                                pending_inputs.add(item.id)
+                            else:
+                                pending_inputs.discard(item.id)
+                        case ThreadItemRemovedEvent(item_id=item_id):
+                            pending_inputs.discard(item_id)
+                    yield event
+            if outcome is TurnOutcome.COMPLETED and pending_inputs:
+                outcome = TurnOutcome.WAITING
+        except asyncio.CancelledError, GeneratorExit:
+            outcome = TurnOutcome.CANCELLED
+            raise
+        except Exception:
+            outcome = TurnOutcome.FAILED
+            raise
+        finally:
+            try:
+                await self.on_turn_finished(turn, outcome)
+            except Exception:
+                logger.exception("Error in on_turn_finished")
 
     async def _process_events(
         self,
         thread: ThreadMetadata,
         context: TContext,
         stream: Callable[[], AsyncIterator[ThreadStreamEvent]],
+        *,
+        form_update: ThreadItemReplacedEvent | None = None,
     ) -> AsyncIterator[ThreadStreamEvent]:
         await asyncio.sleep(0)  # allow the response to start streaming
 
@@ -847,15 +720,16 @@ class ChatKitServer(ABC, Generic[TContext]):
             stream_options=self.get_stream_options(thread, context)
         )
 
-        last_thread = thread.model_copy(deep=True)
-
         # Keep track of items that were streamed but not yet saved
         # so that we can persist them when the stream is cancelled.
         pending_items: dict[str, ThreadItem] = {}
+        hidden_item_ids: set[str] = set()
 
         try:
-            with agents_sdk_user_agent_override():
-                async for event in stream():
+            if form_update is not None:
+                yield form_update
+            async with _closing_stream(aiter(stream())) as events:
+                while (event := await anext(events, None)) is not None:
                     if isinstance(event, ThreadItemAddedEvent):
                         # Stash an isolated copy in case we need to persist unfinished items
                         # on cancellation; downstream handlers keep using the original event.item.
@@ -883,55 +757,48 @@ class ChatKitServer(ABC, Generic[TContext]):
                             # when the stream is cancelled.
                             self._update_pending_items(pending_items, event)
 
-                    # special case - don't send hidden context items back to the client
-                    should_swallow_event = isinstance(
-                        event, ThreadItemDoneEvent
-                    ) and isinstance(
-                        event.item, (HiddenContextItem, SDKHiddenContextItem)
-                    )
-
-                    if not should_swallow_event:
+                    if isinstance(event, (ThreadCreatedEvent, ThreadUpdatedEvent)):
+                        hidden_item_ids.update(
+                            item.id
+                            for item in event.thread.items.data
+                            if item.type in HIDDEN_ITEM_TYPES
+                        )
+                        yield event.model_copy(
+                            update={"thread": self._to_thread_response(event.thread)}
+                        )
+                    elif (
+                        isinstance(
+                            event,
+                            (
+                                ThreadItemAddedEvent,
+                                ThreadItemDoneEvent,
+                                ThreadItemReplacedEvent,
+                            ),
+                        )
+                        and event.item.type in HIDDEN_ITEM_TYPES
+                    ):
+                        hidden_item_ids.add(event.item.id)
+                    elif not (
+                        isinstance(
+                            event, (ThreadItemUpdatedEvent, ThreadItemRemovedEvent)
+                        )
+                        and event.item_id in hidden_item_ids
+                    ):
                         yield event
 
-                    # in case user updated the thread while streaming
-                    if thread != last_thread:
-                        last_thread = thread.model_copy(deep=True)
-                        await self.store.save_thread(thread, context=context)
-                        yield ThreadUpdatedEvent(
-                            thread=self._to_thread_response(thread)
-                        )
-                # in case user updated the thread while streaming
-                if thread != last_thread:
-                    last_thread = thread.model_copy(deep=True)
-                    await self.store.save_thread(thread, context=context)
-                    yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
-        except asyncio.CancelledError:
+        except asyncio.CancelledError, GeneratorExit:
             await self.handle_stream_cancelled(
                 thread, list(pending_items.values()), context
             )
             raise
-        except CustomStreamError as e:
-            yield ErrorEvent(
-                code="custom",
-                message=e.message,
-                allow_retry=e.allow_retry,
-            )
-        except StreamError as e:
-            yield ErrorEvent(
-                code=e.code,
-                allow_retry=e.allow_retry,
-            )
+        except (CustomStreamError, StreamError) as error:
+            yield _stream_error_event(error)
         except Exception as e:
             yield ErrorEvent(
                 code=ErrorCode.STREAM_ERROR,
                 allow_retry=True,
             )
             logger.exception(e)
-
-        if thread != last_thread:
-            # in case user updated the thread at the end of the stream
-            await self.store.save_thread(thread, context=context)
-            yield ThreadUpdatedEvent(thread=self._to_thread_response(thread))
 
     def _apply_assistant_message_update(
         self,
@@ -997,20 +864,27 @@ class ChatKitServer(ABC, Generic[TContext]):
     async def _build_user_message_item(
         self, input: UserMessageInput, thread: ThreadMetadata, context: TContext
     ) -> UserMessageItem:
-        return UserMessageItem(
+        item = UserMessageItem(
             id=self.store.generate_item_id("message", thread, context),
             content=input.content,
             thread_id=thread.id,
             attachments=[
-                (await self.store.load_attachment(attachment_id, context)).model_copy(
-                    update={"thread_id": thread.id}
-                )
+                (
+                    await self._get_attachment_metadata_store().load_attachment(
+                        attachment_id, context
+                    )
+                ).model_copy(update={"thread_id": thread.id})
                 for attachment_id in input.attachments
             ],
             quoted_text=input.quoted_text,
             inference_options=input.inference_options,
-            created_at=datetime.now(),
+            created_at=datetime.now(UTC),
         )
+        identity = (item.id, item.thread_id, item.created_at)
+        prepared = await self.prepare_user_message(thread, item, context)
+        if (prepared.id, prepared.thread_id, prepared.created_at) != identity:
+            raise ValueError("prepare_user_message must preserve message identity")
+        return prepared
 
     async def _load_full_thread(self, thread_id: str, context: TContext) -> Thread:
         thread_meta = await self.store.load_thread(thread_id, context=context)
@@ -1020,38 +894,24 @@ class ChatKitServer(ABC, Generic[TContext]):
             limit=DEFAULT_PAGE_SIZE,
             order="asc",
             context=context,
+            include_hidden=False,
         )
         return Thread(**thread_meta.model_dump(), items=thread_items)
 
-    async def _paginate_thread_items_reverse(
-        self, thread_id: str, context: TContext
-    ) -> AsyncIterator[ThreadItem]:
-        """Paginate through thread items in reverse order (newest first)."""
-        after = None
-        while True:
-            items = await self.store.load_thread_items(
-                thread_id, after, DEFAULT_PAGE_SIZE, "desc", context
-            )
-            for item in items.data:
-                yield item
-
-            if not items.has_more:
-                break
-            after = items.after
-
-    def _serialize(self, obj: BaseModel) -> bytes:
-        return obj.model_dump_json(
-            by_alias=True,
-            exclude_none=True,
-            context={"exclude_metadata": True},
-        ).encode("utf-8")
-
     def _to_thread_response(self, thread: ThreadMetadata | Thread) -> Thread:
-        def is_hidden(item: ThreadItem) -> bool:
-            return isinstance(item, (HiddenContextItem, SDKHiddenContextItem))
-
-        items = thread.items if isinstance(thread, Thread) else Page()
-        items.data = [item for item in items.data if not is_hidden(item)]
+        items = (
+            thread.items.model_copy(
+                update={
+                    "data": [
+                        item
+                        for item in thread.items.data
+                        if item.type not in HIDDEN_ITEM_TYPES
+                    ]
+                }
+            )
+            if isinstance(thread, Thread)
+            else Page()
+        )
 
         return Thread(
             id=thread.id,

@@ -1,9 +1,8 @@
 import asyncio
-import json
 from collections.abc import AsyncIterator
-from datetime import datetime
-from importlib import import_module
-from typing import cast
+from contextlib import aclosing
+from datetime import UTC, datetime
+from typing import Literal
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -17,29 +16,35 @@ from agents import (
     OutputGuardrailResult,
     OutputGuardrailTripwireTriggered,
     RawResponsesStreamEvent,
-    RunContextWrapper,
     RunItemStreamEvent,
-    Runner,
     RunResultStreaming,
     StreamEvent,
     ToolCallItem,
 )
+from agents.tool_context import ToolContext
 from openai.types.responses import (
-    EasyInputMessageParam,
     ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
-    ResponseInputContentParam,
-    ResponseInputTextParam,
+    ResponseFunctionWebSearch,
+    ResponseImageGenCallPartialImageEvent,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
+    ResponseOutputTextAnnotationAddedEvent,
     ResponseReasoningItem,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
 )
 from openai.types.responses.response_content_part_added_event import (
     ResponseContentPartAddedEvent,
 )
 from openai.types.responses.response_file_search_tool_call import Result
-from openai.types.responses.response_input_item_param import Message
+from openai.types.responses.response_function_web_search import (
+    ActionSearch,
+    ActionSearchSource,
+)
+from openai.types.responses.response_output_item import ImageGenerationCall
 from openai.types.responses.response_output_text import (
     AnnotationContainerFileCitation as ResponsesAnnotationContainerFileCitation,
 )
@@ -60,54 +65,42 @@ from openai.types.responses.response_text_done_event import ResponseTextDoneEven
 
 from chatkit.agents import (
     AgentContext,
-    ClientToolCall,
     ResponseStreamConverter,
-    ThreadItemConverter,
     accumulate_text,
-    simple_to_agent_input,
     stream_agent_response,
 )
-from chatkit.types import (
-    Annotation,
-    AssistantMessageContent,
+from chatkit.events import (
     AssistantMessageContentPartAdded,
     AssistantMessageContentPartAnnotationAdded,
     AssistantMessageContentPartDone,
     AssistantMessageContentPartTextDelta,
+    GeneratedImageUpdated,
+    ThreadItemAddedEvent,
+    ThreadItemDoneEvent,
+    ThreadItemReplacedEvent,
+    ThreadItemUpdatedEvent,
+    ThreadStreamEvent,
+    WorkflowTaskAdded,
+    WorkflowTaskUpdated,
+)
+from chatkit.models import (
+    Annotation,
+    AssistantMessageContent,
     AssistantMessageItem,
-    Attachment,
-    ClientToolCallItem,
     CustomSummary,
     CustomTask,
     DurationSummary,
     FileSource,
     GeneratedImage,
     GeneratedImageItem,
-    GeneratedImageUpdated,
-    HiddenContextItem,
-    InferenceOptions,
     Page,
-    StructuredInputAnswer,
-    StructuredInputFreeform,
-    StructuredInputItem,
-    StructuredInputMultipleChoice,
-    StructuredInputMultipleChoiceOption,
-    TaskItem,
+    SearchTask,
     ThoughtTask,
     Thread,
-    ThreadItemAddedEvent,
-    ThreadItemDoneEvent,
-    ThreadItemUpdatedEvent,
-    ThreadStreamEvent,
     URLSource,
-    UserMessageItem,
-    UserMessageTagContent,
-    UserMessageTextContent,
     WidgetItem,
     Workflow,
     WorkflowItem,
-    WorkflowTaskAdded,
-    WorkflowTaskUpdated,
 )
 from chatkit.widgets import Card, Text
 
@@ -119,84 +112,62 @@ mock_store.load_thread_items = AsyncMock(return_value=Page())
 mock_store.add_thread_item = AsyncMock()
 
 
-def make_queue_complete_sentinel():
-    for module_name in (
-        "agents.result",
-        "agents.run_internal.run_steps",
-        "agents._run_impl",
-    ):
-        try:
-            module = import_module(module_name)
-        except ImportError:
-            continue
-
-        sentinel = getattr(module, "QueueCompleteSentinel", None)
-        if sentinel is not None:
-            return sentinel()
-
-    raise ImportError("QueueCompleteSentinel not found in installed agents package")
-
-
 class RunResult(RunResultStreaming):
-    def add_event(self, event: StreamEvent):
-        self._event_queue.put_nowait(event)
+    """Provide the stream methods used by ChatKit with synthetic events."""
 
-    def done(self):
+    def __init__(self) -> None:
+        self.is_complete = False
+        self._test_events: asyncio.Queue[StreamEvent | Exception | None] = (
+            asyncio.Queue()
+        )
+
+    def add_event(self, event: StreamEvent) -> None:
+        self._test_events.put_nowait(event)
+
+    def done(self, error: Exception | None = None) -> None:
         self.is_complete = True
-        self._event_queue.put_nowait(make_queue_complete_sentinel())
+        self._test_events.put_nowait(error)
 
-    def throw_input_guardrails(self):
-        self._stored_exception = InputGuardrailTripwireTriggered(
-            InputGuardrailResult(
-                guardrail=Mock(spec=InputGuardrail),
-                output=GuardrailFunctionOutput(
-                    output_info=None,
-                    tripwire_triggered=True,
-                ),
+    def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
+        self.done()
+
+    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+        while (event := await self._test_events.get()) is not None:
+            if isinstance(event, Exception):
+                raise event
+            yield event
+
+    def throw_input_guardrails(self) -> None:
+        self.done(
+            InputGuardrailTripwireTriggered(
+                InputGuardrailResult(
+                    guardrail=Mock(spec=InputGuardrail),
+                    output=GuardrailFunctionOutput(
+                        output_info=None,
+                        tripwire_triggered=True,
+                    ),
+                )
             )
         )
-        self.is_complete = True
-        self._event_queue.put_nowait(make_queue_complete_sentinel())
 
-    def throw_output_guardrails(self):
-        self._stored_exception = OutputGuardrailTripwireTriggered(
-            OutputGuardrailResult(
-                guardrail=Mock(spec=OutputGuardrail),
-                output=GuardrailFunctionOutput(
-                    output_info=None,
-                    tripwire_triggered=True,
-                ),
-                agent=Mock(spec=Agent),
-                agent_output=None,
+    def throw_output_guardrails(self) -> None:
+        self.done(
+            OutputGuardrailTripwireTriggered(
+                OutputGuardrailResult(
+                    guardrail=Mock(spec=OutputGuardrail),
+                    output=GuardrailFunctionOutput(
+                        output_info=None,
+                        tripwire_triggered=True,
+                    ),
+                    agent=Mock(spec=Agent),
+                    agent_output=None,
+                )
             )
         )
-        self.is_complete = True
-        self._event_queue.put_nowait(make_queue_complete_sentinel())
 
 
 def make_result() -> RunResult:
-    return RunResult(
-        context_wrapper=Mock(spec=RunContextWrapper),
-        input=[],
-        tool_input_guardrail_results=[],
-        tool_output_guardrail_results=[],
-        new_items=[],
-        raw_responses=[],
-        final_output=None,
-        current_agent=Agent(name="test"),
-        current_turn=0,
-        max_turns=10,
-        _current_agent_output_schema=None,
-        trace=None,
-        is_complete=False,
-        _event_queue=asyncio.Queue(),
-        _input_guardrail_queue=asyncio.Queue(),
-        _output_guardrails_task=None,
-        _run_impl_task=None,
-        _stored_exception=None,
-        output_guardrail_results=[],
-        input_guardrail_results=[],
-    )
+    return RunResult()
 
 
 async def all_events(
@@ -205,10 +176,70 @@ async def all_events(
     return [event async for event in events]
 
 
-async def test_returns_widget_item():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
+@pytest.mark.parametrize("second_title", ["Processing", "Next step"])
+async def test_added_workflow_task_uses_appended_index(second_title):
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    await context.add_workflow_task(CustomTask(title="Processing"))
+    await context.add_workflow_task(CustomTask(title=second_title))
+
+    first_event = context._events.get_nowait()
+    second_event = context._events.get_nowait()
+
+    assert isinstance(first_event, ThreadItemAddedEvent)
+    assert isinstance(second_event, ThreadItemUpdatedEvent)
+    assert isinstance(second_event.update, WorkflowTaskAdded)
+    assert second_event.update.task_index == 1
+    assert context.workflow_item is not None
+    assert second_event.update.task is context.workflow_item.workflow.tasks[1]
+
+
+@pytest.mark.parametrize("second_text", ["Thinking", "Another thought"])
+async def test_completed_reasoning_task_uses_appended_index(second_text):
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    result = make_result()
+    result.add_event(
+        RawResponsesStreamEvent(
+            type="raw_response_event",
+            data=ResponseOutputItemAddedEvent(
+                type="response.output_item.added",
+                item=ResponseReasoningItem(
+                    id="reasoning_1", summary=[], type="reasoning"
+                ),
+                output_index=0,
+                sequence_number=0,
+            ),
+        )
     )
+    for index, text in enumerate(["Thinking", second_text]):
+        result.add_event(
+            RawResponsesStreamEvent(
+                type="raw_response_event",
+                data=Mock(
+                    type="response.reasoning_summary_text.done",
+                    item_id="reasoning_1",
+                    summary_index=index,
+                    text=text,
+                ),
+            )
+        )
+    result.done()
+
+    events = await all_events(stream_agent_response(context, result))
+    task_updates = [
+        event.update
+        for event in events
+        if isinstance(event, ThreadItemUpdatedEvent)
+        and isinstance(event.update, WorkflowTaskAdded)
+    ]
+    assert [update.task_index for update in task_updates] == [0, 1]
+    assert [update.task for update in task_updates] == [
+        ThoughtTask(content="Thinking"),
+        ThoughtTask(content=second_text),
+    ]
+
+
+async def test_returns_widget_item():
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
     result.add_event(
         RunItemStreamEvent(name="tool_called", item=Mock(spec=ToolCallItem))
@@ -226,13 +257,11 @@ async def test_returns_widget_item():
     assert len(events) == 1
     assert isinstance(events[0], ThreadItemDoneEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(value="Hello, world!")])
+    assert events[0].item.widget == Card(children=[Text(value="Hello, world!")]).build()
 
 
 async def test_returns_widget_item_generator():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
     result.add_event(
         RunItemStreamEvent(name="tool_called", item=Mock(spec=ToolCallItem))
@@ -258,7 +287,7 @@ async def test_returns_widget_item_generator():
     assert len(events) == 3
     assert isinstance(events[0], ThreadItemAddedEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(id="text", value="")])
+    assert events[0].item.widget == Card(children=[Text(id="text", value="")]).build()
 
     assert isinstance(events[1], ThreadItemUpdatedEvent)
     assert events[1].update.type == "widget.streaming_text.value_delta"
@@ -267,15 +296,14 @@ async def test_returns_widget_item_generator():
 
     assert isinstance(events[2], ThreadItemDoneEvent)
     assert isinstance(events[2].item, WidgetItem)
-    assert events[2].item.widget == Card(
-        children=[Text(id="text", value="Hello, world")]
+    assert (
+        events[2].item.widget
+        == Card(children=[Text(id="text", value="Hello, world")]).build()
     )
 
 
 async def test_returns_widget_full_replace_generator():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
     result.add_event(
         RunItemStreamEvent(name="tool_called", item=Mock(spec=ToolCallItem))
@@ -298,61 +326,62 @@ async def test_returns_widget_full_replace_generator():
     assert len(events) == 3
     assert isinstance(events[0], ThreadItemAddedEvent)
     assert isinstance(events[0].item, WidgetItem)
-    assert events[0].item.widget == Card(children=[Text(id="text", value="Hello!")])
+    assert (
+        events[0].item.widget
+        == Card(children=[Text(id="text", value="Hello!")]).build()
+    )
 
     assert isinstance(events[1], ThreadItemUpdatedEvent)
     assert events[1].update.type == "widget.root.updated"
-    assert events[1].update.widget == Card(
-        children=[Text(key="other text", value="World!", streaming=False)]
+    assert (
+        events[1].update.widget
+        == Card(
+            children=[Text(key="other text", value="World!", streaming=False)]
+        ).build()
     )
 
     assert isinstance(events[2], ThreadItemDoneEvent)
     assert isinstance(events[2].item, WidgetItem)
-    assert events[2].item.widget == Card(
-        children=[Text(key="other text", value="World!", streaming=False)]
+    assert (
+        events[2].item.widget
+        == Card(
+            children=[Text(key="other text", value="World!", streaming=False)]
+        ).build()
     )
 
 
-async def test_client_tool_call_uses_raw_function_call_id():
+async def test_duplicate_client_tool_requests_fail_the_handoff():
     context = AgentContext(
-        previous_response_id=None,
         thread=thread,
         store=mock_store,
         request_context=None,
-        client_tool_call=ClientToolCall(name="get_selection", arguments={}),
     )
-    result = make_result()
-    raw_item = ResponseFunctionToolCall(
-        id="fc_123",
-        type="function_call",
-        call_id="call_123",
-        name="get_selection",
-        arguments="{}",
-        status="completed",
-    )
-    result.add_event(
-        RunItemStreamEvent(
-            name="tool_called",
-            item=ToolCallItem(
-                agent=Agent("Assistant"),
-                raw_item=raw_item,
+
+    def tool_context(index: int) -> ToolContext[AgentContext[None]]:
+        return ToolContext(
+            context=context,
+            tool_name="get_selection",
+            tool_arguments="{}",
+            tool_call_id=f"call_{index}",
+            tool_call=ResponseFunctionToolCall(
+                id=f"fc_{index}",
+                type="function_call",
+                call_id=f"call_{index}",
+                name="get_selection",
+                arguments="{}",
+                status="completed",
             ),
         )
-    )
+
+    context.request_client_tool(tool_context(1), name="get_selection", arguments={})
+    with pytest.raises(ValueError, match="Only one client tool"):
+        context.request_client_tool(tool_context(2), name="get_selection", arguments={})
+
+    # The SDK can turn a callback exception into a tool result and complete.
+    result = make_result()
     result.done()
-
-    events = await all_events(
-        stream_agent_response(
-            context=context,
-            result=result,
-        )
-    )
-
-    assert len(events) == 1
-    assert isinstance(events[0], ThreadItemDoneEvent)
-    assert isinstance(events[0].item, ClientToolCallItem)
-    assert events[0].item.id == "fc_123"
-    assert events[0].item.call_id == "call_123"
+    with pytest.raises(ValueError, match="Only one client tool"):
+        await all_events(stream_agent_response(context, result))
 
 
 async def test_accumulate_text():
@@ -370,9 +399,6 @@ async def test_accumulate_text():
             ),
         )
 
-    result = Runner.run_streamed(
-        Agent("Assistant", instructions="You are a helpful assistant."), "Say hello!"
-    )
     result = make_result()
     result.add_event(delta("Hello, "))
     result.add_event(delta("world!"))
@@ -393,449 +419,8 @@ async def test_accumulate_text():
     ]
 
 
-async def test_input_item_converter_quotes_last_user_message():
-    items = [
-        UserMessageItem(
-            id="123",
-            content=[UserMessageTextContent(text="Hello!")],
-            attachments=[],
-            inference_options=InferenceOptions(),
-            thread_id=thread.id,
-            quoted_text="Hi!",
-            created_at=datetime.now(),
-        ),
-        UserMessageItem(
-            id="123",
-            content=[UserMessageTextContent(text="I'm well, thank you!")],
-            attachments=[],
-            inference_options=InferenceOptions(),
-            thread_id=thread.id,
-            quoted_text="How are you doing?",
-            created_at=datetime.now(),
-        ),
-    ]
-
-    async def throw_exception(
-        _: Attachment,
-    ) -> ResponseInputContentParam:
-        raise Exception("Not implemented")
-
-    input_items = await simple_to_agent_input(items)
-    assert len(input_items) == 3
-    assert input_items[0] == {
-        "content": [
-            {
-                "text": "Hello!",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-    assert input_items[1] == {
-        "content": [
-            {
-                "text": "I'm well, thank you!",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-    assert input_items[2] == {
-        "content": [
-            {
-                "text": "The user is referring to this in particular: \nHow are you doing?",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-
-
-async def test_input_item_converter_to_input_items_mixed():
-    items = [
-        UserMessageItem(
-            id="123",
-            content=[UserMessageTextContent(text="Hello!")],
-            attachments=[],
-            inference_options=InferenceOptions(),
-            thread_id=thread.id,
-            quoted_text="Hi!",
-            created_at=datetime.now(),
-        ),
-        UserMessageItem(
-            id="123",
-            content=[UserMessageTextContent(text="I'm well, thank you!")],
-            attachments=[],
-            inference_options=InferenceOptions(),
-            thread_id=thread.id,
-            quoted_text="How are you doing?",
-            created_at=datetime.now(),
-        ),
-        AssistantMessageItem(
-            id="123",
-            content=[
-                AssistantMessageContent(text="How are you doing?"),
-                AssistantMessageContent(text="Can't do that"),
-            ],
-            thread_id=thread.id,
-            created_at=datetime.now(),
-        ),
-        WidgetItem(
-            id="wd_123",
-            widget=Card(children=[Text(value="Hello, world!")]),
-            thread_id=thread.id,
-            created_at=datetime.now(),
-        ),
-    ]
-
-    input_items = await simple_to_agent_input(items)
-    assert len(input_items) == 4
-    assert input_items[0] == {
-        "content": [
-            {
-                "text": "Hello!",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-    assert input_items[1] == {
-        "content": [
-            {
-                "text": "I'm well, thank you!",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-    assert input_items[2] == {
-        "content": [
-            {
-                "annotations": [],
-                "text": "How are you doing?",
-                "logprobs": None,
-                "type": "output_text",
-            },
-            {
-                "annotations": [],
-                "text": "Can't do that",
-                "logprobs": None,
-                "type": "output_text",
-            },
-        ],
-        "type": "message",
-        "role": "assistant",
-    }
-    assert "type" in input_items[3]
-    widget_item = cast(EasyInputMessageParam, input_items[3])
-    assert widget_item.get("type") == "message"
-    assert widget_item.get("role") == "user"
-    text = widget_item.get("content")[0]["text"]  # type: ignore
-    assert (
-        "The following graphical UI widget (id: wd_123) was displayed to the user"
-        in text
-    )
-    assert "Hello, world!" in text
-    assert "created_at" not in text
-
-
-async def test_input_item_converter_user_input_with_tags():
-    class MyThreadItemConverter(ThreadItemConverter):
-        async def tag_to_message_content(self, tag):
-            return ResponseInputTextParam(
-                type="input_text", text=tag.text + " " + tag.data["key"]
-            )
-
-    items = [
-        UserMessageItem(
-            id="123",
-            content=[
-                UserMessageTagContent(
-                    text="Hello!", type="input_tag", id="hello", data={"key": "value"}
-                )
-            ],
-            attachments=[],
-            inference_options=InferenceOptions(),
-            thread_id=thread.id,
-            created_at=datetime.now(),
-        )
-    ]
-    items = await MyThreadItemConverter().to_agent_input(items)
-
-    assert len(items) == 2
-    assert items[0] == {
-        "content": [
-            {
-                "text": "@Hello!",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-    assert items[1] == {
-        "content": [
-            {
-                "text": "# User-provided context for @-mentions\n- When referencing resolved entities, use their canonical names **without** '@'.\n"
-                + "- The '@' form appears only in user text and should not be echoed.",
-                "type": "input_text",
-            },
-            {
-                "text": "Hello! value",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-
-
-async def test_input_item_converter_user_input_with_tags_throws_by_default():
-    items = [
-        UserMessageItem(
-            id="123",
-            content=[
-                UserMessageTagContent(
-                    text="Hello!", type="input_tag", id="hello", data={}
-                )
-            ],
-            attachments=[],
-            inference_options=InferenceOptions(),
-            thread_id=thread.id,
-            created_at=datetime.now(),
-        )
-    ]
-
-    with pytest.raises(NotImplementedError):
-        await simple_to_agent_input(items)
-
-
-async def test_input_item_converter_generated_image_item():
-    items = [
-        GeneratedImageItem(
-            id="img_item_1",
-            thread_id=thread.id,
-            created_at=datetime.now(),
-            image=GeneratedImage(id="img_1", url="https://example.com/img.png"),
-        )
-    ]
-
-    input_items = await simple_to_agent_input(items)
-    assert len(input_items) == 1
-
-    message = cast(dict, input_items[0])
-    assert message.get("type") == "message"
-    assert message.get("role") == "user"
-
-    content = cast(list, message.get("content"))
-    assert content[0].get("type") == "input_text"
-    assert content[0].get("text") == "The following image was generated by the agent."
-    assert content[1].get("type") == "input_image"
-    assert content[1].get("file_id") is None
-    assert content[1].get("image_url") == "https://example.com/img.png"
-    assert content[1].get("detail") == "auto"
-
-
-async def test_input_item_converter_generated_image_item_without_image():
-    items = [
-        GeneratedImageItem(
-            id="img_item_1",
-            thread_id=thread.id,
-            created_at=datetime.now(),
-        )
-    ]
-
-    input_items = await simple_to_agent_input(items)
-    assert input_items == []
-
-
-async def test_input_item_converter_for_hidden_context_with_string_content():
-    items = [
-        HiddenContextItem(
-            id="123",
-            content="User pressed the red button",
-            thread_id=thread.id,
-            created_at=datetime.now(),
-        )
-    ]
-
-    # The default converter works for string content
-    items = await simple_to_agent_input(items)
-    assert len(items) == 1
-    assert items[0] == {
-        "content": [
-            {
-                "text": "Hidden context for the agent (not shown to the user):\n<HiddenContext>\nUser pressed the red button\n</HiddenContext>",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-
-
-async def test_input_item_converter_for_hidden_context_with_non_string_content():
-    items = [
-        HiddenContextItem(
-            id="123",
-            content={"harry": "potter", "hermione": "granger"},
-            thread_id=thread.id,
-            created_at=datetime.now(),
-        )
-    ]
-
-    # Default converter should throw
-    with pytest.raises(NotImplementedError):
-        await simple_to_agent_input(items)
-
-    class MyThreadItemConverter(ThreadItemConverter):
-        async def hidden_context_to_input(self, item: HiddenContextItem):
-            content = ",".join(item.content.keys())
-            return Message(
-                type="message",
-                content=[
-                    ResponseInputTextParam(
-                        type="input_text", text=f"<HIDDEN>{content}</HIDDEN>"
-                    )
-                ],
-                role="user",
-            )
-
-    items = await MyThreadItemConverter().to_agent_input(items)
-    assert len(items) == 1
-    assert items[0] == {
-        "content": [
-            {
-                "text": "<HIDDEN>harry,hermione</HIDDEN>",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-
-
-async def test_input_item_converter_with_client_tool_call():
-    items = [
-        UserMessageItem(
-            id="123",
-            content=[UserMessageTextContent(text="Call a client tool call xyz")],
-            attachments=[],
-            inference_options=InferenceOptions(),
-            thread_id=thread.id,
-            quoted_text="Hi!",
-            created_at=datetime.now(),
-        ),
-        TaskItem(
-            id="tsk_123",
-            created_at=datetime.now(),
-            task=CustomTask(title="Called xyx"),
-            thread_id=thread.id,
-        ),
-        ClientToolCallItem(
-            id="ctc_123",
-            thread_id=thread.id,
-            created_at=datetime.now(),
-            name="xyz",
-            arguments={"foo": "bar"},
-            call_id="ctc_123",
-        ),
-        ClientToolCallItem(
-            id="ctc_123_done",
-            thread_id=thread.id,
-            created_at=datetime.now(),
-            name="xyz",
-            arguments={"foo": "bar"},
-            call_id="ctc_123",
-            status="completed",
-            output={"success": True},
-        ),
-    ]
-
-    input_items = await simple_to_agent_input(items)
-    assert len(input_items) == 4
-    assert input_items[0] == {
-        "content": [
-            {
-                "text": "Call a client tool call xyz",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-    assert input_items[1] == {
-        "content": [
-            {
-                "text": "A message was displayed to the user that the following task was performed:\n<Task>\nCalled xyx\n</Task>",
-                "type": "input_text",
-            },
-        ],
-        "type": "message",
-        "role": "user",
-    }
-    assert input_items[2] == {
-        "type": "function_call",
-        "name": "xyz",
-        "arguments": json.dumps({"foo": "bar"}),
-        "call_id": "ctc_123",
-    }
-    assert input_items[3] == {
-        "type": "function_call_output",
-        "call_id": "ctc_123",
-        "output": json.dumps({"success": True}),
-    }
-
-
-async def test_input_item_converter_with_structured_input():
-    items = [
-        StructuredInputItem(
-            id="si_123",
-            thread_id=thread.id,
-            created_at=datetime.now(),
-            status="answered",
-            inputs=[
-                StructuredInputMultipleChoice(
-                    id="subject",
-                    question="Which subject is this lesson for?",
-                    options=[
-                        StructuredInputMultipleChoiceOption(value="Math"),
-                        StructuredInputMultipleChoiceOption(value="Science"),
-                    ],
-                    answer=StructuredInputAnswer(values=["Math"]),
-                ),
-                StructuredInputFreeform(
-                    id="details",
-                    question="Anything else to know?",
-                    answer=StructuredInputAnswer(skipped=True),
-                ),
-            ],
-        )
-    ]
-
-    input_items = await simple_to_agent_input(items)
-    assert len(input_items) == 1
-    assert input_items[0] == {
-        "content": [
-            {
-                "text": "A structured input request was displayed to the user with the following status: answered\n<StructuredInput>\n- Which subject is this lesson for?: Math\n- Anything else to know?: skipped\n</StructuredInput>",
-                "type": "input_text",
-            },
-        ],
-        "role": "user",
-        "type": "message",
-    }
-
-
 async def test_stream_agent_response_yields_context_events_without_streaming_events():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     event = ThreadItemAddedEvent(
@@ -843,7 +428,7 @@ async def test_stream_agent_response_yields_context_events_without_streaming_eve
             id="123",
             created_at=datetime.now(),
             thread_id=thread.id,
-            widget=Card(children=[Text(id="text", value="Hello, world!")]),
+            widget=Card(children=[Text(id="text", value="Hello, world!")]).build(),
         ),
     )
 
@@ -869,9 +454,7 @@ async def test_stream_agent_response_yields_context_events_without_streaming_eve
 
 
 async def test_stream_agent_response_maps_events():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     event = ThreadItemAddedEvent(
@@ -879,7 +462,7 @@ async def test_stream_agent_response_maps_events():
             id="123",
             created_at=datetime.now(),
             thread_id=thread.id,
-            widget=Card(children=[Text(id="text", value="Hello, world!")]),
+            widget=Card(children=[Text(id="text", value="Hello, world!")]).build(),
         ),
     )
 
@@ -920,6 +503,58 @@ async def test_stream_agent_response_maps_events():
         pass
 
     assert future.done() is True
+
+
+async def test_chat_completions_allocates_a_new_id_when_an_output_index_is_reused():
+    store = Mock(
+        generate_item_id=Mock(side_effect=["message_1", "message_2"]),
+        load_thread_items=AsyncMock(return_value=Page()),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    placeholder = ResponseOutputMessage(
+        id="__fake_id__",
+        content=[],
+        role="assistant",
+        status="in_progress",
+        type="message",
+    )
+    for sequence_number in (0, 2):
+        result.add_event(
+            RawResponsesStreamEvent(
+                type="raw_response_event",
+                data=ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    item=placeholder,
+                    output_index=0,
+                    sequence_number=sequence_number,
+                ),
+            )
+        )
+        result.add_event(
+            RawResponsesStreamEvent(
+                type="raw_response_event",
+                data=ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    item=placeholder.model_copy(update={"status": "completed"}),
+                    output_index=0,
+                    sequence_number=sequence_number + 1,
+                ),
+            )
+        )
+    result.done()
+
+    events = await all_events(stream_agent_response(context, result))
+    assert [
+        (event.type, event.item.id)
+        for event in events
+        if isinstance(event, (ThreadItemAddedEvent, ThreadItemDoneEvent))
+    ] == [
+        ("thread.item.added", "message_1"),
+        ("thread.item.done", "message_1"),
+        ("thread.item.added", "message_2"),
+        ("thread.item.done", "message_2"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1027,9 +662,7 @@ async def test_stream_agent_response_maps_events():
     ],
 )
 async def test_event_mapping(raw_event, expected_event):
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     result.add_event(raw_event)
@@ -1043,9 +676,7 @@ async def test_event_mapping(raw_event, expected_event):
 
 
 async def test_stream_agent_response_emits_annotation_added_events():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
     item_id = "item_123"
 
@@ -1128,27 +759,23 @@ async def test_stream_agent_response_emits_annotation_added_events():
 
 
 async def test_stream_agent_response_annotation_added_normalizes_annotations():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
     item_id = "item_123"
 
-    def add_annotation_event(annotation, sequence_number):
-        result.add_event(
-            RawResponsesStreamEvent(
-                type="raw_response_event",
-                data=Mock(
-                    type="response.output_text.annotation.added",
-                    annotation=annotation,
-                    content_index=0,
-                    item_id=item_id,
-                    annotation_index=sequence_number,
-                    output_index=0,
-                    sequence_number=sequence_number,
-                ),
-            )
-        )
+    def add_annotation_event(
+        annotation: dict[str, object] | None, sequence_number: int
+    ):
+        event = ResponseOutputTextAnnotationAddedEvent.model_validate({
+            "type": "response.output_text.annotation.added",
+            "annotation": annotation,
+            "content_index": 0,
+            "item_id": item_id,
+            "annotation_index": sequence_number,
+            "output_index": 0,
+            "sequence_number": sequence_number,
+        })
+        result.add_event(RawResponsesStreamEvent(type="raw_response_event", data=event))
 
     # Invalid file citation is dropped (empty filename)
     add_annotation_event(
@@ -1161,7 +788,9 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
         sequence_number=0,
     )
 
-    # Container + URL citations are converted; indices are compacted (0, 1) despite the dropped first event.
+    add_annotation_event(None, sequence_number=1)
+
+    # The next citations still use indices 0 and 1 after the dropped events.
     add_annotation_event(
         {
             "type": "container_file_citation",
@@ -1171,7 +800,7 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
             "start_index": 0,
             "end_index": 3,
         },
-        sequence_number=1,
+        sequence_number=2,
     )
     add_annotation_event(
         {
@@ -1181,7 +810,7 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
             "start_index": 1,
             "end_index": 5,
         },
-        sequence_number=2,
+        sequence_number=3,
     )
 
     result.done()
@@ -1214,9 +843,7 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
 
 
 async def test_custom_annotation_conversion_used_by_stream_agent_response():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     class CustomResponseStreamConverter(ResponseStreamConverter):
@@ -1336,9 +963,7 @@ async def test_custom_annotation_conversion_used_by_stream_agent_response():
 
 @pytest.mark.parametrize("throw_guardrail", ["input", "output"])
 async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
     result.add_event(
         RawResponsesStreamEvent(
@@ -1378,7 +1003,7 @@ async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
                 id="3",
                 created_at=datetime.now(),
                 thread_id=thread.id,
-                widget=Card(children=[Text(id="text", value="Hello, world!")]),
+                widget=Card(children=[Text(id="text", value="Hello, world!")]).build(),
             ),
         )
     )
@@ -1403,7 +1028,7 @@ async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
         async for event in iterator:
             events.append(event)
         assert False, "Guardrail should have been thrown from stream_agent_response"
-    except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered):
+    except InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered:
         pass
     except Exception as e:
         assert False, f"Unexpected exception: {e}"
@@ -1415,9 +1040,7 @@ async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
 
 
 async def test_stream_agent_response_assistant_message_content_types():
-    AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     result.add_event(
@@ -1508,9 +1131,7 @@ async def test_stream_agent_response_assistant_message_content_types():
 
     result.done()
 
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     events = await all_events(stream_agent_response(context, result))
     assert len(events) == 1
     assert isinstance(events[0], ThreadItemDoneEvent)
@@ -1549,9 +1170,7 @@ async def test_stream_agent_response_assistant_message_content_types():
 
 
 async def test_stream_agent_response_image_generation_events():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     result.add_event(
@@ -1601,9 +1220,7 @@ async def test_stream_agent_response_image_generation_events():
 
 
 async def test_stream_agent_response_image_generation_events_with_custom_converter():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     result.add_event(
@@ -1665,9 +1282,7 @@ async def test_stream_agent_response_image_generation_events_with_custom_convert
 
 
 async def test_stream_agent_response_image_generation_partial_progress():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     result.add_event(
@@ -1734,10 +1349,639 @@ async def test_stream_agent_response_image_generation_partial_progress():
     )
 
 
-async def test_workflow_streams_first_thought():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
+async def test_interleaved_image_generation_keeps_each_preview_and_result():
+    store = Mock(
+        generate_item_id=Mock(side_effect=["image_1", "image_2"]),
+        load_thread_items=AsyncMock(return_value=Page()),
     )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    first = ImageGenerationCall(
+        id="img_call_1", status="in_progress", type="image_generation_call"
+    )
+    second = ImageGenerationCall(
+        id="img_call_2", status="in_progress", type="image_generation_call"
+    )
+
+    for event in [
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=first,
+            output_index=0,
+            sequence_number=0,
+        ),
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=second,
+            output_index=1,
+            sequence_number=1,
+        ),
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=first.id,
+            output_index=0,
+            partial_image_index=1,
+            partial_image_b64="MQ==",
+            sequence_number=2,
+        ),
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=second.id,
+            output_index=1,
+            partial_image_index=1,
+            partial_image_b64="Mg==",
+            sequence_number=3,
+        ),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=second.model_copy(update={"status": "completed", "result": "Mw=="}),
+            output_index=1,
+            sequence_number=4,
+        ),
+        # A late preview for the completed call must not update the pending call.
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=second.id,
+            output_index=1,
+            partial_image_index=2,
+            partial_image_b64="MA==",
+            sequence_number=5,
+        ),
+        ResponseImageGenCallPartialImageEvent(
+            type="response.image_generation_call.partial_image",
+            item_id=first.id,
+            output_index=0,
+            partial_image_index=2,
+            partial_image_b64="NA==",
+            sequence_number=6,
+        ),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=first.model_copy(update={"status": "completed", "result": "NQ=="}),
+            output_index=0,
+            sequence_number=7,
+        ),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=ResponseOutputMessage(
+                id="assistant_message",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[],
+            ),
+            output_index=2,
+            sequence_number=8,
+        ),
+    ]:
+        result.add_event(RawResponsesStreamEvent(type="raw_response_event", data=event))
+    result.done()
+
+    events = await all_events(
+        stream_agent_response(
+            context, result, converter=ResponseStreamConverter(partial_images=3)
+        )
+    )
+    assert [event.type for event in events] == [
+        "thread.item.added",
+        "thread.item.added",
+        "thread.item.updated",
+        "thread.item.updated",
+        "thread.item.done",
+        "thread.item.updated",
+        "thread.item.done",
+        "thread.item.done",
+    ]
+    for event, item_id in zip(events[:2], ("image_1", "image_2"), strict=True):
+        assert isinstance(event, ThreadItemAddedEvent)
+        assert isinstance(event.item, GeneratedImageItem)
+        assert event.item.id == item_id
+        assert event.item.image is None
+
+    for index, item_id, provider_id, image_data, progress in (
+        (2, "image_1", first.id, "MQ==", 1 / 3),
+        (3, "image_2", second.id, "Mg==", 1 / 3),
+        (5, "image_1", first.id, "NA==", 2 / 3),
+    ):
+        event = events[index]
+        assert isinstance(event, ThreadItemUpdatedEvent)
+        assert event.item_id == item_id
+        assert isinstance(event.update, GeneratedImageUpdated)
+        assert event.update.image == GeneratedImage(
+            id=provider_id, url=f"data:image/png;base64,{image_data}"
+        )
+        assert event.update.progress == pytest.approx(progress)
+
+    for index, item_id, provider_id, image_data in (
+        (4, "image_2", second.id, "Mw=="),
+        (6, "image_1", first.id, "NQ=="),
+    ):
+        event = events[index]
+        assert isinstance(event, ThreadItemDoneEvent)
+        assert isinstance(event.item, GeneratedImageItem)
+        assert event.item.id == item_id
+        assert event.item.image == GeneratedImage(
+            id=provider_id, url=f"data:image/png;base64,{image_data}"
+        )
+
+    message = events[-1]
+    assert isinstance(message, ThreadItemDoneEvent)
+    assert isinstance(message.item, AssistantMessageItem)
+    assert message.item.id == "assistant_message"
+
+
+def _web_search_start(item_id: str, output_index: int) -> ResponseOutputItemAddedEvent:
+    return ResponseOutputItemAddedEvent(
+        type="response.output_item.added",
+        item=ResponseFunctionWebSearch(
+            type="web_search_call",
+            id=item_id,
+            status="in_progress",
+            action=ActionSearch(type="search"),
+        ),
+        output_index=output_index,
+        sequence_number=output_index,
+    )
+
+
+def _web_search_done(
+    item_id: str, output_index: int, sequence_number: int, query: str, url: str
+) -> ResponseOutputItemDoneEvent:
+    return ResponseOutputItemDoneEvent(
+        type="response.output_item.done",
+        item=ResponseFunctionWebSearch(
+            type="web_search_call",
+            id=item_id,
+            status="completed",
+            action=ActionSearch(
+                type="search",
+                queries=[query],
+                sources=[ActionSearchSource(type="url", url=url)],
+            ),
+        ),
+        output_index=output_index,
+        sequence_number=sequence_number,
+    )
+
+
+async def test_interleaved_web_searches_keep_their_task_indices_and_citations():
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    result = make_result()
+    first, second = "search_first", "search_second"
+    first_url, second_url = "https://example.com/first", "https://example.com/second"
+    citation = ResponsesAnnotationURLCitation(
+        type="url_citation",
+        title="Source two",
+        url=second_url,
+        start_index=0,
+        end_index=6,
+    )
+    for event in (
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=ResponseReasoningItem(id="reasoning", summary=[], type="reasoning"),
+            output_index=0,
+            sequence_number=0,
+        ),
+        # Both starts have identical task data. Their provider IDs distinguish them.
+        _web_search_start(first, 1),
+        _web_search_start(second, 2),
+        ResponseWebSearchCallInProgressEvent(
+            type="response.web_search_call.in_progress",
+            item_id=first,
+            output_index=1,
+            sequence_number=3,
+        ),
+        ResponseWebSearchCallSearchingEvent(
+            type="response.web_search_call.searching",
+            item_id=second,
+            output_index=2,
+            sequence_number=4,
+        ),
+        ResponseWebSearchCallCompletedEvent(
+            type="response.web_search_call.completed",
+            item_id=second,
+            output_index=2,
+            sequence_number=5,
+        ),
+        _web_search_done(second, 2, 6, "second query", second_url),
+        # The first call is still active when this stale event for the second arrives.
+        ResponseWebSearchCallSearchingEvent(
+            type="response.web_search_call.searching",
+            item_id=second,
+            output_index=2,
+            sequence_number=7,
+        ),
+        ResponseWebSearchCallSearchingEvent(
+            type="response.web_search_call.searching",
+            item_id=first,
+            output_index=1,
+            sequence_number=8,
+        ),
+        _web_search_done(first, 1, 9, "first query", first_url),
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            item=ResponseOutputMessage(
+                id="assistant_answer",
+                type="message",
+                role="assistant",
+                status="in_progress",
+                content=[],
+            ),
+            output_index=3,
+            sequence_number=10,
+        ),
+        ResponseOutputTextAnnotationAddedEvent.model_validate({
+            "type": "response.output_text.annotation.added",
+            "annotation": citation.model_dump(),
+            "content_index": 0,
+            "item_id": "assistant_answer",
+            "annotation_index": 0,
+            "output_index": 3,
+            "sequence_number": 11,
+        }),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            item=ResponseOutputMessage(
+                id="assistant_answer",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[
+                    ResponseOutputText(
+                        type="output_text", text="Answer", annotations=[citation]
+                    )
+                ],
+            ),
+            output_index=3,
+            sequence_number=12,
+        ),
+    ):
+        result.add_event(RawResponsesStreamEvent(data=event))
+    result.done()
+
+    events = await all_events(stream_agent_response(context, result))
+    search_events = [
+        event
+        for event in events
+        if isinstance(event, ThreadItemUpdatedEvent)
+        and isinstance(event.update, (WorkflowTaskAdded, WorkflowTaskUpdated))
+        and isinstance(event.update.task, SearchTask)
+    ]
+    assert [
+        (event.update.task_index, event.update.task.status_indicator)
+        for event in search_events
+        if isinstance(event.update, WorkflowTaskAdded)
+    ] == [(0, "loading"), (1, "loading")]
+    update_states = []
+    for event in search_events:
+        if isinstance(event.update, WorkflowTaskUpdated):
+            update_states.append((
+                event.update.task_index,
+                event.update.task.status_indicator,
+            ))
+    assert [index for index, state in update_states if state == "complete"][-1] == 0
+    assert (1, "complete") in update_states
+    assert (1, "loading") not in update_states[
+        update_states.index((1, "complete")) + 1 :
+    ]
+
+    (workflow,) = [
+        event.item
+        for event in events
+        if isinstance(event, ThreadItemDoneEvent)
+        and isinstance(event.item, WorkflowItem)
+    ]
+    assert all(event.item_id == workflow.id for event in search_events)
+    first_task, second_task = workflow.workflow.tasks
+    for task, query, url in (
+        (first_task, "first query", first_url),
+        (second_task, "second query", second_url),
+    ):
+        assert isinstance(task, SearchTask)
+        assert task.status_indicator == "complete"
+        assert task.queries == [query]
+        assert [source.url for source in task.sources] == [url]
+
+    answers = [
+        event.item
+        for event in events
+        if isinstance(event, ThreadItemDoneEvent)
+        and isinstance(event.item, AssistantMessageItem)
+    ]
+    assert len(answers) == 1
+    answer = answers[0]
+    assert answer.id == "assistant_answer"
+    assert answer.content[0].annotations == [
+        Annotation(source=URLSource(url=second_url, title="Source two"), index=6)
+    ]
+    assert any(
+        isinstance(event, ThreadItemUpdatedEvent)
+        and event.item_id == answer.id
+        and isinstance(event.update, AssistantMessageContentPartAnnotationAdded)
+        and event.update.annotation == answer.content[0].annotations[0]
+        for event in events
+    )
+
+
+async def test_active_web_search_at_end_of_stream_finishes_workflow():
+    store = Mock(
+        generate_item_id=Mock(return_value="search_workflow"),
+        load_thread_items=AsyncMock(return_value=Page()),
+        add_thread_item=AsyncMock(),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    item_id = "search_incomplete"
+    result.add_event(
+        RawResponsesStreamEvent(
+            data=ResponseWebSearchCallInProgressEvent(
+                type="response.web_search_call.in_progress",
+                item_id=item_id,
+                output_index=0,
+                sequence_number=0,
+            )
+        )
+    )
+    async with (
+        asyncio.timeout(2),
+        aclosing(stream_agent_response(context, result)) as events,
+    ):
+        opened = await anext(events)
+        assert isinstance(opened, ThreadItemAddedEvent)
+        assert isinstance(opened.item, WorkflowItem)
+        loading = await anext(events)
+        assert isinstance(loading, ThreadItemUpdatedEvent)
+        assert loading.update == WorkflowTaskAdded(
+            task_index=0, task=SearchTask(status_indicator="loading")
+        )
+
+        result.add_event(
+            RawResponsesStreamEvent(
+                data=ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    item=ResponseFunctionWebSearch(
+                        type="web_search_call",
+                        id=item_id,
+                        status="in_progress",
+                        action=ActionSearch(type="search", query="partial search"),
+                    ),
+                    output_index=0,
+                    sequence_number=1,
+                )
+            )
+        )
+        result.done()
+        update, finished = await all_events(events)
+
+    assert isinstance(update, ThreadItemUpdatedEvent)
+    assert update.item_id == opened.item.id
+    assert isinstance(update.update, WorkflowTaskUpdated)
+    assert update.update.task_index == 0
+    assert isinstance(finished, ThreadItemDoneEvent)
+    assert isinstance(finished.item, WorkflowItem)
+    assert finished.item.id == opened.item.id
+    (task,) = finished.item.workflow.tasks
+    assert isinstance(task, SearchTask)
+    assert task.queries == ["partial search"]
+    assert task.status_indicator == "none"
+    assert context.workflow_item is None
+    store.add_thread_item.assert_not_awaited()
+
+
+async def test_web_search_finishes_resumed_workflow_with_replacement():
+    thought = ThoughtTask(content="Existing reasoning")
+    previous = WorkflowItem(
+        id="saved_workflow",
+        thread_id=thread.id,
+        created_at=datetime.now(UTC),
+        workflow=Workflow(type="reasoning", tasks=[thought]),
+    )
+    store = Mock(
+        load_thread_items=AsyncMock(return_value=Page(data=[previous])),
+        add_thread_item=AsyncMock(),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+    url = "https://example.com/resumed"
+    result.add_event(
+        RawResponsesStreamEvent(data=_web_search_start("search_resumed", 0))
+    )
+    result.add_event(
+        RawResponsesStreamEvent(
+            data=_web_search_done("search_resumed", 0, 1, "query", url)
+        )
+    )
+    result.done()
+
+    added, updated, replaced = await all_events(stream_agent_response(context, result))
+    assert isinstance(added, ThreadItemUpdatedEvent)
+    assert added.item_id == previous.id
+    assert added.update == WorkflowTaskAdded(
+        task_index=1, task=SearchTask(status_indicator="loading")
+    )
+    assert isinstance(updated, ThreadItemUpdatedEvent)
+    assert isinstance(updated.update, WorkflowTaskUpdated)
+    assert updated.item_id == previous.id
+    assert updated.update.task_index == 1
+    assert isinstance(replaced, ThreadItemReplacedEvent)
+    assert isinstance(replaced.item, WorkflowItem)
+    assert replaced.item.id == previous.id
+    assert replaced.item.workflow.tasks == [thought, updated.update.task]
+    assert isinstance(updated.update.task, SearchTask)
+    assert updated.update.task.status_indicator == "complete"
+    store.generate_item_id.assert_not_called()
+    store.add_thread_item.assert_not_awaited()
+
+
+@pytest.mark.parametrize("finish", ["explicit", "assistant_message", "remain_open"])
+async def test_resumed_workflow_updates_existing_record(
+    finish: Literal["explicit", "assistant_message", "remain_open"],
+):
+    previous = WorkflowItem(
+        id="saved_workflow",
+        thread_id=thread.id,
+        created_at=datetime.now(UTC),
+        workflow=Workflow(type="custom", tasks=[CustomTask(title="Previous step")]),
+    )
+    store = Mock(
+        load_thread_items=AsyncMock(return_value=Page(data=[previous])),
+        add_thread_item=AsyncMock(),
+        save_item=AsyncMock(),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = make_result()
+
+    async with aclosing(stream_agent_response(context, result)) as stream:
+        if finish == "explicit":
+            # A reasoning update establishes that the relay loaded the saved workflow.
+            result.add_event(
+                RawResponsesStreamEvent(
+                    data=Mock(
+                        type="response.reasoning_summary_text.done",
+                        item_id="reasoning",
+                        summary_index=0,
+                        text="Next step",
+                    ),
+                )
+            )
+            update = await anext(stream)
+            assert isinstance(update, ThreadItemUpdatedEvent)
+            assert update.item_id == previous.id
+            await context.end_workflow(expanded=True)
+        elif finish == "assistant_message":
+            result.add_event(
+                RawResponsesStreamEvent(
+                    data=ResponseOutputItemAddedEvent(
+                        type="response.output_item.added",
+                        item=ResponseOutputMessage(
+                            id="assistant_reply",
+                            content=[],
+                            role="assistant",
+                            status="in_progress",
+                            type="message",
+                        ),
+                        output_index=0,
+                        sequence_number=0,
+                    ),
+                )
+            )
+        result.done()
+        events = await all_events(stream)
+
+    store.add_thread_item.assert_not_awaited()
+    if finish == "remain_open":
+        assert events == []
+        store.save_item.assert_awaited_once_with(thread.id, previous, None)
+    else:
+        assert isinstance(events[0], ThreadItemReplacedEvent)
+        item = events[0].item
+        assert isinstance(item, WorkflowItem)
+        assert item.id == previous.id
+        assert isinstance(item.workflow.summary, DurationSummary)
+        assert item.workflow.expanded is (finish == "explicit")
+        assert context.workflow_item is None
+        store.save_item.assert_not_awaited()
+
+
+async def test_prequeued_workflow_completion_does_not_reopen_workflow():
+    store = Mock(
+        generate_item_id=Mock(return_value="queued_workflow"),
+        load_thread_items=AsyncMock(return_value=Page()),
+        add_thread_item=AsyncMock(),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    await context.start_workflow(
+        Workflow(type="custom", tasks=[CustomTask(title="Queued step")])
+    )
+    await context.end_workflow()
+    result = make_result()
+    result.done()
+
+    added, done = await all_events(stream_agent_response(context, result))
+    assert isinstance(added, ThreadItemAddedEvent)
+    assert isinstance(done, ThreadItemDoneEvent)
+    assert added.item.id == done.item.id
+    assert context.workflow_item is None
+    store.add_thread_item.assert_not_awaited()
+    with pytest.raises(asyncio.QueueShutDown):
+        await context.stream(done)
+
+
+async def test_prequeued_workflow_takes_precedence_over_saved_workflow():
+    previous = WorkflowItem(
+        id="saved_workflow",
+        thread_id=thread.id,
+        created_at=datetime.now(UTC),
+        workflow=Workflow(type="custom", tasks=[CustomTask(title="Previous step")]),
+    )
+    store = Mock(
+        generate_item_id=Mock(return_value="queued_workflow"),
+        load_thread_items=AsyncMock(return_value=Page(data=[previous])),
+        add_thread_item=AsyncMock(),
+        save_item=AsyncMock(),
+    )
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    await context.start_workflow(
+        Workflow(type="custom", tasks=[CustomTask(title="Queued step")])
+    )
+    result = make_result()
+    result.done()
+
+    (added,) = await all_events(stream_agent_response(context, result))
+    assert isinstance(added, ThreadItemAddedEvent)
+    assert added.item.id == "queued_workflow"
+    assert context.workflow_item is added.item
+    store.add_thread_item.assert_awaited_once_with(thread.id, added.item, None)
+    store.save_item.assert_not_awaited()
+
+
+async def test_cancelled_web_search_relay_closes_the_pending_model_read():
+    store = Mock()
+    store.generate_item_id.return_value = "workflow"
+    store.load_thread_items = AsyncMock(return_value=Page())
+    store.add_thread_item = AsyncMock()
+    context = AgentContext(thread=thread, store=store, request_context=None)
+    result = Mock(spec=RunResultStreaming)
+    result.is_complete = False
+    pending_read = asyncio.Event()
+    runner_cancelled = asyncio.Event()
+    source_closed = asyncio.Event()
+    result.cancel.side_effect = runner_cancelled.set
+
+    async def model_events() -> AsyncIterator[StreamEvent]:
+        try:
+            yield RawResponsesStreamEvent(data=_web_search_start("search_first", 0))
+            yield RawResponsesStreamEvent(data=_web_search_start("search_second", 1))
+            pending_read.set()
+            yield await asyncio.Future[StreamEvent]()
+        finally:
+            await runner_cancelled.wait()
+            source_closed.set()
+
+    result.stream_events.side_effect = model_events
+    async with (
+        asyncio.timeout(2),
+        aclosing(stream_agent_response(context, result)) as events,
+    ):
+        tasks: list[SearchTask] = []
+        while len(tasks) < 2:
+            event = await anext(events)
+            if isinstance(event, ThreadItemAddedEvent) and isinstance(
+                event.item, WorkflowItem
+            ):
+                tasks.extend(
+                    task
+                    for task in event.item.workflow.tasks
+                    if isinstance(task, SearchTask)
+                )
+            elif (
+                isinstance(event, ThreadItemUpdatedEvent)
+                and isinstance(event.update, WorkflowTaskAdded)
+                and isinstance(event.update.task, SearchTask)
+            ):
+                tasks.append(event.update.task)
+        assert [task.status_indicator for task in tasks] == ["loading", "loading"]
+
+        read = asyncio.create_task(anext(events))
+        await pending_read.wait()
+        read.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read
+        with pytest.raises(StopAsyncIteration):
+            await anext(events)
+
+    result.cancel.assert_called_once_with()
+    assert source_closed.is_set()
+    assert context.workflow_item is None
+    store.add_thread_item.assert_not_awaited()
+    assert not any(
+        task.get_name().startswith("chatkit-") for task in asyncio.all_tasks()
+    )
+
+
+async def test_workflow_streams_first_thought():
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     # first thought
@@ -1896,9 +2140,7 @@ async def test_workflow_streams_first_thought():
 
 
 async def test_workflow_ends_on_message():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
 
     # first thought
@@ -1989,9 +2231,7 @@ async def test_workflow_ends_on_message():
 
 
 async def test_existing_workflow_summary_not_overwritten_on_automatic_end():
-    context = AgentContext(
-        previous_response_id=None, thread=thread, store=mock_store, request_context=None
-    )
+    context = AgentContext(thread=thread, store=mock_store, request_context=None)
     result = make_result()
     context.workflow_item = WorkflowItem(
         id="wf_1",

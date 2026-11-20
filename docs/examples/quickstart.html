@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Turnspan demo</title>
+    <link rel="icon" href="data:,">
+    <style>
+      :root {
+        font-family: system-ui, sans-serif;
+        color: #171d22;
+        background: #f5f7f9;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        max-width: 52rem;
+        margin: auto;
+        padding: 1.5rem;
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: clamp(1.5rem, 5vw, 2rem);
+      }
+
+      p {
+        margin: 0 0 1rem;
+        line-height: 1.5;
+      }
+
+      code {
+        padding: 0.12rem 0.3rem;
+        border-radius: 0.25rem;
+        background: #e7ebef;
+      }
+
+      openai-chatkit {
+        display: block;
+        box-sizing: border-box;
+        height: clamp(26rem, 70vh, 47rem);
+        border: 1px solid #cbd3da;
+        border-radius: 0.75rem;
+        overflow: hidden;
+        background: white;
+      }
+    </style>
+    <script src="https://cdn.platform.openai.com/deployments/chatkit/chatkit.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>Turnspan demo</h1>
+      <p>
+        Try <code>hello</code> for a sample reply, <code>widget</code> for a button,
+        or <code>slow</code> to test Stop. After reloading, reopen your thread
+        from Conversation history.
+      </p>
+      <openai-chatkit></openai-chatkit>
+    </main>
+    <script>
+      customElements.whenDefined("openai-chatkit").then(() => {
+        document.querySelector("openai-chatkit").setOptions({
+          api: {
+            url: new URL("/chatkit", window.location.href).href,
+            domainKey: "local-dev",
+          },
+          composer: { attachments: { enabled: false } },
+        });
+      });
+    </script>
+  </body>
+</html>

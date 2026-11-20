@@ -1,8 +1,12 @@
-.PHONY: sync install format format-check lint mypy pyright test build serve-docs deploy-docs check
+.PHONY: sync install format format-check lint pyright test build demo docs-check serve-docs check
 
-UV_ENV := env -i PATH="$(PATH)" HOME="$(HOME)"
+# Pass the version explicitly because uv --no-config skips .python-version.
+UV_ENV := env -i PATH="$(PATH)" HOME="$(HOME)" UV_PYTHON="$(shell cat .python-version)" $(if $(UV_CACHE_DIR),UV_CACHE_DIR="$(UV_CACHE_DIR)")
 UV := $(UV_ENV) uv --no-config
 UV_LOCK_ARGS := --locked --default-index https://pypi.org/simple
+UV_RUN := $(UV) run $(UV_LOCK_ARGS) --all-extras
+DOCS_RUN := $(UV) run $(UV_LOCK_ARGS) --isolated --only-group docs
+DEMO_PORT ?= 8000
 
 sync:
 	$(UV) sync $(UV_LOCK_ARGS) --all-extras --all-packages --group dev
@@ -10,31 +14,31 @@ sync:
 install: sync
 
 format:
-	$(UV) run $(UV_LOCK_ARGS) ruff format
-	$(UV) run $(UV_LOCK_ARGS) ruff check --fix
+	$(UV_RUN) ruff format
+	$(UV_RUN) ruff check --fix
 
 format-check:
-	$(UV) run $(UV_LOCK_ARGS) ruff format --check
+	$(UV_RUN) ruff format --check
 
 lint:
-	$(UV) run $(UV_LOCK_ARGS) ruff check
-
-mypy:
-	$(UV) run $(UV_LOCK_ARGS) mypy .
+	$(UV_RUN) ruff check
 
 pyright:
-	$(UV) run $(UV_LOCK_ARGS) pyright
+	$(UV_RUN) pyright
 
 test:
-	$(UV_ENV) PYTHONPATH=. uv --no-config run $(UV_LOCK_ARGS) pytest
+	$(UV_RUN) pytest $(TESTS)
 
 build:
 	$(UV) build --default-index https://pypi.org/simple
 
+demo:
+	$(UV) run $(UV_LOCK_ARGS) --isolated --no-dev --extra fastapi uvicorn docs.examples.quickstart:app --host 127.0.0.1 --port $(DEMO_PORT)
+
+docs-check:
+	$(DOCS_RUN) zensical build --clean --strict
+
 serve-docs:
-	$(UV) run $(UV_LOCK_ARGS) mkdocs serve
+	$(DOCS_RUN) zensical serve
 
-deploy-docs:
-	$(UV) run $(UV_LOCK_ARGS) mkdocs gh-deploy --force --verbose
-
-check: format-check lint pyright test
+check: format-check lint pyright test docs-check

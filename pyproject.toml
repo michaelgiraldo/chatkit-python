@@ -1,25 +1,55 @@
 [project]
 name = "openai-chatkit"
-version = "1.6.5"
+version = "1.6.5+turnspan.3"
 description = "A ChatKit backend SDK."
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = ["pydantic", "uvicorn", "openai", "openai-agents>=0.3.2", "jinja2>=3.1,<4"]
+requires-python = ">=3.14"
+dependencies = [
+  "pydantic>=2.14.4,<3",
+]
+
+[project.optional-dependencies]
+agents = [
+  "openai>=3.56.0,<4",
+  # Widen after verifying the next Agents SDK minor release.
+  "openai-agents>=0.25.0,<0.26",
+]
+fastapi = [
+  "anyio>=4.16.0,<5",
+  "fastapi>=0.165.0,<1",
+  "starlette>=1.10.0,<2",
+  "uvicorn>=0.54.0,<1",
+]
+templates = [
+  "jinja2>=3.1.6,<4",
+]
+
+[build-system]
+requires = ["setuptools>=84.2.1"]
+build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
-  "griffe==1.14.0",
-  "pytest", "pytest-asyncio", "debugpy", "fastapi", "python-multipart", "psycopg2-binary", "flask", "pyright",
-  "mypy", "ruff==0.9.2",
-  "mkdocs", "mkdocs-material", "mkdocstrings==0.30.1", "mkdocstrings-python==1.18.2", "mkdocs-gen-files"
+  { include-group = "lint" },
+  "anyio>=4.16.0,<5",
+  "httpx2>=2.16.2,<3",
+  "pytest>=9.2.0,<10",
+  "pytest-asyncio>=1.5.0,<2",
+  "starlette>=1.10.0,<2",
+  "pyright>=1.1.414,<2",
+]
+docs = [
+  "zensical>=0.1.2,<0.2",
+  "mkdocstrings-python>=2.0.11,<3",
 ]
 lint = [
-  "ruff"
+  "ruff==0.17.6",
 ]
 
 [tool.ruff]
 line-length = 88
 preview = true
+target-version = "py314"
 
 [tool.ruff.lint]
 # To customise ruff rules for your project, use the "extend", "extend-select" and "extend-ignore"
@@ -37,7 +67,7 @@ select = [
     "COM818", "COM819",
     "PYI016", "PYI018", "PYI025", "PYI030",
     "PERF102",
-    "UP001", "UP003", "UP004", "UP006", "UP007", "UP028", "UP034", "UP045",
+    "UP001", "UP003", "UP004", "UP006", "UP007", "UP028", "UP034", "UP037", "UP042", "UP043", "UP045",
     "FURB132", "FURB148", "FURB163", "FURB181",
     # "ASYNC",
     "ASYNC251",
@@ -69,26 +99,26 @@ ignore = [
     "C419",   # https://github.com/astral-sh/ruff/issues/10838
     "C420",   # interesting, but i think reads a little worse to most folks. fromkeys predates dict comprehensions
     "UP035",  # not necessary
-    "UP038",  # slows down code
     "NPY002", # useful in theory, but way too many existing hits in practice
     "PIE790", # there's nothing wrong with pass
     "SIM108",  # not convinced of the value
     "ASYNC109",  # not convinced of the value
     "ASYNC230",  # this is annoying, SSDs are fast
 ]
-extend-safe-fixes = ["ALL"]
 preview = true
 
 [tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.pyright]
-include = ["."]
+include = ["chatkit", "docs", "tests"]
 exclude = ["**/.venv", "**/.pytest_cache"]
 venvPath = "."
 venv = ".venv"
-pythonVersion = "3.10"
+pythonVersion = "3.14"
 typeCheckingMode = "standard"
 
 [tool.setuptools]

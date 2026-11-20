@@ -4,19 +4,16 @@ This guide covers how to implement and run a ChatKit server that responds to use
 
 ## Install ChatKit
 
-Install the SDK from PyPI:
-
-```bash
-pip install openai-chatkit
-```
+Follow the [quickstart installation instructions](../quickstart.md#run-your-chatkit-server)
+to install the fork and FastAPI for this example.
 
 ## Build and run your ChatKit server
 
-Your ChatKit server does three main things:
+The adapter and your ChatKit server work together:
 
 1. Accept HTTP requests from your client.
-2. Construct a request context (user id, auth, feature flags, etc.).
-3. Call `ChatKitServer.respond` to produce streamed events.
+2. Build a request context in your app, including the authenticated user ID.
+3. Dispatch the request and call your `respond` hook for turns that generate a reply.
 
 ### Define a request context
 
@@ -29,54 +26,113 @@ from dataclasses import dataclass
 @dataclass
 class MyRequestContext:
     user_id: str
+    staged_response_id: str | None = None
 ```
 
 ### Implement your `ChatKitServer`
 
-Subclass `ChatKitServer` and implement `respond`. It runs once per user turn and should yield the events that make up your response. We'll keep this example simple for now and fill in history loading and model calls in later sections.
+Subclass `ChatKitServer` and implement `respond(turn)`. The turn includes
+`turn.thread`, `turn.context`, and a typed trigger in `turn.input`.
+Yield the events that make up the response.
 
 ```python
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 
-from chatkit.server import ChatKitServer
-from chatkit.types import (
+from chatkit.errors import InvalidOperationError
+from chatkit.events import ThreadItemDoneEvent, ThreadStreamEvent
+from chatkit.models import (
     AssistantMessageContent,
     AssistantMessageItem,
-    ThreadItemDoneEvent,
     ThreadMetadata,
-    ThreadStreamEvent,
     UserMessageItem,
 )
+from chatkit.server import ChatKitServer
+from chatkit.turns import Turn
 
 
 class MyChatKitServer(ChatKitServer[MyRequestContext]):
+    async def prepare_user_message(
+        self, thread: ThreadMetadata, item: UserMessageItem, context: MyRequestContext
+    ) -> UserMessageItem:
+        attachment_ids = {attachment.id for attachment in item.attachments}
+        if len(attachment_ids) != len(item.attachments):
+            raise InvalidOperationError("Attach each file only once.")
+        return item
+
     async def respond(
-        self,
-        thread: ThreadMetadata,
-        input: UserMessageItem | None,
-        context: MyRequestContext,
+        self, turn: Turn[MyRequestContext]
     ) -> AsyncIterator[ThreadStreamEvent]:
         # Replace this with your inference pipeline.
         yield ThreadItemDoneEvent(
             item=AssistantMessageItem(
-                thread_id=thread.id,
-                id=self.store.generate_item_id("message", thread, context),
-                created_at=datetime.now(),
+                thread_id=turn.thread.id,
+                id=self.store.generate_item_id("message", turn.thread, turn.context),
+                created_at=datetime.now(UTC),
                 content=[AssistantMessageContent(text="Hi there!")],
             )
         )
 ```
 
+`Turn.input` distinguishes the four ways ChatKit starts or continues a response.
+
+| Input | Payload |
+| --- | --- |
+| `UserMessageTurn` | The saved user `.message` on a new or existing thread. |
+| `ClientToolTurn` | The saved `.tool_call` with the client's result. |
+| `StructuredInputTurn` | The answered or skipped structured input `.item`. |
+| `RetryTurn` | The existing user `.message` that starts the retry. |
+
+### Prepare new messages before saving them
+
+Override `prepare_user_message` to check or enrich new user messages. ChatKit
+calls it for thread creation and message append after resolving attachments,
+before saving the thread, attachment metadata, or message. The thread
+snapshot already has an ID, including for a new thread. Return a
+`UserMessageItem` with the original ID, thread ID, and creation time. Retries
+and continuations use their stored inputs.
+
+Raise `InvalidOperationError` with a client-safe message to return HTTP 422
+from the FastAPI adapter before opening an event stream. Raise
+`CustomStreamError` with a user-facing message to send an SSE error event.
+In either case, ChatKit performs no writes for the rejected message and
+reports no turn outcome.
+
+### Observe the turn outcome
+
+Use `on_turn_finished(turn, outcome)` for app work that depends on the
+result. Once a turn starts, ChatKit calls the hook after server persistence
+or cancellation cleanup. The outcome reports one of four states.
+
+| Outcome | Meaning |
+| --- | --- |
+| `COMPLETED` | The response finished successfully. |
+| `WAITING` | The response left a pending client tool call or structured input. |
+| `CANCELLED` | The response was interrupted. |
+| `FAILED` | An error stopped the response or was sent in the stream. |
+
+Stage app data in the request context and commit it on the outcome your app
+expects. See the examples for [response IDs](#using-previous_response_id-openai-responses-api-only)
+and [structured results](#save-structured-tool-results-after-a-turn).
+[Turn types](../api/chatkit/turns.md)
+
+An HTTP request can end before the turn starts. Attach request-scoped
+resources, such as a lease, to the response lifetime and release them when
+the response closes. Track delivery to the browser separately from turn
+completion. ChatKit logs exceptions from `on_turn_finished`. If a write
+failure needs to reach the browser, make that write in `respond` before
+completing the turn.
+
 ### Wire ChatKit to your web framework
 
-Expose a single `/chatkit` endpoint that forwards requests to your `MyChatKitServer` instance. For example, with FastAPI:
+Expose a single `/chatkit` endpoint. Install the `fastapi` extra to use the
+adapter with your `MyChatKitServer` instance. Construct the request context
+in your app and pass it into the adapter.
 
 ```python
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
 
-from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.fastapi import process_request
 
 app = FastAPI()
 store = MyPostgresStore(conn_info)
@@ -84,96 +140,155 @@ server = MyChatKitServer(store)
 
 
 @app.post("/chatkit")
-async def chatkit_endpoint(request: Request):
+async def chatkit_endpoint(request: Request) -> Response:
     # Build a per-request context from the incoming HTTP request.
     context = MyRequestContext(user_id="abc123")
 
-    # Let ChatKit handle the request and return either a streaming or JSON result.
-    result = await server.process(await request.body(), context)
-    if isinstance(result, StreamingResult):
-        return StreamingResponse(result, media_type="text/event-stream")
-    return Response(content=result.json, media_type="application/json")
+    return await process_request(server, request, context)
 ```
+
+The adapter serves JSON or an SSE stream. It returns HTTP 400 for malformed
+JSON, HTTP 422 for an invalid or unsupported operation, HTTP 404 for a
+missing resource, and HTTP 409 for a conflict with the current thread state.
+Once streaming starts, ChatKit sends error events in the SSE response.
+[FastAPI adapter reference](../api/chatkit/fastapi.md)
+
+For custom buffering or send deadlines, pass
+`streaming_response=your_response_factory`. ChatKit validates and prepares
+the typed request before calling the factory with a `StreamingResult`,
+including committing any pending-item claim or retry truncation.
+Immediate results and HTTP errors use the adapter's regular responses.
+
+Use `ChatKitStreamingResponse(result)` for the SDK's framing and disconnect
+handling. If you supply your own streaming response, it owns the result.
+Use `encode_sse` for each event and await `result.aclose()` when the response
+ends, fails, or disconnects. Stop and await any active reader before closing
+the result. Protect cleanup from cancellation so pending store writes can
+finish.
 
 ### How request context flows into ChatKit
 
-`ChatKitServer[TContext]` and `Store[TContext]` are generic over a request context type you choose (user id, org, auth scopes, feature flags). Construct it per request and pass it to `server.process`; it flows into `respond` and your store methods.
+`ChatKitServer[TContext]` and the storage interfaces use a request context type
+you choose. Construct it per request and pass it to `server.process`. Read it
+from `turn.context` in the turn hooks and from the `context` argument in your
+store methods.
 
 ```python
+from chatkit.protocol import parse_request
+
 context = MyRequestContext(user_id="abc123")
-result = await server.process(await request.body(), context)
+result = await server.process(parse_request(await request.body()), context)
 ```
 
-Request metadata in the payload is available before calling `process`; include it in your context for auth, tracing, or feature flags.
+Build authorization fields in the context from your authenticated application
+session. Treat metadata in the request body as client input.
+With FastAPI, pass the server, the HTTP request, and your context to
+`chatkit.fastapi.process_request`. For other transports, use the
+[protocol helpers](../api/chatkit/protocol.md) to parse requests and encode the
+response or stream.
 
 ## Implement your ChatKit data store
 
-Implement the `Store` interface to control how threads, messages, tool calls, and widgets are stored. Prefer serializing thread items as JSON so schema changes do not break storage. Example Postgres store:
+Implement `ThreadStore` to persist threads, messages, tool calls, and widgets.
+The [in-memory example](../examples/in_memory_thread_store.py) implements all
+thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
+`truncate_after` as short atomic operations in your database. Use
+`patch_thread` to edit saved fields, and yield the result of
+`ChatKitServer.update_thread` when a connected client should see an edit.
+For `load_thread_items(..., include_hidden=False)`, filter the model-only items
+before computing the page and its cursor.
+
+For a retry, `truncate_after` returns the retained `UserMessageItem`. Before
+returning, atomically make later items disappear from pagination and direct
+`load_item` reads using the same stable order as `load_thread_items`. For
+stores with a bounded transaction size, commit the visibility change in one
+operation and reclaim inactive records separately under your retention
+policy. Test retrying a history larger than a single write batch.
+
+To support uploads, supply an
+`AttachmentMetadataStore` for records and an `AttachmentStore` for file
+operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-strategy)
+
+### Use the file-backed SQLite example
+
+The [SQLite example](../examples/sqlite_thread_store.py) implements all 12
+`ThreadStore` methods. Save it with your app or import it from this checkout.
+It scopes thread and item queries by `context.user_id`, so supply this value
+from your authenticated application session. The database survives restarts.
+Use a new SQLite file for the example.
 
 ```python
-class MyPostgresStore(Store[RequestContext]):
-    def __init__(self, conninfo: str) -> None:
-        self._conninfo = conninfo
-        self._init_schema()
+from dataclasses import dataclass
 
-    def _init_schema(self) -> None:
-        with self._connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS threads (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    data JSONB NOT NULL
-                );
-                """
-            )
+from docs.examples.sqlite_thread_store import SQLiteThreadStore
 
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS items (
-                    id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL
-                        REFERENCES threads (id)
-                        ON DELETE CASCADE,
-                    user_id TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    data JSONB NOT NULL
-                );
-                """
-            )
 
-            conn.commit()
+@dataclass(frozen=True)
+class RequestContext:
+    user_id: str
 
-    async def load_thread(
-        self, thread_id: str, context: RequestContext
-    ) -> ThreadMetadata:
-        with self._connection() as conn, conn.cursor(row_factory=tuple_row) as cur:
-            cur.execute(
-                "SELECT data FROM threads WHERE id = %s AND user_id = %s",
-                (thread_id, context.user_id),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise NotFoundError(f"Thread {thread_id} not found")
-            return ThreadMetadata.model_validate(row[0])
 
-    async def save_thread(
-        self, thread: ThreadMetadata, context: RequestContext
-    ) -> None:
-        payload = thread.model_dump(mode="json")
-        with self._connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO threads (id, user_id, created_at, data)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (thread.id, context.user_id, thread.created_at, payload),
-            )
-            conn.commit()
-
-    # Implement the remaining Store methods following the same pattern.
+store = SQLiteThreadStore[RequestContext]("chat.sqlite3")
 ```
+
+Pass `store` to your `ChatKitServer` subclass. The example uses short SQLite
+transactions and Python's synchronous `sqlite3` driver. Each operation runs
+on the calling thread, so this is a local development reference. For a busy
+async server, use an async driver or run the SQLite transactions in a worker.
+The example persists threads and items. Configure a separate attachment store
+if your app supports uploads.
+
+### Keep old and new timestamps sortable
+
+Turnspan writes timestamps with a UTC offset. Existing records may contain
+timestamps without an offset. Find the timezone used by the old writer and
+use it to interpret those records. For example, if the old writer ran in
+UTC, pass `UTC` as `legacy_timezone`.
+
+```python
+from datetime import UTC, datetime, tzinfo
+
+
+def normalize_created_at(value: datetime, legacy_timezone: tzinfo) -> datetime:
+    if value.utcoffset() is None:
+        value = value.replace(tzinfo=legacy_timezone)
+    return value.astimezone(UTC)
+```
+
+Use the same `(normalized_created_at, id)` ordering for history pages,
+cursor lookups, and retry truncation. If your database stores a separate
+sort key, apply the same normalization to its old and new keys. Check
+pages and retries that cross the boundary between legacy and newer items.
+
+### Check your app's store
+
+Run `check_thread_store` in your app's test suite with a disposable database
+and contexts for two distinct test users. The check writes and deletes a
+synthetic thread. It verifies scoped reads, tied-timestamp pagination,
+concurrent patches, form and tool claims, and retry truncation.
+
+```python
+import pytest
+
+from chatkit.store_checks import check_thread_store
+
+
+@pytest.mark.asyncio
+async def test_app_store(tmp_path):
+    path = tmp_path / "contract.sqlite3"
+    await check_thread_store(
+        SQLiteThreadStore[RequestContext](path),
+        RequestContext(user_id="example-user"),
+        other_context=RequestContext(user_id="other-example-user"),
+        peer=SQLiteThreadStore[RequestContext](path),
+    )
+```
+
+For async adapters, supply independent store instances sharing the test database
+so the two calls can contend across connections. A synchronous driver runs
+those tasks in sequence on an event loop. To test actual write contention
+with synchronous SQLite, run each transaction on its own worker, as in the
+repository's SQLite concurrency test.
 
 Customize ID generation by overriding `generate_thread_id` and `generate_item_id` if you need external or deterministic IDs. Store metadata such as a model `last_response_id` on `ThreadMetadata` to drive your inference pipeline.
 
@@ -195,11 +310,11 @@ Fetch recent items so the model sees the conversation state before you build the
 
 ```python
 items_page = await self.store.load_thread_items(
-    thread.id,
+    turn.thread.id,
     after=None,
     limit=20,  # Tune this limit based on your model/context budget.
     order="desc",
-    context=context,
+    context=turn.context,
 )
 items = list(reversed(items_page.data))
 ```
@@ -208,9 +323,8 @@ items = list(reversed(items_page.data))
 - Customize for your integration: some item types require app-specific translation into model input (for example: **attachments**, **tags**, and some **hidden context items**). In those cases, subclass `ThreadItemConverter` and call your converter directly instead of `simple_to_agent_input`. (If your thread includes attachments/tags and you haven't implemented the converter hooks, conversion will raise `NotImplementedError`.)
 
 ```python
-from agents import Runner
-
-from chatkit.agents import AgentContext, ThreadItemConverter, simple_to_agent_input
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import AgentContext
 
 
 # Option A (defaults):
@@ -220,64 +334,110 @@ input_items = await simple_to_agent_input(items)
 # input_items = await MyThreadItemConverter().to_agent_input(items)
 
 agent_context = AgentContext(
-    thread=thread,
+    thread=turn.thread,
     store=self.store,
-    request_context=context,
+    request_context=turn.context,
 )
 ```
 
-Respect any `input.inference_options` the client sends (model, tool choice, etc.) when you build your request to the model.
+Read client model and tool choices from `turn.input.message.inference_options`
+on a `UserMessageTurn` or `RetryTurn`. Validate the choices against the
+models and tools your app offers.
 
 #### Using `previous_response_id` (OpenAI Responses API only)
 
-If you are using OpenAI models through the **Responses API**, you can pass `previous_response_id` to `Runner.run_streamed(...)` and (often) send only the *new* user message as model input. This can simplify input construction when the provider can retrieve prior context server-side.
+The OpenAI Responses API can retrieve model-visible history from a stored
+response. If your app permits provider-side storage, pass a saved response ID
+as `previous_response_id` to `Runner.run_streamed()` on the next turn. For
+locally managed history or ChatKit-only items such as widgets, use the
+[thread history approach above](#load-thread-history-recommended-default).
 
-Terminology note: Agents exposes the ID of the most recent model response as `result.last_response_id`. On the *next* turn, you pass that saved value as the `previous_response_id` parameter.
-
-**Important restrictions:**
-
-- **OpenAI Responses API only.** Other model providers won't be able to follow a `previous_response_id`, so you must send thread history yourself.
-- **Only includes model-visible history.** If your integration streams ChatKit-only items (e.g. widgets/workflows emitted directly to the client), the model won't know about them unless you also include them in `input_items`.
-- **Works only while the referenced response is retrievable.** Persist `result.last_response_id` and ensure responses are stored (`store=True` / `ModelSettings(store=True)`); otherwise fall back to rebuilding input from thread items.
-
-Example:
+This responder enables provider-side storage for the run. ChatKit saves the
+incoming user message before calling `respond`, so the history fallback already
+includes it.
 
 ```python
-# `ThreadMetadata.metadata` is a free-form dict for integration-specific state.
-# ChatKit does not define a first-class `last_response_id` field on `ThreadMetadata`;
-# your integration can store it under a key and reuse it on the next turn.
-last_response_id = thread.metadata.get("last_response_id")
-last_response_id = last_response_id if isinstance(last_response_id, str) else None
+from contextlib import aclosing
 
-# Often: send only the new message as input when chaining on the server.
-input_items = await simple_to_agent_input(input)
+from agents import ModelSettings, RunConfig, Runner
 
-result = Runner.run_streamed(
-    assistant_agent,
-    input_items,
-    context=agent_context,
-    previous_response_id=last_response_id,
-    auto_previous_response_id=True,
-)
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import AgentContext, stream_agent_response
+from chatkit.turns import Turn, TurnOutcome, UserMessageTurn
 
-# Persist the new response ID so the next turn can chain again.
-if result.last_response_id:
-    thread.metadata["last_response_id"] = result.last_response_id
-    await self.store.save_thread(thread, context=context)
+
+class MyChatKitServer(ChatKitServer[MyRequestContext]):
+    async def respond(
+        self, turn: Turn[MyRequestContext]
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        thread, context = turn.thread, turn.context
+        saved_id = thread.metadata.get("last_response_id")
+        if saved_id is not None:
+            await self.store.patch_thread(
+                thread.id, {"metadata_delete": ("last_response_id",)}, context
+            )
+
+        previous_response_id = None
+        if (
+            isinstance(saved_id, str)
+            and saved_id
+            and isinstance(turn.input, UserMessageTurn)
+        ):
+            previous_response_id = saved_id
+            input_items = await simple_to_agent_input(turn.input.message)
+        else:
+            items_page = await self.store.load_thread_items(
+                thread.id, after=None, limit=20, order="desc", context=context
+            )
+            input_items = await simple_to_agent_input(list(reversed(items_page.data)))
+
+        agent_context = AgentContext(
+            thread=thread, store=self.store, request_context=context
+        )
+        result = Runner.run_streamed(
+            assistant_agent,
+            input_items,
+            context=agent_context,
+            previous_response_id=previous_response_id,
+            run_config=RunConfig(model_settings=ModelSettings(store=True)),
+        )
+
+        async with aclosing(stream_agent_response(agent_context, result)) as events:
+            async for event in events:
+                yield event
+        context.staged_response_id = result.last_response_id
+
+    async def on_turn_finished(
+        self, turn: Turn[MyRequestContext], outcome: TurnOutcome
+    ) -> None:
+        if outcome is TurnOutcome.COMPLETED and turn.context.staged_response_id:
+            await self.store.patch_thread(
+                turn.thread.id,
+                {"metadata_set": {"last_response_id": turn.context.staged_response_id}},
+                turn.context,
+            )
 ```
+
+`result.last_response_id` becomes available as the runner receives model
+responses. Save it only after the stream finishes successfully. If the provider
+reports that the saved response is no longer retrievable, a fresh attempt can
+rebuild its input from thread history. Only retry automatically if nothing has
+been sent to the client and no tools have taken action.
 
 ### Run inference and stream events
 
 Run your agent and stream events back to the client. `stream_agent_response` converts an Agents run into ChatKit events; you can also yield events manually.
 
 ```python
+from contextlib import aclosing
+
 from agents import (
     InputGuardrailTripwireTriggered,
     OutputGuardrailTripwireTriggered,
     Runner,
 )
 from chatkit.agents import stream_agent_response
-from chatkit.types import ErrorEvent
+from chatkit.events import ErrorEvent
 
 result = Runner.run_streamed(
     assistant_agent,
@@ -286,8 +446,9 @@ result = Runner.run_streamed(
 )
 
 try:
-    async for event in stream_agent_response(agent_context, result):
-        yield event
+    async with aclosing(stream_agent_response(agent_context, result)) as events:
+        async for event in events:
+            yield event
 except InputGuardrailTripwireTriggered:
     yield ErrorEvent(message="We blocked that message for safety.")
 except OutputGuardrailTripwireTriggered:
@@ -302,16 +463,129 @@ To stream events from a server tool during the same turn, use `ctx.context.strea
 ```python
 from agents import RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
-from chatkit.types import ProgressUpdateEvent
+from chatkit.events import ProgressUpdateEvent
 
 
 @function_tool()
 async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
-    await ctx.context.stream(ProgressUpdateEvent(icon="document", text="Loading document..."))
+    await ctx.context.stream(
+        ProgressUpdateEvent(icon="document", text="Loading document...")
+    )
     return await get_document_by_id(document_id)
 ```
 
-`stream_agent_response` will forward these events alongside any assistant text or tool call updates. Client tool calls are also supported via `ctx.context.client_tool_call` when you register the tool on both client and server.
+`stream_agent_response` forwards these events alongside assistant text and tool updates. To call a browser callback from an agent tool, use [`request_client_tool`](update-client-during-response.md#define-a-client-tool-in-your-agent).
+
+### Save structured tool results after a turn
+
+Use the same `AgentContext` for the run and the ChatKit stream. Inside a tool,
+`ctx.context.thread.id` gives you the current ChatKit thread ID. Extend the
+context to hold structured output until the turn finishes. The example below
+keeps one feedback record per user message.
+
+```python
+from agents import Agent, RunContextWrapper, Runner, function_tool
+from pydantic import BaseModel
+
+from chatkit.agents import AgentContext
+
+
+class Feedback(BaseModel):
+    summary: str
+
+
+@dataclass
+class FeedbackRequestContext(MyRequestContext):
+    feedback: Feedback | None = None
+
+
+class FeedbackContext(AgentContext[FeedbackRequestContext]):
+    feedback: Feedback | None = None
+
+
+formatter = Agent[FeedbackContext](
+    name="Feedback formatter",
+    instructions="Summarize the user's feedback in one sentence.",
+    output_type=Feedback,
+)
+
+
+@function_tool(failure_error_function=None)
+async def collect_feedback(ctx: RunContextWrapper[FeedbackContext], text: str) -> str:
+    """Collect feedback the user shared in this turn."""
+    formatted = await Runner.run(formatter, text, context=ctx.context)
+    ctx.context.feedback = formatted.final_output_as(
+        Feedback, raise_if_incorrect_type=True
+    )
+    return "Feedback collected."
+
+
+feedback_agent = Agent[FeedbackContext](
+    name="Assistant",
+    instructions="Call collect_feedback when the user shares feedback.",
+    tools=[collect_feedback],
+)
+```
+
+Pass a `FeedbackRequestContext` to `server.process`. Supply
+`self.feedback_repository` from your application with an async `upsert`
+method. Use a unique key of user ID, thread ID, and source message ID so
+retrying the same message updates its existing record.
+
+```python
+from contextlib import aclosing
+
+from chatkit.agent_input import simple_to_agent_input
+from chatkit.agents import stream_agent_response
+from chatkit.turns import RetryTurn, Turn, TurnOutcome, UserMessageTurn
+
+
+class FeedbackChatKitServer(ChatKitServer[FeedbackRequestContext]):
+    async def respond(
+        self, turn: Turn[FeedbackRequestContext]
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        thread, context = turn.thread, turn.context
+        items_page = await self.store.load_thread_items(
+            thread.id, after=None, limit=20, order="desc", context=context
+        )
+        input_items = await simple_to_agent_input(list(reversed(items_page.data)))
+        agent_context = FeedbackContext(
+            thread=thread, store=self.store, request_context=context
+        )
+        result = Runner.run_streamed(feedback_agent, input_items, context=agent_context)
+
+        async with aclosing(stream_agent_response(agent_context, result)) as events:
+            async for event in events:
+                yield event
+
+        if (
+            result.is_complete
+            and not result.interruptions
+            and result.final_output is not None
+        ):
+            context.feedback = agent_context.feedback
+
+    async def on_turn_finished(
+        self, turn: Turn[FeedbackRequestContext], outcome: TurnOutcome
+    ) -> None:
+        if (
+            outcome is TurnOutcome.COMPLETED
+            and isinstance(turn.input, (UserMessageTurn, RetryTurn))
+            and turn.context.feedback is not None
+        ):
+            await self.feedback_repository.upsert(
+                user_id=turn.context.user_id,
+                thread_id=turn.thread.id,
+                source_message_id=turn.input.message.id,
+                feedback=turn.context.feedback,
+            )
+```
+
+The completion hook writes feedback only for a successful turn with a source
+user message. ChatKit reports cancellations, guardrail errors, and turns
+waiting for client input separately.
+
+This example builds on Jao Garcia's persistence question. [Upstream issue #120](https://github.com/openai/chatkit-python/issues/120)
 
 ## Next: add features
 

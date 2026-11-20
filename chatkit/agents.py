@@ -1,17 +1,12 @@
 import asyncio
-import json
 from collections import defaultdict
-from collections.abc import AsyncIterator
-from datetime import datetime
-from inspect import cleandoc
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from contextlib import aclosing
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import (
     Annotated,
     Any,
-    AsyncGenerator,
-    Generic,
-    Sequence,
-    TypeVar,
-    cast,
 )
 
 from agents import (
@@ -19,22 +14,8 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunResultStreaming,
     StreamEvent,
-    TResponseInputItem,
 )
-from openai.types.responses import (
-    EasyInputMessageParam,
-    ResponseFunctionToolCall,
-    ResponseFunctionToolCallParam,
-    ResponseInputContentParam,
-    ResponseInputImageParam,
-    ResponseInputMessageContentListParam,
-    ResponseInputTextParam,
-    ResponseOutputText,
-)
-from openai.types.responses.response_input_item_param import (
-    FunctionCallOutput,
-    Message,
-)
+from agents.tool_context import ToolContext
 from openai.types.responses.response_output_message import Content
 from openai.types.responses.response_output_text import (
     Annotation as ResponsesAnnotation,
@@ -44,80 +25,75 @@ from openai.types.responses.response_output_text import (
     AnnotationFileCitation,
     AnnotationURLCitation,
 )
-from pydantic import BaseModel, ConfigDict, SkipValidation, TypeAdapter
-from typing_extensions import assert_never
+from pydantic import BaseModel, ConfigDict, PrivateAttr, SkipValidation, TypeAdapter
 
-from .server import stream_widget
-from .store import Store, StoreItemType
-from .types import (
-    Annotation,
-    AssistantMessageContent,
+from ._stream import _close_stream
+from ._web_search import _WebSearchProgress
+from .events import (
     AssistantMessageContentPartAdded,
     AssistantMessageContentPartAnnotationAdded,
     AssistantMessageContentPartDone,
     AssistantMessageContentPartTextDelta,
-    AssistantMessageItem,
-    Attachment,
-    ClientToolCallItem,
-    DurationSummary,
-    EndOfTurnItem,
-    FileSource,
-    GeneratedImage,
-    GeneratedImageItem,
     GeneratedImageUpdated,
-    HiddenContextItem,
-    SDKHiddenContextItem,
-    StructuredInputItem,
-    Task,
-    TaskItem,
-    ThoughtTask,
-    ThreadItem,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemRemovedEvent,
+    ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
-    ThreadMetadata,
     ThreadStreamEvent,
-    URLSource,
-    UserMessageItem,
-    UserMessageTagContent,
-    UserMessageTextContent,
-    WidgetItem,
-    Workflow,
-    WorkflowItem,
-    WorkflowSummary,
     WorkflowTaskAdded,
     WorkflowTaskUpdated,
 )
-from .widgets import Markdown, Text, WidgetRoot
+from .logger import logger
+from .models import (
+    Annotation,
+    AssistantMessageContent,
+    AssistantMessageItem,
+    ClientToolCallItem,
+    DurationSummary,
+    FileSource,
+    GeneratedImage,
+    GeneratedImageItem,
+    Task,
+    ThoughtTask,
+    ThreadMetadata,
+    URLSource,
+    Workflow,
+    WorkflowItem,
+    WorkflowSummary,
+)
+from .store import StoreItemType, ThreadStore
+from .widget_stream import stream_widget
+from .widgets import Markdown, Text, WidgetRootInput
+
+_CHAT_COMPLETIONS_PLACEHOLDER_ID = "__fake_id__"
+_CLIENT_TOOL_CONFLICT = "Only one client tool may be requested per turn."
+_ANNOTATION_ADAPTER = TypeAdapter[ResponsesAnnotation](ResponsesAnnotation)
 
 
-class ClientToolCall(BaseModel):
-    """
-    Returned from tool methods to indicate a client-side tool call.
-    """
-
+@dataclass(frozen=True, slots=True)
+class _ClientToolRequest:
+    item_id: str | None
+    call_id: str
     name: str
     arguments: dict[str, Any]
 
 
-class _QueueCompleteSentinel: ...
+class AgentContext[TContext](BaseModel):
+    """State and app events for a single response run."""
 
-
-TContext = TypeVar("TContext")
-
-
-class AgentContext(BaseModel, Generic[TContext]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     thread: ThreadMetadata
-    store: Annotated[Store[TContext], SkipValidation]
+    store: Annotated[ThreadStore[TContext], SkipValidation]
     request_context: TContext
-    previous_response_id: str | None = None
-    client_tool_call: ClientToolCall | None = None
     workflow_item: WorkflowItem | None = None
-    generated_image_item: GeneratedImageItem | None = None
-    _events: asyncio.Queue[ThreadStreamEvent | _QueueCompleteSentinel] = asyncio.Queue()
+    _resumed_workflow_id: str | None = None
+    _client_tool_request: _ClientToolRequest | None = None
+    _client_tool_conflict: bool = False
+    _events: asyncio.Queue[ThreadStreamEvent] = PrivateAttr(
+        default_factory=asyncio.Queue
+    )
 
     def generate_id(
         self, type: StoreItemType, thread: ThreadMetadata | None = None
@@ -129,55 +105,93 @@ class AgentContext(BaseModel, Generic[TContext]):
             type, thread or self.thread, self.request_context
         )
 
+    def request_client_tool(
+        self,
+        tool: ToolContext[AgentContext[TContext]],
+        *,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Request a browser callback for this invocation of an Agents SDK tool.
+
+        Configure the agent to stop at the calling tool. The browser receives one
+        pending call when the run finishes and supplies its result on the next turn.
+        """
+        if tool.context is not self or not tool.tool_call_id:
+            raise ValueError("Pass the ToolContext for the current tool invocation.")
+        if self._client_tool_request is not None:
+            self._client_tool_conflict = True
+            raise ValueError(_CLIENT_TOOL_CONFLICT)
+
+        self._client_tool_request = _ClientToolRequest(
+            item_id=tool.tool_call.id if tool.tool_call is not None else None,
+            call_id=tool.tool_call_id,
+            name=name,
+            arguments=arguments,
+        )
+
     async def stream_widget(
         self,
-        widget: WidgetRoot | AsyncGenerator[WidgetRoot, None],
+        widget: WidgetRootInput | AsyncGenerator[WidgetRootInput],
         copy_text: str | None = None,
     ) -> None:
         """Stream a widget into the thread by enqueueing widget events."""
-        async for event in stream_widget(
-            self.thread,
-            widget,
-            copy_text,
-            lambda item_type: self.store.generate_item_id(
-                item_type, self.thread, self.request_context
-            ),
-        ):
-            await self._events.put(event)
+        async with aclosing(
+            stream_widget(self.thread, widget, copy_text, self.generate_id)
+        ) as events:
+            async for event in events:
+                await self.stream(event)
 
     async def end_workflow(
         self, summary: WorkflowSummary | None = None, expanded: bool = False
     ) -> None:
         """Finalize the active workflow item, optionally attaching a summary."""
-        if not self.workflow_item:
-            # No workflow to end
-            return
+        if self.workflow_item is not None:
+            await self.stream(
+                self._finish_workflow(
+                    self.workflow_item, summary=summary, expanded=expanded
+                )
+            )
+
+    def _finish_workflow(
+        self,
+        item: WorkflowItem,
+        *,
+        summary: WorkflowSummary | None = None,
+        expanded: bool = False,
+    ) -> ThreadItemDoneEvent | ThreadItemReplacedEvent:
+        if self.workflow_item is not None and self.workflow_item.id == item.id:
+            self.workflow_item = None
 
         if summary is not None:
-            self.workflow_item.workflow.summary = summary
-        elif self.workflow_item.workflow.summary is None:
-            # If no summary was set or provided, set a basic work summary
-            delta = datetime.now() - self.workflow_item.created_at
-            duration = int(delta.total_seconds())
-            self.workflow_item.workflow.summary = DurationSummary(duration=duration)
-        self.workflow_item.workflow.expanded = expanded
-        await self.stream(ThreadItemDoneEvent(item=self.workflow_item))
-        self.workflow_item = None
+            item.workflow.summary = summary
+        elif item.workflow.summary is None:
+            delta = datetime.now(item.created_at.tzinfo) - item.created_at
+            item.workflow.summary = DurationSummary(duration=int(delta.total_seconds()))
+        item.workflow.expanded = expanded
+        if item.id == self._resumed_workflow_id:
+            return ThreadItemReplacedEvent(item=item)
+        return ThreadItemDoneEvent(item=item)
 
     async def start_workflow(self, workflow: Workflow) -> None:
         """Begin streaming a new workflow item."""
-        self.workflow_item = WorkflowItem(
-            id=self.generate_id("workflow"),
-            created_at=datetime.now(),
-            workflow=workflow,
-            thread_id=self.thread.id,
-        )
+        item = self._open_workflow(workflow)
 
-        if workflow.type != "reasoning" and len(workflow.tasks) == 0:
+        if workflow.type != "reasoning" and not workflow.tasks:
             # Defer sending added event until we have tasks
             return
 
-        await self.stream(ThreadItemAddedEvent(item=self.workflow_item))
+        await self.stream(ThreadItemAddedEvent(item=item))
+
+    def _open_workflow(self, workflow: Workflow) -> WorkflowItem:
+        item = WorkflowItem(
+            id=self.generate_id("workflow"),
+            created_at=datetime.now(UTC),
+            workflow=workflow,
+            thread_id=self.thread.id,
+        )
+        self.workflow_item = item
+        return item
 
     async def update_workflow_task(self, task: Task, task_index: int) -> None:
         """Update an existing workflow task and stream the delta."""
@@ -197,73 +211,80 @@ class AgentContext(BaseModel, Generic[TContext]):
 
     async def add_workflow_task(self, task: Task) -> None:
         """Append a workflow task and stream the appropriate event."""
-        self.workflow_item = self.workflow_item or WorkflowItem(
-            id=self.generate_id("workflow"),
-            created_at=datetime.now(),
-            workflow=Workflow(type="custom", tasks=[]),
-            thread_id=self.thread.id,
+        item = self.workflow_item or self._open_workflow(
+            Workflow(type="custom", tasks=[])
         )
-        workflow = self.workflow_item.workflow
+        workflow = item.workflow
         workflow.tasks.append(task)
 
         if workflow.type != "reasoning" and len(workflow.tasks) == 1:
-            await self.stream(ThreadItemAddedEvent(item=self.workflow_item))
+            await self.stream(ThreadItemAddedEvent(item=item))
         else:
             await self.stream(
                 ThreadItemUpdatedEvent(
-                    item_id=self.workflow_item.id,
+                    item_id=item.id,
                     update=WorkflowTaskAdded(
                         task=task,
-                        task_index=workflow.tasks.index(task),
+                        task_index=len(workflow.tasks) - 1,
                     ),
                 )
             )
 
     async def stream(self, event: ThreadStreamEvent) -> None:
-        """Enqueue a ThreadStreamEvent for downstream processing."""
+        """Enqueue an event. Raises QueueShutDown after the response finishes."""
         await self._events.put(event)
 
-    def _complete(self):
-        self._events.put_nowait(_QueueCompleteSentinel())
 
-
-T1 = TypeVar("T1")
-T2 = TypeVar("T2")
-
-
-async def _merge_generators(
+async def _merge_generators[T1, T2](
     a: AsyncIterator[T1],
     b: AsyncIterator[T2],
-) -> AsyncIterator[T1 | T2]:
-    pending: list[AsyncIterator[T1 | T2]] = [a, b]
-    pending_tasks: dict[asyncio.Task, AsyncIterator[T1 | T2]] = {
-        asyncio.ensure_future(g.__anext__()): g for g in pending
+    *,
+    on_abort: Callable[[], None] | None = None,
+) -> AsyncGenerator[T1 | T2]:
+    async def read(source: AsyncIterator[T1 | T2]) -> T1 | T2:
+        return await anext(source)
+
+    pending_tasks: dict[asyncio.Task[T1 | T2], AsyncIterator[T1 | T2]] = {
+        asyncio.create_task(read(a), name="chatkit-agent-event"): a,
+        asyncio.create_task(read(b), name="chatkit-context-event"): b,
     }
-    while len(pending_tasks) > 0:
-        done, _ = await asyncio.wait(
-            pending_tasks.keys(), return_when="FIRST_COMPLETED"
-        )
-        stop = False
-        for d in done:
-            try:
-                result = d.result()
-                yield result
-                dg = pending_tasks[d]
-                pending_tasks[asyncio.ensure_future(dg.__anext__())] = dg
-            except StopAsyncIteration:
-                stop = True
-            finally:
-                del pending_tasks[d]
-        if stop:
-            for task in pending_tasks.keys():
-                if not task.cancel():
-                    try:
-                        yield task.result()
-                    except asyncio.CancelledError:
-                        pass
-                    except asyncio.InvalidStateError:
-                        pass
-            break
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                pending_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            exhausted = False
+            for task in done:
+                try:
+                    event = task.result()
+                except StopAsyncIteration:
+                    exhausted = True
+                else:
+                    yield event
+            if exhausted:
+                # Keep events that arrived while we were yielding from the done set.
+                for task in pending_tasks.keys() - done:
+                    if not task.cancel():
+                        try:
+                            yield task.result()
+                        except asyncio.CancelledError, StopAsyncIteration:
+                            pass
+                return
+
+            for task in done:
+                source = pending_tasks.pop(task)
+                pending_tasks[
+                    asyncio.create_task(read(source), name=task.get_name())
+                ] = source
+    except BaseException:
+        if on_abort is not None:
+            on_abort()
+        raise
+    finally:
+        for task in pending_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
 
 
 class _EventWrapper:
@@ -272,41 +293,18 @@ class _EventWrapper:
 
 
 class _AsyncQueueIterator(AsyncIterator[_EventWrapper]):
-    def __init__(
-        self, queue: asyncio.Queue[ThreadStreamEvent | _QueueCompleteSentinel]
-    ):
-        self.queue = queue
-        self.completed = False
+    def __init__(self, queue: asyncio.Queue[ThreadStreamEvent]) -> None:
+        self._queue = queue
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self.completed:
-            raise StopAsyncIteration
-
-        item = await self.queue.get()
-        if isinstance(item, _QueueCompleteSentinel):
-            self.completed = True
-            raise StopAsyncIteration
-        return _EventWrapper(item)
-
-    def drain_and_complete(self) -> None:
-        """Empty the underlying queue without awaiting and mark this iterator completed.
-
-        This is intended for cleanup paths where we must guarantee no awaits
-        occur. All queued items, including any completion sentinel, are
-        discarded.
-        """
-        while True:
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        self.completed = True
+    async def __anext__(self) -> _EventWrapper:
+        try:
+            return _EventWrapper(await self._queue.get())
+        except asyncio.QueueShutDown:
+            raise StopAsyncIteration from None
 
 
-class StreamingThoughtTracker(BaseModel):
+@dataclass(slots=True)
+class _StreamingThoughtTracker:
     item_id: str
     index: int
     task: ThoughtTask
@@ -438,11 +436,14 @@ async def _convert_content(
 async def _convert_annotation(
     raw_annotation: object, converter: ResponseStreamConverter
 ) -> Annotation | None:
-    # There is a bug in the OpenAPI client that sometimes parses the annotation delta event into the wrong class
-    # resulting into annotation being a dict or untyped object instead instead of a ResponsesAnnotation
-    annotation = TypeAdapter[ResponsesAnnotation](ResponsesAnnotation).validate_python(
-        raw_annotation
-    )
+    if raw_annotation is None:
+        return None
+
+    # Stream events can use different model classes than completed response content.
+    if isinstance(raw_annotation, BaseModel):
+        raw_annotation = raw_annotation.model_dump()
+
+    annotation = _ANNOTATION_ADAPTER.validate_python(raw_annotation)
 
     if annotation.type == "file_citation":
         return await converter.file_citation_to_annotation(annotation)
@@ -456,35 +457,17 @@ async def _convert_annotation(
     return None
 
 
-def _function_call_metadata(raw_item: object) -> tuple[str | None, str | None]:
-    if isinstance(raw_item, dict):
-        if raw_item.get("type") != "function_call":
-            return None, None
-
-        call_id = raw_item.get("call_id")
-        item_id = raw_item.get("id")
-        return (
-            call_id if isinstance(call_id, str) else None,
-            item_id if isinstance(item_id, str) else None,
-        )
-
-    if isinstance(raw_item, ResponseFunctionToolCall):
-        return raw_item.call_id, raw_item.id
-
-    return None, None
-
-
 async def stream_agent_response(
     context: AgentContext,
     result: RunResultStreaming,
     *,
     converter: ResponseStreamConverter = _DEFAULT_RESPONSE_STREAM_CONVERTER,
-) -> AsyncIterator[ThreadStreamEvent]:
+) -> AsyncGenerator[ThreadStreamEvent]:
     """
     Convert a streamed Agents SDK run into ChatKit thread stream events.
 
     This function consumes a streaming run result and yields `ThreadStreamEvent`
-    objects as the run progresses.
+    objects as the run progresses. Closing the stream early cancels an active run.
 
     Args:
         context: The AgentContext to use for the stream.
@@ -495,90 +478,130 @@ async def stream_agent_response(
     Returns:
         An async iterator that yields thread stream events representing the run result.
     """
-    current_item_id = None
-    current_tool_call = None
+    queue_iterator = _AsyncQueueIterator(context._events)
+    model_events = aiter(result.stream_events())
+    cancel_requested = False
+
+    def cancel_run() -> None:
+        nonlocal cancel_requested
+        if cancel_requested or result.is_complete:
+            return
+        cancel_requested = True
+        try:
+            result.cancel()
+        except Exception, asyncio.CancelledError:
+            logger.exception("Failed to cancel the Agents SDK run")
+
+    merged_events = _merge_generators(model_events, queue_iterator, on_abort=cancel_run)
+    try:
+        async with aclosing(
+            _stream_agent_response(context, merged_events, queue_iterator, converter)
+        ) as events:
+            async for event in events:
+                yield event
+    except BaseException:
+        cancel_run()
+        context._events.shutdown(immediate=True)
+        for stream in (merged_events, model_events):
+            try:
+                await _close_stream(stream)
+            except Exception, asyncio.CancelledError:
+                logger.exception("Failed to close an agent event stream")
+        raise
+    else:
+        await _close_stream(model_events)
+
+
+async def _stream_agent_response(
+    context: AgentContext,
+    events: AsyncIterator[StreamEvent | _EventWrapper],
+    queue_iterator: _AsyncQueueIterator,
+    converter: ResponseStreamConverter,
+) -> AsyncGenerator[ThreadStreamEvent]:
     ctx = context
     thread = context.thread
-    queue_iterator = _AsyncQueueIterator(context._events)
     produced_items = set()
-    streaming_thought: None | StreamingThoughtTracker = None
+    synthetic_message_ids: dict[int, str] = {}
+    pending_images: dict[str, GeneratedImageItem] = {}
+    streaming_thought: _StreamingThoughtTracker | None = None
     # item_id -> content_index -> annotation count
     item_annotation_count: defaultdict[str, defaultdict[int, int]] = defaultdict(
         lambda: defaultdict(int)
     )
 
-    # check if the last item in the thread was a workflow or a client tool call
-    # if it was a client tool call, check if the second last item was a workflow
-    # if either was, continue the workflow
+    # A workflow immediately before a client tool call can continue on resume.
     items = await context.store.load_thread_items(
         thread.id, None, 2, "desc", context.request_context
     )
-    last_item = items.data[0] if len(items.data) > 0 else None
-    second_last_item = items.data[1] if len(items.data) > 1 else None
+    match items.data:
+        case [WorkflowItem() as saved, *_] | [
+            ClientToolCallItem(),
+            WorkflowItem() as saved,
+        ]:
+            ctx._resumed_workflow_id = saved.id
+            if ctx.workflow_item is None:
+                ctx.workflow_item = saved
 
-    if last_item and last_item.type == "workflow":
-        ctx.workflow_item = last_item
-    elif (
-        last_item
-        and last_item.type == "client_tool_call"
-        and second_last_item
-        and second_last_item.type == "workflow"
-    ):
-        ctx.workflow_item = second_last_item
+    def message_id(item_id: str, output_index: int) -> str:
+        # Agents reuses this placeholder in its Responses-shaped Chat Completions
+        # events. Keep one store ID until the message at this index completes.
+        if item_id != _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+            return item_id
+        if output_index not in synthetic_message_ids:
+            synthetic_message_ids[output_index] = ctx.generate_id("message")
+        return synthetic_message_ids[output_index]
 
-    def end_workflow(item: WorkflowItem):
-        if item == ctx.workflow_item:
-            ctx.workflow_item = None
-        delta = datetime.now() - item.created_at
-        duration = int(delta.total_seconds())
-        if item.workflow.summary is None:
-            item.workflow.summary = DurationSummary(duration=duration)
-        # Default to closing all workflows
-        # To keep a workflow open on completion, close it explicitly with
-        # AgentContext.end_workflow(expanded=True)
-        item.workflow.expanded = False
-        return ThreadItemDoneEvent(item=item)
+    def start_reasoning_workflow() -> WorkflowItem:
+        workflow_item = ctx._open_workflow(Workflow(type="reasoning", tasks=[]))
+        produced_items.add(workflow_item.id)
+        return workflow_item
+
+    search_progress = _WebSearchProgress(start_reasoning_workflow)
+
+    def finish_workflow(item: WorkflowItem):
+        search_progress.settle(item)
+        return ctx._finish_workflow(item)
+
+    def relay_context_event(event: ThreadStreamEvent) -> Iterator[ThreadStreamEvent]:
+        if isinstance(event, (ThreadItemAddedEvent, ThreadItemDoneEvent)):
+            item = event.item
+            # End the active workflow when a different visual item is added.
+            if (
+                ctx.workflow_item
+                and ctx.workflow_item.id != item.id
+                and item.type not in {"client_tool_call", "hidden_context_item"}
+            ):
+                yield finish_workflow(ctx.workflow_item)
+
+            if item.id != ctx._resumed_workflow_id:
+                # Guardrails only remove items produced during this run.
+                produced_items.add(item.id)
+            if isinstance(event, ThreadItemAddedEvent) and isinstance(
+                item, WorkflowItem
+            ):
+                ctx.workflow_item = item
+
+        if isinstance(
+            event, (ThreadItemDoneEvent, ThreadItemReplacedEvent)
+        ) and isinstance(event.item, WorkflowItem):
+            item = event.item
+            if ctx.workflow_item is not None and ctx.workflow_item.id == item.id:
+                ctx.workflow_item = None
+            search_progress.settle(item)
+            if (
+                isinstance(event, ThreadItemDoneEvent)
+                and item.id == ctx._resumed_workflow_id
+            ):
+                event = ThreadItemReplacedEvent(item=item)
+
+        yield event
 
     try:
-        async for event in _merge_generators(result.stream_events(), queue_iterator):
+        async for event in events:
             # Events emitted from agent context helpers
             if isinstance(event, _EventWrapper):
-                event = event.event
-                if (
-                    event.type == "thread.item.added"
-                    or event.type == "thread.item.done"
-                ):
-                    # End the current workflow if visual item is added after it
-                    if (
-                        ctx.workflow_item
-                        and ctx.workflow_item.id != event.item.id
-                        and event.item.type != "client_tool_call"
-                        and event.item.type != "hidden_context_item"
-                    ):
-                        yield end_workflow(ctx.workflow_item)
-
-                    # track the current workflow if one is added
-                    if (
-                        event.type == "thread.item.added"
-                        and event.item.type == "workflow"
-                    ):
-                        ctx.workflow_item = event.item
-
-                    # track integration produced items so we can clean them up if
-                    # there is a guardrail tripwire
-                    produced_items.add(event.item.id)
-                yield event
-                continue
-
-            if event.type == "run_item_stream_event":
-                event = event.item
-                if event.type == "tool_call_item":
-                    current_tool_call, current_item_id = _function_call_metadata(
-                        event.raw_item
-                    )
-                    if current_tool_call:
-                        assert current_item_id
-                        produced_items.add(current_item_id)
+                for context_event in relay_context_event(event.event):
+                    yield context_event
                 continue
 
             if event.type != "raw_response_event":
@@ -587,12 +610,18 @@ async def stream_agent_response(
 
             # Handle Responses events
             event = event.data
+            search_events = search_progress.handle(event, ctx.workflow_item)
+            if search_events is not None:
+                for search_event in search_events:
+                    yield search_event
+                continue
+
             if event.type == "response.content_part.added":
                 if event.part.type == "reasoning_text":
                     continue
                 content = await _convert_content(event.part, converter)
                 yield ThreadItemUpdatedEvent(
-                    item_id=event.item_id,
+                    item_id=message_id(event.item_id, event.output_index),
                     update=AssistantMessageContentPartAdded(
                         content_index=event.content_index,
                         content=content,
@@ -600,7 +629,7 @@ async def stream_agent_response(
                 )
             elif event.type == "response.output_text.delta":
                 yield ThreadItemUpdatedEvent(
-                    item_id=event.item_id,
+                    item_id=message_id(event.item_id, event.output_index),
                     update=AssistantMessageContentPartTextDelta(
                         content_index=event.content_index,
                         delta=event.delta,
@@ -608,7 +637,7 @@ async def stream_agent_response(
                 )
             elif event.type == "response.output_text.done":
                 yield ThreadItemUpdatedEvent(
-                    item_id=event.item_id,
+                    item_id=message_id(event.item_id, event.output_index),
                     update=AssistantMessageContentPartDone(
                         content_index=event.content_index,
                         content=AssistantMessageContent(
@@ -620,16 +649,14 @@ async def stream_agent_response(
             elif event.type == "response.output_text.annotation.added":
                 annotation = await _convert_annotation(event.annotation, converter)
                 if annotation:
+                    item_id = message_id(event.item_id, event.output_index)
                     # Manually track annotation indices per content part in case we drop an annotation that
                     # we can't convert to our internal representation (e.g. missing filename).
-                    annotation_index = item_annotation_count[event.item_id][
-                        event.content_index
-                    ]
-                    item_annotation_count[event.item_id][event.content_index] = (
-                        annotation_index + 1
-                    )
+                    content_counts = item_annotation_count[item_id]
+                    annotation_index = content_counts[event.content_index]
+                    content_counts[event.content_index] += 1
                     yield ThreadItemUpdatedEvent(
-                        item_id=event.item_id,
+                        item_id=item_id,
                         update=AssistantMessageContentPartAnnotationAdded(
                             content_index=event.content_index,
                             annotation_index=annotation_index,
@@ -640,41 +667,36 @@ async def stream_agent_response(
             elif event.type == "response.output_item.added":
                 item = event.item
                 if item.type == "reasoning" and not ctx.workflow_item:
-                    ctx.workflow_item = WorkflowItem(
-                        id=ctx.generate_id("workflow"),
-                        created_at=datetime.now(),
-                        workflow=Workflow(type="reasoning", tasks=[]),
-                        thread_id=thread.id,
-                    )
-                    produced_items.add(ctx.workflow_item.id)
-                    yield ThreadItemAddedEvent(item=ctx.workflow_item)
+                    yield ThreadItemAddedEvent(item=start_reasoning_workflow())
                 if item.type == "message":
                     if ctx.workflow_item:
-                        yield end_workflow(ctx.workflow_item)
-                    produced_items.add(item.id)
+                        yield finish_workflow(ctx.workflow_item)
+                    item_id = message_id(item.id, event.output_index)
+                    produced_items.add(item_id)
                     yield ThreadItemAddedEvent(
                         item=AssistantMessageItem(
-                            # Reusing the Responses message ID
-                            id=item.id,
+                            id=item_id,
                             thread_id=thread.id,
                             content=[
                                 await _convert_content(c, converter)
                                 for c in item.content
                             ],
-                            created_at=datetime.now(),
+                            created_at=datetime.now(UTC),
                         ),
                     )
                 elif item.type == "image_generation_call":
-                    ctx.generated_image_item = GeneratedImageItem(
+                    image_item = GeneratedImageItem(
                         id=ctx.generate_id("message"),
                         thread_id=thread.id,
-                        created_at=datetime.now(),
+                        created_at=datetime.now(UTC),
                         image=None,
                     )
-                    produced_items.add(ctx.generated_image_item.id)
-                    yield ThreadItemAddedEvent(item=ctx.generated_image_item)
+                    pending_images[item.id] = image_item
+                    produced_items.add(image_item.id)
+                    yield ThreadItemAddedEvent(item=image_item)
             elif event.type == "response.image_generation_call.partial_image":
-                if not ctx.generated_image_item:
+                image_item = pending_images.get(event.item_id)
+                if image_item is None:
                     continue
 
                 url = await converter.base64_image_to_url(
@@ -686,14 +708,11 @@ async def stream_agent_response(
                     event.partial_image_index
                 )
 
-                ctx.generated_image_item.image = GeneratedImage(
-                    id=event.item_id, url=url
-                )
-
                 yield ThreadItemUpdatedEvent(
-                    item_id=ctx.generated_image_item.id,
+                    item_id=image_item.id,
                     update=GeneratedImageUpdated(
-                        image=ctx.generated_image_item.image, progress=progress
+                        image=GeneratedImage(id=event.item_id, url=url),
+                        progress=progress,
                     ),
                 )
             elif event.type == "response.reasoning_summary_text.delta":
@@ -705,7 +724,7 @@ async def stream_agent_response(
                     ctx.workflow_item.workflow.type == "reasoning"
                     and len(ctx.workflow_item.workflow.tasks) == 0
                 ):
-                    streaming_thought = StreamingThoughtTracker(
+                    streaming_thought = _StreamingThoughtTracker(
                         item_id=event.item_id,
                         index=event.summary_index,
                         task=ThoughtTask(content=event.delta),
@@ -754,7 +773,7 @@ async def stream_agent_response(
                         ctx.workflow_item.workflow.tasks.append(task)
                         update = WorkflowTaskAdded(
                             task=task,
-                            task_index=ctx.workflow_item.workflow.tasks.index(task),
+                            task_index=len(ctx.workflow_item.workflow.tasks) - 1,
                         )
                     yield ThreadItemUpdatedEvent(
                         item_id=ctx.workflow_item.id,
@@ -763,21 +782,24 @@ async def stream_agent_response(
             elif event.type == "response.output_item.done":
                 item = event.item
                 if item.type == "message":
-                    produced_items.add(item.id)
+                    item_id = message_id(item.id, event.output_index)
+                    if item.id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+                        del synthetic_message_ids[event.output_index]
+                    produced_items.add(item_id)
                     yield ThreadItemDoneEvent(
                         item=AssistantMessageItem(
-                            # Reusing the Responses message ID
-                            id=item.id,
+                            id=item_id,
                             thread_id=thread.id,
                             content=[
                                 await _convert_content(c, converter)
                                 for c in item.content
                             ],
-                            created_at=datetime.now(),
+                            created_at=datetime.now(UTC),
                         ),
                     )
-                elif item.type == "image_generation_call" and item.result:
-                    if not ctx.generated_image_item:
+                elif item.type == "image_generation_call":
+                    image_item = pending_images.pop(item.id, None)
+                    if image_item is None or not item.result:
                         continue
 
                     url = await converter.base64_image_to_url(
@@ -786,57 +808,66 @@ async def stream_agent_response(
                     )
                     image = GeneratedImage(id=item.id, url=url)
 
-                    ctx.generated_image_item.image = image
-                    yield ThreadItemDoneEvent(item=ctx.generated_image_item)
+                    yield ThreadItemDoneEvent(
+                        item=image_item.model_copy(update={"image": image})
+                    )
 
-                    ctx.generated_image_item = None
-
-    except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered):
-        for item_id in produced_items:
-            yield ThreadItemRemovedEvent(item_id=item_id)
-
-        # Drain remaining events without processing them
-        context._complete()
-        queue_iterator.drain_and_complete()
-
+    except BaseException as error:
+        if ctx.workflow_item and search_progress.has_tasks(ctx.workflow_item):
+            ctx.workflow_item = None
+        if isinstance(
+            error, (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered)
+        ):
+            # Discard queued app events after a guardrail stops the provider.
+            context._events.shutdown(immediate=True)
+            for item_id in produced_items:
+                yield ThreadItemRemovedEvent(item_id=item_id)
         raise
 
-    context._complete()
+    if context._client_tool_conflict:
+        # The Agents SDK can convert a tool exception into a tool result. Never
+        # hand off an ambiguous request even if the run handled the exception.
+        raise ValueError(_CLIENT_TOOL_CONFLICT)
+
+    context._events.shutdown()
+
+    # Settle native search state before yielding queued events. A disconnect
+    # during the drain must not leave an active search in the agent context.
+    finished_search_workflow = None
+    if ctx.workflow_item and search_progress.has_tasks(ctx.workflow_item):
+        finished_search_workflow = finish_workflow(ctx.workflow_item)
 
     # Drain remaining events
     async for event in queue_iterator:
-        yield event.event
+        for context_event in relay_context_event(event.event):
+            yield context_event
 
-    # If there is still an active workflow at the end of the run, store
-    # it's current state so that we can continue it in the next turn.
-    if ctx.workflow_item:
-        await ctx.store.add_thread_item(
-            thread.id, ctx.workflow_item, ctx.request_context
-        )
+    if finished_search_workflow is not None:
+        yield finished_search_workflow
+    elif workflow := ctx.workflow_item:
+        # Other workflows can continue in the next turn.
+        if workflow.id == ctx._resumed_workflow_id:
+            await ctx.store.save_item(thread.id, workflow, ctx.request_context)
+        else:
+            await ctx.store.add_thread_item(thread.id, workflow, ctx.request_context)
 
-    if context.client_tool_call:
+    if (request := context._client_tool_request) is not None:
+        item_id = request.item_id
+        if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+            item_id = context.generate_id("tool_call")
         yield ThreadItemDoneEvent(
             item=ClientToolCallItem(
-                id=current_item_id
-                or context.store.generate_item_id(
-                    "tool_call", thread, context.request_context
-                ),
+                id=item_id,
                 thread_id=thread.id,
-                name=context.client_tool_call.name,
-                arguments=context.client_tool_call.arguments,
-                created_at=datetime.now(),
-                call_id=current_tool_call
-                or context.store.generate_item_id(
-                    "tool_call", thread, context.request_context
-                ),
+                name=request.name,
+                arguments=request.arguments,
+                created_at=datetime.now(UTC),
+                call_id=request.call_id,
             ),
         )
 
 
-TWidget = TypeVar("TWidget", bound=Markdown | Text)
-
-
-async def accumulate_text(
+async def accumulate_text[TWidget: Markdown | Text](
     events: AsyncIterator[StreamEvent],
     base_widget: TWidget,
 ) -> AsyncIterator[TWidget]:
@@ -848,420 +879,3 @@ async def accumulate_text(
                 text += event.data.delta
                 yield base_widget.model_copy(update={"value": text})
     yield base_widget.model_copy(update={"value": text, "streaming": False})
-
-
-class ThreadItemConverter:
-    """
-    Converts thread items to Agent SDK input items.
-    Widgets, Tasks, and Workflows have default conversions but can be customized.
-    Attachments, Tags, and HiddenContextItems require custom handling based on the use case.
-    Other item types are converted automatically.
-    """
-
-    async def attachment_to_message_content(
-        self, attachment: Attachment
-    ) -> ResponseInputContentParam:
-        """
-        Convert an attachment in a user message into a message content part to send to the model.
-        Required when attachments are enabled.
-        """
-        raise NotImplementedError(
-            "An Attachment was included in a UserMessageItem but Converter.attachment_to_message_content was not implemented"
-        )
-
-    async def tag_to_message_content(
-        self, tag: UserMessageTagContent
-    ) -> ResponseInputContentParam:
-        """
-        Convert a tag in a user message into a message content part to send to the model as context.
-        Required when tags are used.
-        """
-        raise NotImplementedError(
-            "A Tag was included in a UserMessageItem but Converter.tag_to_message_content is not implemented"
-        )
-
-    async def generated_image_to_input(
-        self, item: GeneratedImageItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        """
-        Convert a GeneratedImageItem into input item(s) to send to the model.
-        Override this method to customize the conversion of generated images, such as when your
-        generated image url is not publicly reachable.
-        """
-        if not item.image:
-            return None
-
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text="The following image was generated by the agent.",
-                ),
-                ResponseInputImageParam(
-                    type="input_image",
-                    detail="auto",
-                    image_url=item.image.url,
-                ),
-            ],
-            role="user",
-        )
-
-    async def hidden_context_to_input(
-        self, item: HiddenContextItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        """
-        Convert a HiddenContextItem into input item(s) to send to the model.
-        Required to override when HiddenContextItems with non-string content are used.
-        """
-        if not isinstance(item.content, str):
-            raise NotImplementedError(
-                "HiddenContextItems with non-string content were present in a user message but a Converter.hidden_context_to_input was not implemented"
-            )
-
-        text = (
-            "Hidden context for the agent (not shown to the user):\n"
-            f"<HiddenContext>\n{item.content}\n</HiddenContext>"
-        )
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                )
-            ],
-            role="user",
-        )
-
-    async def sdk_hidden_context_to_input(
-        self, item: SDKHiddenContextItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        """
-        Convert a SDKHiddenContextItem into input item to send to the model.
-        This is used by the ChatKit Python SDK for storing additional context
-        for internal operations.
-        Override if you want to wrap the content in a different format.
-        """
-        text = (
-            "Hidden context for the agent (not shown to the user):\n"
-            f"<HiddenContext>\n{item.content}\n</HiddenContext>"
-        )
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                )
-            ],
-            role="user",
-        )
-
-    async def task_to_input(
-        self, item: TaskItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        """
-        Convert a TaskItem into input item(s) to send to the model.
-        """
-        if item.task.type != "custom" or (
-            not item.task.title and not item.task.content
-        ):
-            return None
-        title = f"{item.task.title}" if item.task.title else ""
-        content = f"{item.task.content}" if item.task.content else ""
-        task_text = f"{title}: {content}" if title and content else title or content
-        text = f"A message was displayed to the user that the following task was performed:\n<Task>\n{task_text}\n</Task>"
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                )
-            ],
-            role="user",
-        )
-
-    async def structured_input_to_input(
-        self, item: StructuredInputItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        """
-        Convert a StructuredInputItem into input item(s) to send to the model.
-        """
-        lines = []
-        for question in item.inputs:
-            answer = question.answer
-            if answer is None:
-                lines.append(f"- {question.question}: unanswered")
-            elif answer.skipped:
-                lines.append(f"- {question.question}: skipped")
-            else:
-                lines.append(f"- {question.question}: {', '.join(answer.values)}")
-
-        text = (
-            "A structured input request was displayed to the user with the following "
-            f"status: {item.status}\n<StructuredInput>\n"
-            + "\n".join(lines)
-            + "\n</StructuredInput>"
-        )
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                ),
-            ],
-            role="user",
-        )
-
-    async def workflow_to_input(
-        self, item: WorkflowItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        """
-        Convert a TaskItem into input item(s) to send to the model.
-        Returns WorkflowItem.response_items by default.
-        """
-        messages = []
-        for task in item.workflow.tasks:
-            if task.type != "custom" or (not task.title and not task.content):
-                continue
-
-            title = f"{task.title}" if task.title else ""
-            content = f"{task.content}" if task.content else ""
-            task_text = f"{title}: {content}" if title and content else title or content
-            text = f"A message was displayed to the user that the following task was performed:\n<Task>\n{task_text}\n</Task>"
-            messages.append(
-                Message(
-                    type="message",
-                    content=[
-                        ResponseInputTextParam(
-                            type="input_text",
-                            text=text,
-                        )
-                    ],
-                    role="user",
-                )
-            )
-        return messages
-
-    async def widget_to_input(
-        self, item: WidgetItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        """
-        Convert a WidgetItem into input item(s) to send to the model.
-        By default, WidgetItems converted to a text description with a JSON representation of the widget.
-        """
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=f"The following graphical UI widget (id: {item.id}) was displayed to the user:"
-                    + item.widget.model_dump_json(
-                        exclude_unset=True, exclude_none=True
-                    ),
-                )
-            ],
-            role="user",
-        )
-
-    async def user_message_to_input(
-        self, item: UserMessageItem, is_last_message: bool = True
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        # Build the user text exactly as typed, rendering tags as @key
-        message_text_parts: list[str] = []
-        # Track tags separately to add system context
-        raw_tags: list[UserMessageTagContent] = []
-
-        for part in item.content:
-            if isinstance(part, UserMessageTextContent):
-                message_text_parts.append(part.text)
-            elif isinstance(part, UserMessageTagContent):
-                message_text_parts.append(f"@{part.text}")
-                raw_tags.append(part)
-            else:
-                assert_never(part)
-
-        user_text_item = Message(
-            role="user",
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text", text="".join(message_text_parts)
-                ),
-                *[
-                    await self.attachment_to_message_content(a)
-                    for a in item.attachments
-                ],
-            ],
-        )
-
-        # Build system items (prepend later): quoted text and @-mention context
-        context_items: list[TResponseInputItem] = []
-
-        if item.quoted_text and is_last_message:
-            context_items.append(
-                Message(
-                    role="user",
-                    type="message",
-                    content=[
-                        ResponseInputTextParam(
-                            type="input_text",
-                            text=f"The user is referring to this in particular: \n{item.quoted_text}",
-                        )
-                    ],
-                )
-            )
-
-        # Dedupe tags (preserve order) and resolve to message content
-        if raw_tags:
-            seen, uniq_tags = set(), []
-            for t in raw_tags:
-                if t.text not in seen:
-                    seen.add(t.text)
-                    uniq_tags.append(t)
-
-            tag_content: ResponseInputMessageContentListParam = [
-                # should return summarized text items
-                await self.tag_to_message_content(tag)
-                for tag in uniq_tags
-            ]
-
-            if tag_content:
-                context_items.append(
-                    Message(
-                        role="user",
-                        type="message",
-                        content=[
-                            ResponseInputTextParam(
-                                type="input_text",
-                                text=cleandoc("""
-                                    # User-provided context for @-mentions
-                                    - When referencing resolved entities, use their canonical names **without** '@'.
-                                    - The '@' form appears only in user text and should not be echoed.
-                                """).strip(),
-                            ),
-                            *tag_content,
-                        ],
-                    )
-                )
-
-        return [user_text_item, *context_items]
-
-    async def assistant_message_to_input(
-        self, item: AssistantMessageItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        return EasyInputMessageParam(
-            type="message",
-            content=[
-                # content param doesn't support the assistant message content types
-                cast(
-                    ResponseInputContentParam,
-                    ResponseOutputText(
-                        type="output_text",
-                        text=c.text,
-                        annotations=[],  # TODO: these should be sent back as well
-                    ).model_dump(),
-                )
-                for c in item.content
-            ],
-            role="assistant",
-        )
-
-    async def client_tool_call_to_input(
-        self, item: ClientToolCallItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        if item.status == "pending":
-            # Filter out pending tool calls - they cannot be sent to the model
-            return None
-
-        return [
-            ResponseFunctionToolCallParam(
-                type="function_call",
-                call_id=item.call_id,
-                name=item.name,
-                arguments=json.dumps(item.arguments),
-            ),
-            FunctionCallOutput(
-                type="function_call_output",
-                call_id=item.call_id,
-                output=json.dumps(item.output),
-            ),
-        ]
-
-    async def end_of_turn_to_input(
-        self, item: EndOfTurnItem
-    ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        # Only used for UI hints - you shouldn't need to override this
-        return None
-
-    async def _thread_item_to_input_item(
-        self,
-        item: ThreadItem,
-        is_last_message: bool = True,
-    ) -> list[TResponseInputItem]:
-        match item:
-            case UserMessageItem():
-                out = await self.user_message_to_input(item, is_last_message) or []
-                return out if isinstance(out, list) else [out]
-            case AssistantMessageItem():
-                out = await self.assistant_message_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case ClientToolCallItem():
-                out = await self.client_tool_call_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case EndOfTurnItem():
-                out = await self.end_of_turn_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case WidgetItem():
-                out = await self.widget_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case WorkflowItem():
-                out = await self.workflow_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case TaskItem():
-                out = await self.task_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case StructuredInputItem():
-                out = await self.structured_input_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case HiddenContextItem():
-                out = await self.hidden_context_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case SDKHiddenContextItem():
-                out = await self.sdk_hidden_context_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case GeneratedImageItem():
-                out = await self.generated_image_to_input(item) or []
-                return out if isinstance(out, list) else [out]
-            case _:
-                assert_never(item)
-
-    async def to_agent_input(
-        self,
-        thread_items: Sequence[ThreadItem] | ThreadItem,
-    ) -> list[TResponseInputItem]:
-        if isinstance(thread_items, Sequence):
-            # shallow copy in case caller mutates the list while we're iterating
-            thread_items = thread_items[:]
-        else:
-            thread_items = [thread_items]
-        output: list[TResponseInputItem] = []
-        for item in thread_items:
-            output.extend(
-                await self._thread_item_to_input_item(
-                    item,
-                    is_last_message=item is thread_items[-1],
-                )
-            )
-        return output
-
-
-_DEFAULT_CONVERTER = ThreadItemConverter()
-
-
-def simple_to_agent_input(thread_items: Sequence[ThreadItem] | ThreadItem):
-    """Helper that converts thread items using the default ThreadItemConverter."""
-    return _DEFAULT_CONVERTER.to_agent_input(thread_items)

@@ -24,7 +24,8 @@ With `history.enabled: true`, ChatKit.js will:
 - Let users click a past thread to load its items and continue the conversation.
 - Let users delete and rename threads.
 
-Set `history.enabled: false` if you want a single-thread, stateless chat experience with no history UI.
+Set `history.enabled: false` to hide the history UI. Your store still persists
+the current conversation.
 
 ## Show readable titles in history
 
@@ -32,54 +33,52 @@ Threads start untitled. Give them short, descriptive titles so the history list 
 
 ### Set a title directly
 
-Set `thread.title` on the server and persist it with your store:
+Call `update_thread` in your responder and yield the returned event.
 
 ```python
 from chatkit.server import ChatKitServer
+from chatkit.turns import Turn
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
-    async def respond(...):
+    async def respond(self, turn: Turn[RequestContext]):
         ...
-        if not thread.title:
-            thread.title = "Order #1234"
-            await self.store.save_thread(thread, context=context)
+        if not turn.thread.title:
+            yield await self.update_thread(
+                turn.thread.id, {"title": "Order #1234"}, turn.context
+            )
 ```
 
-ChatKit will emit a `ThreadUpdatedEvent` so connected clients update the title in their history views.
+ChatKit applies the patch to the latest stored thread. Yielding the
+`ThreadUpdatedEvent` updates the title in the connected client's history view.
 
 ### Auto-generate a title after the first turn
 
 Generate a concise title after the first assistant turn once you have enough context. Skip if the thread already has a title or if there isn’t enough content to summarize.
 
 ```python
+from contextlib import aclosing
+
+from chatkit.agents import stream_agent_response
+from chatkit.turns import Turn
+
+
 class MyChatKitServer(ChatKitServer[RequestContext]):
-    async def respond(...):
-        updating_thread_title = asyncio.create_task(
-            self._maybe_update_thread_title(thread, context)
-        )
+    async def respond(self, turn: Turn[RequestContext]):
+        agent_context, result = start_agent_run(turn)
 
-        # Stream your main response
-        async for event in stream_agent_response(agent_context, result):
-            yield event
+        async with aclosing(stream_agent_response(agent_context, result)) as events:
+            async for event in events:
+                yield event
 
-        # Await so the title update streams back as a ThreadUpdatedEvent
-        await updating_thread_title
-
-    async def _maybe_update_thread_title(
-        self, thread: ThreadMetadata, context: RequestContext
-    ) -> None:
-        if thread.title is not None:
-            return
-        items = await self.store.load_thread_items(
-            thread.id,
-            after=None,
-            limit=6,
-            order="desc",
-            context=context,
-        )
-        thread.title = await generate_short_title(items.data)  # your model call
-        await self.store.save_thread(thread, context=context)
+        if turn.thread.title is None:
+            items = await self.store.load_thread_items(
+                turn.thread.id, after=None, limit=6, order="desc", context=turn.context
+            )
+            title = await generate_short_title(list(reversed(items.data)))
+            yield await self.update_thread(
+                turn.thread.id, {"title": title}, turn.context
+            )
 ```
 
 Use any model call you like for `generate_short_title`: run a tiny Agent, a simple completion, or your own heuristic. Keep titles brief (for example, 3–6 words).
@@ -90,7 +89,8 @@ By default, users can continue any past thread: selecting it in the history view
 
 Use `thread.status` to mark conversations that should no longer accept new messages. Locked and closed threads still appear in history, but the composer UI changes.
 
-There are two ways to stop new user messages: temporarily lock a thread or permanently close it when the conversation is finished.
+Use the locked state for a temporary pause and the closed state when the
+conversation is finished.
 
 | State   | When to use                                    | Input UI                                       | What the user sees |
 |---------|------------------------------------------------|------------------------------------------------|--------------------|
@@ -101,39 +101,33 @@ There are two ways to stop new user messages: temporarily lock a thread or perma
 
 
 ```python
-from chatkit.types import ActiveStatus, LockedStatus, ClosedStatus
+from chatkit.models import ActiveStatus, LockedStatus, ClosedStatus
 
 # lock (temporary pause)
-thread.status = LockedStatus(reason="Escalated to support.")
-await store.save_thread(thread, context=context)
+await store.patch_thread(
+    thread.id, {"status": LockedStatus(reason="Escalated to support.")}, context
+)
 
 # close (final state)
-thread.status = ClosedStatus(reason="Resolved.")
-await store.save_thread(thread, context=context)
+await store.patch_thread(
+    thread.id, {"status": ClosedStatus(reason="Resolved.")}, context
+)
 
 # re-open
-thread.status = ActiveStatus()
-await store.save_thread(thread, context=context)
+await store.patch_thread(thread.id, {"status": ActiveStatus()}, context)
 ```
 
-When you persist a new status during `respond`, ChatKit emits a `ThreadUpdatedEvent` so all viewers see the updated state.
+To update the connected client from `respond` or `action`, yield the event
+returned by `await self.update_thread(thread.id, {"status": status}, context)`.
+Calling the store directly only saves the status.
 
 You can also update the thread status from a custom client-facing endpoint that updates the store directly (outside of the ChatKit server request flow). If the user is currently viewing the thread, have the client call `chatkit.fetchUpdates()` after the status is persisted so the UI picks up the latest thread state.
 
 ### Block server-side work when locked or closed
 
-Thread status only affects the composer UI; `ChatKitServer` does not automatically reject actions, tool calls, or imperative message adds. Your integration should short-circuit handlers when a thread is disabled:
-
-```python
-class MyChatKitServer(...):
-    async def respond(thread, input_user_message, context):
-        if thread.status.type in {"locked", "closed"}:
-            return
-        # normal processing
-
-    async def action(thread, action, sender, context):
-        if thread.status.type in {"locked", "closed"}:
-            return
-        # normal processing
-```
+Thread status controls how the client displays the composer. Enforce your
+write policy in the backend for locked or closed threads. Check it before
+dispatching a write operation, or enforce it in your store transaction when a
+thread could close concurrently. `respond` runs after ChatKit saves an
+incoming message or tool result, so it is too late to prevent that write.
 

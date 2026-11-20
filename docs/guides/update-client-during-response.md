@@ -19,12 +19,12 @@ Inside a tool, use `AgentContext.stream` to enqueue progress events. They are de
 ```python
 from agents import RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
-from chatkit.types import ProgressUpdateEvent
+from chatkit.events import ProgressUpdateEvent
 
 
 @function_tool()
 async def ingest_files(ctx: RunContextWrapper[AgentContext], paths: list[str]):
-    await ctx.context.stream(ProgressUpdateEvent(icon="upload", text="Uploading..."))
+    await ctx.context.stream(ProgressUpdateEvent(icon="document", text="Uploading..."))
     await upload(paths)
 
     await ctx.context.stream(
@@ -39,15 +39,24 @@ async def ingest_files(ctx: RunContextWrapper[AgentContext], paths: list[str]):
 
 ### From custom pipelines
 
-If you are not using the Agents SDK, yield `ProgressUpdateEvent` directly from your `respond` or `action` methods while your backend works:
+Custom pipelines can yield `ProgressUpdateEvent` directly from `respond` or
+`action`. This example uses your app's `RequestContext`, `search_tickets`, and
+`stream_summary` helpers. `stream_summary` yields ChatKit events.
 
 ```python
-async def respond(...):
-    yield ProgressUpdateEvent(icon="search", text="Searching tickets...")
-    results = await search_tickets()
+from collections.abc import AsyncIterator
 
-    yield ProgressUpdateEvent(icon="code", text="Generating summary...")
-    yield from await stream_summary(results)
+from chatkit.turns import Turn
+from chatkit.events import ProgressUpdateEvent, ThreadStreamEvent
+
+
+async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+    yield ProgressUpdateEvent(icon="search", text="Searching tickets...")
+    results = await search_tickets(turn.context)
+
+    yield ProgressUpdateEvent(icon="square-code", text="Generating summary...")
+    async for event in stream_summary(results):
+        yield event
 ```
 
 Use short, action-oriented messages and throttle updates to meaningful stages instead of every percent to avoid noisy streams.
@@ -63,7 +72,13 @@ Client effects are ephemeral: they stream immediately to ChatKit.js, trigger you
 Yield client effects directly from the `respond` or `action` method:
 
 ```python
-async def respond(...):
+from collections.abc import AsyncIterator
+
+from chatkit.turns import Turn
+from chatkit.events import ClientEffectEvent, ThreadStreamEvent
+
+
+async def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
     yield ClientEffectEvent(
         name="highlight_text",
         data={"index": 142, "length": 35},
@@ -75,7 +90,7 @@ Or from tools, through `AgentContext`:
 ```python
 from agents import RunContextWrapper, function_tool
 from chatkit.agents import AgentContext
-from chatkit.types import ClientEffectEvent
+from chatkit.events import ClientEffectEvent
 
 
 @function_tool()
@@ -96,10 +111,12 @@ Register a client effect handler when initializing ChatKit on the client:
 const chatkit = useChatKit({
   // ...
   onEffect: async ({name, data}) => {
-    if (name === "highlight_text") {
-      const {index, length} = data;
-      highlightArticleText({index, length});
-      // No return value needed
+    if (
+      name === "highlight_text" &&
+      typeof data?.index === "number" &&
+      typeof data.length === "number"
+    ) {
+      highlightArticleText({index: data.index, length: data.length});
     }
   },
 });
@@ -113,16 +130,18 @@ Use client effects instead when you do not need to wait for the client callback 
 
 ### Define a client tool in your agent
 
-Set `ctx.context.client_tool_call` inside a tool and configure the agent to stop at that tool. Only one client tool call can run per turn. Include client tools in `stop_at_tool_names` so the model pauses while the client callback runs and returns its result.
+Annotate the tool with the Agents SDK's `ToolContext` and call `ctx.context.request_client_tool(ctx, ...)` to tie the browser callback to this invocation. Turnspan accepts one client tool request per turn. Include the client tool in `stop_at_tool_names` so the model pauses while the browser callback runs and returns its result.
 
 ```python
-from agents import Agent, RunContextWrapper, StopAtTools, function_tool
-from chatkit.agents import AgentContext, ClientToolCall
+from agents import Agent, StopAtTools, function_tool
+from agents.tool_context import ToolContext
+from chatkit.agents import AgentContext
 
 
 @function_tool(description_override="Read the user's current canvas selection.")
-async def get_selected_canvas_nodes(ctx: RunContextWrapper[AgentContext]) -> None:
-    ctx.context.client_tool_call = ClientToolCall(
+async def get_selected_canvas_nodes(ctx: ToolContext[AgentContext]) -> None:
+    ctx.context.request_client_tool(
+        ctx,
         name="get_selected_canvas_nodes",
         arguments={"project": my_project()},
     )
@@ -138,27 +157,33 @@ assistant = Agent[AgentContext](
 
 ### Register the client tool in ChatKit.js
 
-Provide a matching callback when initializing ChatKit on the client. The function name must match the `ClientToolCall.name`, and its return value is sent back to the server to resume the run.
+Provide a matching callback when initializing ChatKit on the client. Match the name passed to `request_client_tool`. The client sends the return value back to the server to resume the run.
 
 ```ts
 const chatkit = useChatKit({
   // ...
   onClientTool: async ({name, params}) => {
-    if (name === "get_selected_canvas_nodes") {
-      const {project} = params;
-      const nodes = myCanvas.getSelectedNodes(project);
-      return {
-        nodes: nodes.map((node) => ({id: node.id, kind: node.type})),
-      };
+    if (name !== "get_selected_canvas_nodes" || typeof params.project !== "string") {
+      throw new Error("Unexpected client tool request");
     }
+    const nodes = myCanvas.getSelectedNodes(params.project);
+    return {
+      nodes: nodes.map((node) => ({id: node.id, kind: node.type})),
+    };
   },
 });
 ```
 
 ### Stream and resume
 
-In `respond`, stream via `stream_agent_response` as usual. ChatKit emits a pending client tool call item; the frontend runs your registered client tool, posts the output back, and the server continues the run.
+In `respond(self, turn)`, use `turn.thread` and `turn.context` to construct
+your `AgentContext`, then stream via `stream_agent_response`. ChatKit emits a
+pending client tool call, and the frontend posts the tool's output back.
 
-When the client posts the tool result, ChatKit stores it as a `ClientToolCallItem`. The continued inference after the client tool call handler returns the result feeds both the call and its output back to the model through `ThreadItemConverter.client_tool_call_to_input`, which emits a `function_call` plus matching `function_call_output` so the model sees the browser-provided context.
+ChatKit saves the tool result before calling `respond` again. On that turn,
+`turn.input` is a `ClientToolTurn`, and `turn.input.tool_call.output` holds the
+client's result. When you convert the saved thread history,
+`ThreadItemConverter.client_tool_call_to_input` supplies the model with both
+the call and the matching output.
 
 

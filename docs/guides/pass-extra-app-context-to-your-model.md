@@ -18,21 +18,18 @@ Use a custom `fetch` (or equivalent) when configuring `useChatKit` to attach app
 const chatkit = useChatKit({
   api: {
     // ...
-    fetch: (input, init) =>
-      fetch(input, {
-        ...init,
-        headers: {
-          // Make sure to pipe through headers sent by ChatKit
-          ...(init?.headers || {}),
-          "X-Org-Id": currentOrgId,
-          "X-Plan": currentPlan,
-        },
-      }),
+    fetch: (input, init) => {
+      const request = new Request(input, init);
+      request.headers.set("X-Org-Id", currentOrgId);
+      return fetch(request);
+    },
   },
 });
 ```
 
-On the server, read these headers before calling `ChatKitServer.process` and add them to your request context:
+Read the requested organization before calling `process_request`. Resolve
+membership and plan from the authenticated application session, then pass those
+verified values in your request context.
 
 ```python
 from dataclasses import dataclass
@@ -56,6 +53,11 @@ Sometimes you only need extra context for certain requests—fetch it on demand 
 Define a server tool that looks up app state (for example, the user’s current workspace or preferences) and returns a JSON payload to the model:
 
 ```python
+from agents import RunContextWrapper, function_tool
+
+from chatkit.agents import AgentContext
+
+
 @function_tool(description_override="Fetch the user's workspace context.")
 async def get_workspace_context(ctx: RunContextWrapper[AgentContext]):
     workspace = await load_workspace(ctx.context.request_context.org_id)
@@ -72,9 +74,15 @@ Include this tool in your agent so the model can call it when it needs that info
 When the context only exists on the client (selection, viewport, local app state), use a client tool:
 
 ```python
+from agents import function_tool
+from agents.tool_context import ToolContext
+from chatkit.agents import AgentContext
+
+
 @function_tool(description_override="Read the user's current canvas selection.")
-async def get_canvas_selection(ctx: RunContextWrapper[AgentContext]) -> None:
-    ctx.context.client_tool_call = ClientToolCall(
+async def get_canvas_selection(ctx: ToolContext[AgentContext]) -> None:
+    ctx.context.request_client_tool(
+        ctx,
         name="get_canvas_selection",
         arguments={},
     )
@@ -85,21 +93,22 @@ On the client, implement the callback:
 ```ts
 const chatkit = useChatKit({
   // ...
-  onClientTool: async ({name, params}) => {
-    if (name === "get_canvas_selection") {
-      const selection = myCanvas.getSelection();
-      return {
-        nodes: selection.map((node) => {
-          name: node.name,
-          description: node.description,
-        }),
-      };
+  onClientTool: async ({name}) => {
+    if (name !== "get_canvas_selection") {
+      throw new Error(`Unknown client tool: ${name}`);
     }
+    const selection = myCanvas.getSelection();
+    return {
+      nodes: selection.map((node) => ({
+        name: node.name,
+        description: node.description,
+      })),
+    };
   },
 });
 ```
 
-ChatKit will send the client tool result back to the server and continue the run with that data included as model input.
+Configure the agent to [stop at the client tool](update-client-during-response.md#define-a-client-tool-in-your-agent). ChatKit sends the client tool result back to the server and continues the run with that data included as model input.
 
 ## Inject extra context as model input item
 
@@ -110,12 +119,13 @@ You can also inject context directly as an extra model input item when you build
 Before running your agent, prepend a short, structured context item describing app/user state:
 
 ```python
-from openai.types.responses import ResponseInputTextParam
+from openai.types.responses import EasyInputMessageParam
 
 
-extra_context = ResponseInputTextParam(
-    type="input_text",
-    text=(
+extra_context = EasyInputMessageParam(
+    type="message",
+    role="user",
+    content=(
         "<APP_CONTEXT>\n"
         f"user_id: {context.user_id}\n"
         f"org_id: {context.org_id}\n"
@@ -136,9 +146,12 @@ A useful pattern is to combine a lightweight context item with a follow-up tool 
 1. Add an input item that contains a stable id or handle:
 
    ```python
-   extra_context = ResponseInputTextParam(
-       type="input_text",
-       text=f"<WORKSPACE_REF id={workspace.id} />",
+   from openai.types.responses import EasyInputMessageParam
+
+   extra_context = EasyInputMessageParam(
+       type="message",
+       role="user",
+       content=f"<WORKSPACE_REF id={workspace.id} />",
    )
    input_items = [extra_context, *input_items]
    ```
@@ -148,7 +161,7 @@ A useful pattern is to combine a lightweight context item with a follow-up tool 
    ```python
    @function_tool(description_override="Fetch full workspace details.")
    async def fetch_workspace(ctx: RunContextWrapper[AgentContext], id: str):
-       workspace = await load_workspace(id)
+       workspace = await load_workspace(id, ctx.context.request_context)
        return {
            "id": workspace.id,
            "features": workspace.feature_flags,
