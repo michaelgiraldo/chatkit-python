@@ -13,5 +13,11 @@ or the `fastapi` extra to run the FastAPI adapter with Uvicorn.
 The [changelog](docs/release.md) covers branch changes and past releases.
 The [upstream status page](docs/upstream-status.md) records review decisions.
 
+## Develop Turnspan
+
+Run `make sync` to install the locked development environment and `make check`
+to run formatting, lint, type checks, tests, and the strict docs build. Use
+`make test TESTS='tests/test_fastapi.py -k missing_thread'` for a focused run.
+
 ## License
 This project is licensed under the [Apache License 2.0](LICENSE).

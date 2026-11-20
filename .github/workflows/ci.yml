@@ -2,9 +2,15 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [codex/python-314-baseline]
   workflow_dispatch:
   merge_group:
     types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   UV_FROZEN: "1"
@@ -35,7 +41,7 @@ jobs:
         run: make test
 
       - name: Build docs
-        run: uv run --frozen --all-extras mkdocs build --strict
+        run: make docs-check
 
       - name: Build distributions
         run: make build
