@@ -375,27 +375,29 @@ pages and retries that cross the boundary between legacy and newer items.
 
 ### Check your app's store
 
-Run `check_thread_store` against a store that supports browser tools using
-a disposable database and contexts for two distinct test users. The check
-writes and deletes a synthetic thread. It verifies scoped reads,
-tied-timestamp pagination, concurrent patches, form claims, callback
-completion and cancellation, and retry truncation.
+Run `check_thread_store` for every thread store, including text-only apps. It
+checks user isolation, stable pagination, turn ownership, concurrent patches,
+form claims, hidden items, and retry truncation. If the store also supports
+browser tools, run `check_client_tool_store` to verify private invocations,
+exact callback claims, cancellation, and visible history. Each check creates
+and deletes its own synthetic thread in a disposable database.
 
 ```python
 import pytest
 
-from chatkit.store_checks import check_thread_store
+from chatkit.store_checks import check_client_tool_store, check_thread_store
 
 
 @pytest.mark.asyncio
 async def test_app_store(tmp_path):
     path = tmp_path / "contract.sqlite3"
-    await check_thread_store(
-        SQLiteThreadStore[RequestContext](path),
-        RequestContext(user_id="example-user"),
-        other_context=RequestContext(user_id="other-example-user"),
-        peer=SQLiteThreadStore[RequestContext](path),
-    )
+    store = SQLiteThreadStore[RequestContext](path)
+    peer = SQLiteThreadStore[RequestContext](path)
+    user = RequestContext(user_id="example-user")
+    other = RequestContext(user_id="other-example-user")
+    await check_thread_store(store, user, other_context=other, peer=peer)
+    # Include this check for stores that support browser tools.
+    await check_client_tool_store(store, user, other_context=other, peer=peer)
 ```
 
 For async adapters, supply independent store instances sharing the test database

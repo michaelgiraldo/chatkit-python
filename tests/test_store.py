@@ -7,6 +7,7 @@ from threading import Barrier
 
 import pytest
 
+from chatkit.errors import UnsupportedOperationError
 from chatkit.models import (
     AssistantMessageItem,
     ClientToolCallItem,
@@ -15,8 +16,8 @@ from chatkit.models import (
     ThreadMetadata,
     UserMessageItem,
 )
-from chatkit.store import ConflictError, NotFoundError
-from chatkit.store_checks import check_thread_store
+from chatkit.store import ConflictError, NotFoundError, ThreadStore
+from chatkit.store_checks import check_client_tool_store, check_thread_store
 from chatkit.turns import ClientToolResponsesContinuation, TurnOutcome, TurnState
 from docs.examples.in_memory_thread_store import InMemoryThreadStore
 from docs.examples.sqlite_thread_store import SQLiteThreadStore
@@ -156,12 +157,34 @@ async def test_sqlite_claim_and_patch_across_independent_connections(tmp_path: P
 @pytest.mark.asyncio
 async def test_app_store_checks_work_with_independent_instances(tmp_path: Path):
     path = tmp_path / "contract.sqlite3"
+    store = SQLiteThreadStore[RequestContext](path)
+    peer = SQLiteThreadStore[RequestContext](path)
     await check_thread_store(
-        SQLiteThreadStore[RequestContext](path),
-        DEFAULT_CONTEXT,
-        other_context=ALTERNATIVE_CONTEXT,
-        peer=SQLiteThreadStore[RequestContext](path),
+        store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
     )
+    await check_client_tool_store(
+        store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
+    )
+
+
+async def test_core_store_check_works_without_browser_tools(tmp_path: Path):
+    class TextOnlyStore(SQLiteThreadStore[RequestContext]):
+        register_client_tool_call = ThreadStore.register_client_tool_call
+        load_client_tool_invocation = ThreadStore.load_client_tool_invocation
+        load_client_tool_status = ThreadStore.load_client_tool_status
+        cancel_client_tool_call = ThreadStore.cancel_client_tool_call
+
+    path = tmp_path / "text.sqlite3"
+    store = TextOnlyStore(path)
+    peer = TextOnlyStore(path)
+    await check_thread_store(
+        store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
+    )
+    with pytest.raises(UnsupportedOperationError):
+        await check_client_tool_store(
+            store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
+        )
+    assert not (await peer.load_threads(10, None, "asc", DEFAULT_CONTEXT)).data
 
 
 @pytest.fixture(params=["memory", "sqlite"])
