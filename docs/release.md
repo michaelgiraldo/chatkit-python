@@ -30,39 +30,49 @@ The `openai-chatkit` package on PyPI is published by the
 The workflow only verifies and produces notes. The notes include the commit,
 install command, tested dependency versions, and links to docs at that commit.
 
-## Unreleased
+## Turnspan 7 (`1.6.5+turnspan.7`)
 
-- **Breaking Python constructor change.** `AgentContext` raises a validation
-  error for each unknown keyword. Pass request-scoped values in `request_context`
-  or declare run-specific fields on an `AgentContext` subclass. Use
-  `resume_from` to supply a saved workflow. [App context guide](guides/pass-extra-app-context-to-your-model.md#send-app-context-with-each-request)
-- Removed the unused `chatkit.widgets.MinMax` typing helper. The chart
-  builders share their common fields and retain their existing JSON schemas.
-- Widget actions omit server-only context from browser replies. The FastAPI
-  adapter notices when a visitor leaves during a silent stream. Ordinary
-  streaming saves the partial reply for reload.
-- Agents integrations can select `delivery="reviewed_text"` to publish the
-  final answer after an output guardrail approves it. Closing the connection
-  during review leaves the candidate out of the transcript.
-- Agents using tool approvals must implement `save_approval_checkpoint`.
-  Turnspan reports `WAITING` after the save. A failed save reports `FAILED`.
-- Transcript replay uses assistant input text and preserves a recorded
-  Responses message phase for the next model request.
-- A private context item from the app or SDK leaves an active progress
-  display open while the agent continues working.
-- The server keeps its own copies of streamed content, citations, and workflow
-  tasks. A responder can assemble its final message without duplicating text,
-  and edits it hasn't emitted stay out of a partial reply saved on disconnect.
-- **Custom stores** must reject an older form while a different turn is
-  starting or running. Implement the ownership check in the claim transaction.
-- A custom store must filter server-only items before paginating browser
-  history. If a page includes a hidden item, Turnspan rejects the result
-  before sending its contents or cursor to the browser.
-- **Store tests** can run `check_thread_store` for core operations. Suites
-  that previously used it to cover browser tools must also run
-  `check_client_tool_store`. [Store and responder guide](guides/respond-to-user-message.md)
-- The Agents integration requires OpenAI Python 3.57.0 or newer within the
-  3.x series. Documentation builds use Zensical 0.1.3 or newer within 0.1.x.
+### Upgrading an app from Turnspan 6
+
+Update the backend source pin and refresh your app's dependency lock. Python
+3.14 remains the minimum. You can keep your existing ChatKit browser component.
+Check the rows that apply to your backend.
+
+| If your app uses… | What to change or verify |
+| --- | --- |
+| A custom thread store | For browser reads (`include_hidden=False`), filter server-only items and ineligible pending browser tools **before** applying the cursor and limit. Compute `after` and `has_more` from visible items. Turnspan now rejects a page containing either hidden context type. Apply the same rule if your responder supplies paginated thread snapshots. [Store guide](guides/respond-to-user-message.md#implement-your-chatkit-data-store) |
+| Forms | Record which turn issued the form. In the same transaction that claims it, raise `ConflictError` and leave it pending if a different turn is `ACCEPTED` or `RUNNING`. This prevents an old form submission from interrupting a newer reply. [SQLite example](examples/sqlite_thread_store.py) |
+| Extra fields on `AgentContext` | Unknown constructor keywords now raise a validation error. Move request-scoped values into `request_context` or declare typed fields on a subclass. [App context guide](guides/pass-extra-app-context-to-your-model.md#send-app-context-with-each-request) |
+| Agents SDK tools that pause for human approval | Implement `ChatKitServer.save_approval_checkpoint(thread, turn_id, checkpoint, context)`. Save the serialized run privately under the authenticated owner, thread, and turn. Forward `ApprovalRequired` if your responder filters events. A successful save puts the turn in `WAITING`. A missing hook or failed save produces `FAILED`. [Approval example](guides/respond-to-user-message.md#pause-for-tool-approval) |
+| Store tests for browser tools | Run both `check_thread_store` and `check_client_tool_store`. The first now covers core storage and browser history. The second exercises browser tool callbacks. [Store test example](guides/respond-to-user-message.md#check-your-apps-store) |
+| An import of `chatkit.widgets.MinMax` | Remove the import. If your app used this removed annotation for its own data, define the bounds type in your app. Chart JSON schemas are unchanged. |
+| The `agents` extra | Allow `openai>=3.57.0,<4` in your app lock. The Agents SDK requirement remains `openai-agents>=0.25.0,<0.26`. Zensical 0.1.3 is a documentation build dependency. |
+
+### Streaming and thread history
+
+- When a visitor leaves during a silent FastAPI stream, the server stops the
+  producer. On ordinary streaming turns the partial reply survives reload, and
+  the visitor can send another message.
+- If a responder streams `Hi` and then finishes building that same message,
+  the saved reply reads `Hi` once. Turnspan also isolates streamed citations
+  and workflow tasks from subsequent edits the responder hasn't sent.
+- Widget actions keep app and SDK hidden context out of browser replies.
+  A private context update leaves an active progress display open while the
+  agent continues working.
+- When the app replays thread history, Turnspan sends assistant text as model
+  input and keeps the recorded Responses phase, such as `commentary` or
+  `final_answer`. Stores that serialize individual fields should round-trip
+  the optional assistant `phase` to preserve this behavior.
+
+### Optional reviewed replies
+
+For an app that checks an answer before a visitor sees it, configure an Agents
+SDK output guardrail and pass `delivery="reviewed_text"` to
+`stream_agent_response`. The browser receives the approved final text in one
+message. A rejection or disconnect during review keeps the candidate out of
+the ChatKit transcript. Ordinary streaming remains the default for apps that
+show intermediate events or use interactive browser tools.
+[Reviewed delivery guide](guides/respond-to-user-message.md#deliver-reviewed-text)
 
 ## Turnspan 6 (`1.6.5+turnspan.6`)
 
