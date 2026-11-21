@@ -10,7 +10,7 @@ dependencies = [
 
 [project.optional-dependencies]
 agents = [
-  "openai>=3.56.0,<4",
+  "openai>=3.57.0,<4",
   # Widen after verifying the next Agents SDK minor release.
   "openai-agents>=0.25.0,<0.26",
 ]
