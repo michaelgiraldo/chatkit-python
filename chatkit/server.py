@@ -20,6 +20,7 @@ from chatkit.errors import (
     UnsupportedOperationError,
 )
 
+from ._browser_output import browser_event, browser_thread, browser_widget_response
 from ._stream import _close_stream, _closing_stream
 from .actions import Action
 from .events import (
@@ -88,7 +89,6 @@ from .requests import (
     is_streaming_req,
 )
 from .store import (
-    HIDDEN_ITEM_TYPES,
     AttachmentMetadataStore,
     AttachmentStore,
     ConflictError,
@@ -266,7 +266,7 @@ class ChatKitServer[TContext = Any](ABC):
         updated = await self.store.patch_thread(
             thread_id, patch, context, turn_id=turn_id
         )
-        return ThreadUpdatedEvent(thread=self._to_thread_response(updated))
+        return ThreadUpdatedEvent(thread=browser_thread(updated))
 
     async def add_feedback(  # noqa: B027
         self,
@@ -403,10 +403,7 @@ class ChatKitServer[TContext = Any](ABC):
     ) -> ImmediateResult:
         match request:
             case ThreadsGetByIdReq():
-                thread = await self._load_full_thread(
-                    request.params.thread_id, context=context
-                )
-                return self._to_thread_response(thread)
+                return await self._load_full_thread(request.params.thread_id, context)
             case ThreadsListReq():
                 params = request.params
                 threads = await self.store.load_threads(
@@ -418,7 +415,7 @@ class ChatKitServer[TContext = Any](ABC):
                 return Page(
                     has_more=threads.has_more,
                     after=threads.after,
-                    data=[self._to_thread_response(thread) for thread in threads.data],
+                    data=[browser_thread(thread) for thread in threads.data],
                 )
             case ItemsFeedbackReq():
                 await self.add_feedback(
@@ -475,7 +472,7 @@ class ChatKitServer[TContext = Any](ABC):
                 updated = await self.store.patch_thread(
                     request.params.thread_id, {"title": request.params.title}, context
                 )
-                return self._to_thread_response(updated)
+                return browser_thread(updated)
             case ThreadsDeleteReq():
                 await self.store.delete_thread(
                     request.params.thread_id, context=context
@@ -669,12 +666,7 @@ class ChatKitServer[TContext = Any](ABC):
             item,
             context,
         )
-        if (
-            response.updated_item is not None
-            and response.updated_item.type in HIDDEN_ITEM_TYPES
-        ):
-            return SyncCustomActionResponse()
-        return response
+        return browser_widget_response(response)
 
     def _apply_structured_input_submission(
         self,
@@ -738,7 +730,7 @@ class ChatKitServer[TContext = Any](ABC):
         initial_events: list[ThreadStreamEvent] = []
         if create_thread:
             initial_events.append(
-                ThreadCreatedEvent(thread=self._to_thread_response(turn.thread))
+                ThreadCreatedEvent(thread=browser_thread(turn.thread))
             )
         initial_events.append(ThreadItemDoneEvent(item=item))
         return self._respond_to_turn(turn, initial_events=initial_events)
@@ -1034,34 +1026,9 @@ class ChatKitServer[TContext = Any](ABC):
                             thread.id, turn_id, context
                         )
                         next_check = loop.time() + _TRANSIENT_OWNERSHIP_CHECK_INTERVAL
-                    if isinstance(event, (ThreadCreatedEvent, ThreadUpdatedEvent)):
-                        hidden_item_ids.update(
-                            item.id
-                            for item in event.thread.items.data
-                            if item.type in HIDDEN_ITEM_TYPES
-                        )
-                        yield event.model_copy(
-                            update={"thread": self._to_thread_response(event.thread)}
-                        )
-                    elif (
-                        isinstance(
-                            event,
-                            (
-                                ThreadItemAddedEvent,
-                                ThreadItemDoneEvent,
-                                ThreadItemReplacedEvent,
-                            ),
-                        )
-                        and event.item.type in HIDDEN_ITEM_TYPES
-                    ):
-                        hidden_item_ids.add(event.item.id)
-                    elif not (
-                        isinstance(
-                            event, (ThreadItemUpdatedEvent, ThreadItemRemovedEvent)
-                        )
-                        and event.item_id in hidden_item_ids
-                    ):
-                        yield event
+                    visible = browser_event(event, hidden_item_ids)
+                    if visible is not None:
+                        yield visible
 
         except asyncio.CancelledError, GeneratorExit:
             with suppress(TurnSupersededError):
@@ -1184,28 +1151,4 @@ class ChatKitServer[TContext = Any](ABC):
             context=context,
             include_hidden=False,
         )
-        return Thread(**thread_meta.model_dump(), items=thread_items)
-
-    def _to_thread_response(self, thread: ThreadMetadata | Thread) -> Thread:
-        items = (
-            thread.items.model_copy(
-                update={
-                    "data": [
-                        item
-                        for item in thread.items.data
-                        if item.type not in HIDDEN_ITEM_TYPES
-                    ]
-                }
-            )
-            if isinstance(thread, Thread)
-            else Page()
-        )
-
-        return Thread(
-            id=thread.id,
-            title=thread.title,
-            created_at=thread.created_at,
-            items=items,
-            status=thread.status,
-            allowed_image_domains=thread.allowed_image_domains,
-        )
+        return browser_thread(thread_meta, items=thread_items)
