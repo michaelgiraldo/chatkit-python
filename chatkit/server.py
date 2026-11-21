@@ -26,13 +26,10 @@ from ._browser_output import (
     browser_widget_response,
     require_visible_page,
 )
+from ._pending_items import track_pending_item
 from ._stream import _close_stream, _closing_stream
 from .actions import Action
 from .events import (
-    AssistantMessageContentPartAdded,
-    AssistantMessageContentPartAnnotationAdded,
-    AssistantMessageContentPartDone,
-    AssistantMessageContentPartTextDelta,
     ErrorEvent,
     StreamOptions,
     StreamOptionsEvent,
@@ -45,12 +42,9 @@ from .events import (
     ThreadItemUpdatedEvent,
     ThreadStreamEvent,
     ThreadUpdatedEvent,
-    WorkflowTaskAdded,
-    WorkflowTaskUpdated,
 )
 from .logger import logger
 from .models import (
-    AssistantMessageContent,
     AssistantMessageItem,
     Attachment,
     AudioInput,
@@ -68,7 +62,6 @@ from .models import (
     UserMessageInput,
     UserMessageItem,
     WidgetItem,
-    WorkflowItem,
 )
 from .requests import (
     AttachmentsCreateReq,
@@ -923,11 +916,6 @@ class ChatKitServer[TContext = Any](ABC):
             next_check = loop.time() + _TRANSIENT_OWNERSHIP_CHECK_INTERVAL
             async with _closing_stream(aiter(stream())) as events:
                 while (event := await anext(events, None)) is not None:
-                    if isinstance(event, ThreadItemAddedEvent):
-                        # Stash an isolated copy in case we need to persist unfinished items
-                        # on cancellation; downstream handlers keep using the original event.item.
-                        pending_items[event.item.id] = event.item.model_copy(deep=True)
-
                     match event:
                         case (
                             ThreadItemAddedEvent(item=ClientToolCallItem())
@@ -1005,11 +993,8 @@ class ChatKitServer[TContext = Any](ABC):
                                 thread.id, item, context=context, turn_id=turn_id
                             )
                             continue
-                        case ThreadItemUpdatedEvent():
-                            # Keep pending assistant message and workflow items up to date
-                            # so that we have a reference to the latest version of these pending items
-                            # when the stream is cancelled.
-                            self._update_pending_items(pending_items, event)
+                        case ThreadItemAddedEvent() | ThreadItemUpdatedEvent():
+                            track_pending_item(pending_items, event)
                         case ErrorEvent():
                             stream_failed = True
                             await cancel_issued_tools()
@@ -1060,70 +1045,6 @@ class ChatKitServer[TContext = Any](ABC):
                 allow_retry=True,
             )
             logger.exception(e)
-
-    def _apply_assistant_message_update(
-        self,
-        item: AssistantMessageItem,
-        update: AssistantMessageContentPartAdded
-        | AssistantMessageContentPartTextDelta
-        | AssistantMessageContentPartAnnotationAdded
-        | AssistantMessageContentPartDone,
-    ) -> AssistantMessageItem:
-        # Pad the content list so the requested content_index exists before we write into it.
-        # (Streaming updates can arrive for an index that hasn’t been created yet)
-        while len(item.content) <= update.content_index:
-            item.content.append(AssistantMessageContent(text="", annotations=[]))
-
-        match update:
-            case AssistantMessageContentPartAdded() | AssistantMessageContentPartDone():
-                item.content[update.content_index] = update.content.model_copy(
-                    deep=True
-                )
-            case AssistantMessageContentPartTextDelta():
-                item.content[update.content_index].text += update.delta
-            case AssistantMessageContentPartAnnotationAdded():
-                annotations = item.content[update.content_index].annotations
-                annotations.insert(
-                    update.annotation_index, update.annotation.model_copy(deep=True)
-                )
-        return item
-
-    def _update_pending_items(
-        self,
-        pending_items: dict[str, ThreadItem],
-        event: ThreadItemUpdatedEvent,
-    ):
-        updated_item = pending_items.get(event.item_id)
-        update = event.update
-        match updated_item:
-            case AssistantMessageItem():
-                if isinstance(
-                    update,
-                    (
-                        AssistantMessageContentPartAdded,
-                        AssistantMessageContentPartTextDelta,
-                        AssistantMessageContentPartAnnotationAdded,
-                        AssistantMessageContentPartDone,
-                    ),
-                ):
-                    pending_items[updated_item.id] = (
-                        self._apply_assistant_message_update(updated_item, update)
-                    )
-            case WorkflowItem():
-                if isinstance(update, (WorkflowTaskUpdated, WorkflowTaskAdded)):
-                    match update:
-                        case WorkflowTaskUpdated():
-                            updated_item.workflow.tasks[update.task_index] = (
-                                update.task.model_copy(deep=True)
-                            )
-                        case WorkflowTaskAdded():
-                            updated_item.workflow.tasks.append(
-                                update.task.model_copy(deep=True)
-                            )
-
-                    pending_items[updated_item.id] = updated_item
-            case _:
-                pass
 
     async def _build_user_message_item(
         self, input: UserMessageInput, thread: ThreadMetadata, context: TContext
