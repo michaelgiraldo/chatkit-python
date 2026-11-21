@@ -233,22 +233,33 @@ The Python request model exposes that result as
 [`ClientToolCallbackResult`](../api/chatkit/requests.md#chatkit.requests.ClientToolCallbackResult).
 The server uses the authenticated request context, the thread ID, and the
 item ID to find the pending invocation. It commits the claim and output before
-calling `respond` again. On that turn, `turn.input` is a `ClientToolTurn` and
-`turn.input.tool_call.output` contains the inner `output` value. Turnspan
-records the native model continuation in `tool_call.model_continuation`.
-Its built-in encoders send the browser envelope and keep the model
-continuation server-side.
+calling `respond` again. On that turn, `turn.input` is a `ClientToolTurn`.
+Read the browser result from `turn.input.tool_call.output` and the native
+model state from `turn.input.invocation.model_continuation`.
+
+| Identifier | Purpose |
+| --- | --- |
+| Browser `item_id` | Identifies the exact transcript item the browser is answering. |
+| Turnspan `turn.id` | Identifies the server execution that owns writes for the thread. |
+| Provider `invocation.call_id` | Associates a function output with its model tool call. |
+
+The browser item carries its name, arguments, status, and output. The
+invocation is a separate record with the private provider data. The
+Agents adapter yields a server-only `ClientToolRequest`. For a custom
+responder, yield `ClientToolRequest(item=display_item, call_id=provider_call_id)`
+and supply `model_continuation` if you use the continuation helper.
+Turnspan saves both records before publishing the display item.
 
 ### Build the next model request
 
-Use `client_tool_continuation_input(turn.input.tool_call)` to build the
+Use `client_tool_continuation_input(turn.input)` to build the
 next input for the exact completed call. It uses the original model
 `call_id` for each tool result and preserves sibling server tool outputs.
 
 | Strategy | Input returned by the helper | How to invoke the runner |
 | --- | --- | --- |
 | `local` | Native input and output items through the stopped run, with the browser result replacing its placeholder. | Pass the list as the next run's input. |
-| `responses` | Function outputs the provider still needs, including the browser result. | Pass the list and the saved `model_continuation.response_id` as `previous_response_id`. If your app uses a provider-managed conversation, use its same trusted `conversation_id` instead. |
+| `responses` | Function outputs the provider still needs, including the browser result. | Pass the list and the invocation's saved `model_continuation.response_id` as `previous_response_id`. If your app uses a provider-managed conversation, use its same trusted `conversation_id` instead. |
 
 For `responses`, configure the originating run so the provider retains the
 predecessor. For example, use `ModelSettings(store=True)` for response ID
@@ -270,9 +281,8 @@ from chatkit.turns import ClientToolTurn
 
 
 if isinstance(turn.input, ClientToolTurn):
-    call = turn.input.tool_call
-    continuation = call.model_continuation
-    input_items = client_tool_continuation_input(call)
+    continuation = turn.input.invocation.model_continuation
+    input_items = client_tool_continuation_input(turn.input)
     previous_response_id = (
         continuation.response_id
         if continuation is not None and continuation.type == "responses"
@@ -315,7 +325,14 @@ Turn ownership also covers the first registration. Once a newer request
 owns the thread, an older responder cannot register a tool or persist a
 reply. A callback claim starts a new turn atomically. Its saved display
 status means the server accepted the result. Use its turn state to find
-out whether the responder started or finished.
+out whether the responder started or finished. Inspect the turn identified
+by the private invocation's `continuation_turn_id`.
+
+| What happened | What persisted |
+| --- | --- |
+| A newer message arrived before the older responder requested a tool. | The old turn is `SUPERSEDED`. Its first tool registration is rejected. |
+| ChatKit saved the callback and the response closed before the server started processing its stream. | The display item is `completed` and the continuation turn is `ABANDONED`. A second callback conflicts. |
+| The server processed the callback and saved the final reply. | The display item is `completed` and the continuation turn is `COMPLETED`. |
 
 ### Verify the browser tool
 
@@ -326,5 +343,11 @@ out whether the responder started or finished.
    application's selected continuation strategy.
 3. Repeat the callback, then try a callback from a turn superseded by a
    new message. Check that both are rejected.
+4. With the real ChatKit browser client, trigger the same tool twice in one
+   thread. Check that it receives two different item IDs, submits each
+   corresponding callback, and displays the final reply. Inspect SSE and
+   reloaded history JSON for the display arguments and output. Use a
+   distinct synthetic value in private model input and confirm it is
+   absent from both browser payloads.
 
 

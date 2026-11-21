@@ -34,7 +34,6 @@ from chatkit.events import (
 from chatkit.models import (
     AssistantMessageItem,
     ClientToolCallItem,
-    ClientToolResponsesContinuation,
     InferenceOptions,
     Thread,
     URLSource,
@@ -51,9 +50,15 @@ from chatkit.requests import (
     ThreadsCreateReq,
     ThreadsGetByIdReq,
 )
-from chatkit.turns import ClientToolTurn, ResponderEvent, Turn, UserMessageTurn
+from chatkit.turns import (
+    ClientToolResponsesContinuation,
+    ClientToolTurn,
+    ResponderEvent,
+    Turn,
+    UserMessageTurn,
+)
 from tests._types import RequestContext
-from tests.helpers.server import make_server
+from tests.helpers.server import DEFAULT_CONTEXT, make_server
 
 
 def _responses_stream(turn: int) -> str:
@@ -657,10 +662,10 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
             )
             previous_response_id = None
             if isinstance(turn.input, ClientToolTurn):
-                tool_call = turn.input.tool_call
-                input_items = client_tool_continuation_input(tool_call)
+                assert turn.input.invocation.continuation_turn_id == turn.id
+                input_items = client_tool_continuation_input(turn.input)
                 if mode == "previous_response":
-                    saved = tool_call.model_continuation
+                    saved = turn.input.invocation.model_continuation
                     assert isinstance(saved, ClientToolResponsesContinuation)
                     previous_response_id = saved.response_id
             else:
@@ -708,18 +713,23 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                 ]
                 pending = pending_event.item
                 assert isinstance(pending, ClientToolCallItem)
-                assert (pending.name, pending.call_id, pending.status) == (
-                    browser_name,
-                    f"call_client_read_{turn}",
-                    "pending",
+                assert (pending.name, pending.status) == (browser_name, "pending")
+                invocation = await server.store.load_client_tool_invocation(
+                    thread_id, pending.id, DEFAULT_CONTEXT
                 )
+                assert invocation.call_id == f"call_client_read_{turn}"
+                assert invocation.model_continuation is not None
                 pending_items.append(pending)
                 expected_arguments = {"item_id": pending.id, "input": browser_arguments}
                 assert pending.arguments == browser_arguments
-                assert pending.model_continuation is not None
                 frame = json.loads(encode_sse(pending_event).removeprefix(b"data: "))
                 assert frame["item"]["arguments"] == expected_arguments
-                assert "model_continuation" not in frame["item"]
+                for public_item in (
+                    pending.model_dump(),
+                    pending_event.model_dump()["item"],
+                    frame["item"],
+                ):
+                    assert {"model_continuation", "call_id"}.isdisjoint(public_item)
 
                 loaded_pending = await server.process_non_streaming(
                     ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
@@ -733,7 +743,9 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                     if item["id"] == pending.id
                 ]
                 assert pending_from_history["arguments"] == expected_arguments
-                assert "model_continuation" not in pending_from_history
+                assert {"model_continuation", "call_id"}.isdisjoint(
+                    pending_from_history
+                )
 
                 callback = parse_request(
                     json.dumps({
@@ -764,13 +776,12 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         assert all(item_id.startswith("tc_") for item_id in ids)
     assert isinstance(loaded, Thread)
     assert [
-        (item.id, item.call_id, item.status, item.output)
+        (item.id, item.status, item.output)
         for item in loaded.items.data
         if isinstance(item, ClientToolCallItem)
     ] == [
         (
             item.id,
-            item.call_id,
             "completed",
             None if index == 1 else {"selection": index},
         )
@@ -785,4 +796,6 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         browser_arguments,
         browser_arguments,
     ]
-    assert all("model_continuation" not in item for item in browser_items)
+    assert all(
+        {"model_continuation", "call_id"}.isdisjoint(item) for item in browser_items
+    )

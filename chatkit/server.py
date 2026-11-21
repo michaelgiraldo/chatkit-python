@@ -98,6 +98,8 @@ from .store import (
     TurnSupersededError,
 )
 from .turns import (
+    ClientToolInvocation,
+    ClientToolRequest,
     ClientToolTurn,
     PersistWorkflow,
     ResponderEvent,
@@ -186,7 +188,9 @@ class ChatKitServer[TContext = Any](ABC):
     def _require_client_tool_store(self) -> None:
         store_type = type(self.store)
         if (
-            store_type.load_client_tool_status is ThreadStore.load_client_tool_status
+            store_type.register_client_tool_call
+            is ThreadStore.register_client_tool_call
+            or store_type.load_client_tool_status is ThreadStore.load_client_tool_status
             or store_type.cancel_client_tool_call is ThreadStore.cancel_client_tool_call
         ):
             raise UnsupportedOperationError(
@@ -531,12 +535,19 @@ class ChatKitServer[TContext = Any](ABC):
                 completed = tool_call.model_copy(
                     update={"output": result.output, "status": "completed"}
                 )
-                await self.store.claim_pending_item(
+                invocation = await self.store.claim_pending_item(
                     thread.id, tool_call, completed, context, next_turn_id=turn_id
                 )
+                if invocation is None:
+                    raise ConflictError("The client tool has no executable invocation.")
 
                 return self._respond_to_turn(
-                    Turn(thread, ClientToolTurn(completed), context, id=turn_id)
+                    Turn(
+                        thread,
+                        ClientToolTurn(completed, invocation),
+                        context,
+                        id=turn_id,
+                    )
                 )
 
             case ThreadsAddStructuredInputReq():
@@ -866,12 +877,19 @@ class ChatKitServer[TContext = Any](ABC):
         stream_failed = False
         loop = asyncio.get_running_loop()
 
-        async def register_client_tool(item: ClientToolCallItem) -> None:
+        async def register_client_tool(request: ClientToolRequest) -> None:
             self._require_client_tool_store()
-            await self.store.add_thread_item(
-                thread.id, item, context=context, turn_id=turn_id
+            invocation = ClientToolInvocation(
+                item_id=request.item.id,
+                thread_id=thread.id,
+                turn_id=turn_id,
+                call_id=request.call_id,
+                model_continuation=request.model_continuation,
             )
-            issued_tool_ids.add(item.id)
+            await self.store.register_client_tool_call(
+                thread.id, request.item, invocation, context
+            )
+            issued_tool_ids.add(request.item.id)
 
         async def cancel_issued_tools() -> None:
             for item_id in issued_tool_ids.copy():
@@ -895,25 +913,20 @@ class ChatKitServer[TContext = Any](ABC):
 
                     match event:
                         case (
-                            ThreadItemAddedEvent(
-                                item=ClientToolCallItem(status="pending")
-                            )
-                            | ThreadItemReplacedEvent(
-                                item=ClientToolCallItem(status="pending")
-                            )
+                            ThreadItemAddedEvent(item=ClientToolCallItem())
+                            | ThreadItemDoneEvent(item=ClientToolCallItem())
+                            | ThreadItemReplacedEvent(item=ClientToolCallItem())
                         ):
                             raise ValueError(
-                                "Publish pending client tools with ThreadItemDoneEvent"
+                                "Publish client tools with ClientToolRequest"
                             )
-                        case ThreadItemDoneEvent(
-                            item=ClientToolCallItem(status="pending") as tool
-                        ):
+                        case ClientToolRequest() as request:
                             if stream_failed:
                                 continue
                             # A disconnect during a transaction must settle registration
                             # before cleanup decides which exact callback to cancel.
                             registration = asyncio.create_task(
-                                register_client_tool(tool)
+                                register_client_tool(request)
                             )
                             try:
                                 await asyncio.shield(registration)
@@ -925,6 +938,7 @@ class ChatKitServer[TContext = Any](ABC):
                                 except Exception:
                                     logger.exception("Error registering client tool")
                                 raise
+                            event = ThreadItemDoneEvent(item=request.item)
                         case ThreadItemDoneEvent():
                             await self.store.add_thread_item(
                                 thread.id, event.item, context=context, turn_id=turn_id

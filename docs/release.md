@@ -41,6 +41,13 @@ install command, tested dependency versions, and links to docs at that commit.
   completion. Closing a response before processing starts records
   `ABANDONED`. Started responders can report `SUPERSEDED` when a new
   request takes ownership.
+- **Breaking Python and storage contract.** Browser tools publish a
+  `ClientToolCallItem` containing display data. The server registers a
+  separate `ClientToolInvocation` with model data and the turn linkage.
+  Custom responders yield `ClientToolRequest` to register the pair.
+  Pass the complete `ClientToolTurn` to
+  `client_tool_continuation_input`. The ChatKit browser still sends the
+  same callback envelope.
 - Browser tools return the ID of the exact saved invocation. Each callback can
   complete once, and a newer turn can cancel a pending invocation.
 - The Agents SDK adapter preserves the original model call and any sibling tool

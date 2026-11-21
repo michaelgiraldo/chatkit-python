@@ -14,7 +14,7 @@ from .models import (
     UserMessageItem,
 )
 from .requests import AttachmentCreateParams
-from .turns import TurnOutcome, TurnState
+from .turns import ClientToolInvocation, TurnOutcome, TurnState
 
 StoreItemType = Literal[
     "thread",
@@ -109,12 +109,30 @@ def validate_pending_claim(
     if isinstance(expected, ClientToolCallItem) and (
         not isinstance(replacement, ClientToolCallItem)
         or replacement.status != "completed"
-        or replacement.call_id != expected.call_id
         or replacement.name != expected.name
         or replacement.arguments != expected.arguments
-        or replacement.model_continuation != expected.model_continuation
     ):
         raise ValueError("A client tool claim may only complete the item with output")
+
+
+def validate_client_tool_registration(
+    thread_id: str, item: ClientToolCallItem, invocation: ClientToolInvocation
+) -> None:
+    """Validate correspondence before saving a public item and private invocation."""
+    if (
+        item.thread_id != thread_id
+        or invocation.thread_id != thread_id
+        or invocation.item_id != item.id
+    ):
+        raise ValueError(
+            "The client tool item and invocation must identify the same thread item"
+        )
+    if (
+        item.status != "pending"
+        or item.output is not None
+        or invocation.continuation_turn_id is not None
+    ):
+        raise ValueError("A new client tool call must be pending")
 
 
 class AttachmentStore[TContext = Any](ABC):
@@ -208,6 +226,7 @@ class ThreadStore[TContext = Any](ABC):
 
         Cancellation before start records abandonment. Previously finalized and
         superseded turns keep their state even when their producers finish later.
+        A current turn that stops without waiting cancels its pending callback.
         """
         pass
 
@@ -278,13 +297,10 @@ class ThreadStore[TContext = Any](ABC):
     ) -> None:
         """Persist a newly created thread item.
 
-        For a pending client tool item, atomically register its callback with
-        the item. Each thread can have one pending callback at a time. Reject
+        Use `register_client_tool_call` to persist client tool items. Reject
         reused callback IDs, including IDs whose items were removed, with
-        `ConflictError`. A new user message atomically cancels the pending
-        callback in the same transaction as the insertion.
-        Verify `turn_id` ownership within the insertion transaction and record
-        that owner for a callback registered by the turn.
+        `ConflictError`. A new user message atomically cancels a pending callback.
+        Verify `turn_id` ownership within the insertion transaction.
         """
         pass
 
@@ -299,13 +315,41 @@ class ThreadStore[TContext = Any](ABC):
     ) -> None:
         """Upsert a thread item by id.
 
-        For client tools, use `add_thread_item` for registration and
+        For client tools, use `register_client_tool_call` for registration and
         `claim_pending_item` for completion. Reject direct writes to those
         items and their reserved IDs. A first insertion of a user message
         has the same cancellation semantics as `add_thread_item`.
         When `turn_id` is given, verify ownership within the write transaction.
         """
         pass
+
+    async def register_client_tool_call(
+        self,
+        thread_id: str,
+        item: ClientToolCallItem,
+        invocation: ClientToolInvocation,
+        context: TContext,
+    ) -> None:
+        """Atomically save a browser item and its matching private invocation.
+
+        Require the invocation's turn to be current and running. The thread can
+        have one pending callback. Reserved callback IDs remain reserved after
+        completion, cancellation, and display item deletion.
+        """
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
+
+    async def load_client_tool_invocation(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> ClientToolInvocation:
+        """Read a scoped private invocation and its continuation turn, if claimed.
+
+        Raise `NotFoundError` for an unavailable or unregistered callback.
+        """
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
 
     async def load_client_tool_status(
         self, thread_id: str, item_id: str, context: TContext
@@ -343,16 +387,17 @@ class ThreadStore[TContext = Any](ABC):
         context: TContext,
         *,
         next_turn_id: str | None = None,
-    ) -> None:
+    ) -> ClientToolInvocation | None:
         """Atomically replace a pending item if its stored value matches `expected`.
 
-        The replacement must complete the same thread item. A client tool
-        callback must be registered and pending, and completion must persist
-        in its lifecycle and transcript together. Raise `ConflictError` on
-        stale or closed state and `NotFoundError` for an unavailable item or
-        thread. When `next_turn_id` is provided, accept that turn in the same
-        transaction and require a client tool callback's owner to still be
-        current. Commit the claim before starting inference.
+        The replacement must complete the same thread item. A client tool claim
+        requires `next_turn_id` and a registered pending callback with a current
+        owner. Save its result and the accepted continuation turn in the same
+        transaction and return the private invocation linked to that turn.
+        Structured input claims return `None`.
+
+        Raise `ConflictError` on stale or closed state and `NotFoundError` for
+        an unavailable item or thread. Commit the claim before starting inference.
         """
         pass
 

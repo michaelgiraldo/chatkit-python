@@ -32,27 +32,32 @@ from .models import (
     WidgetItem,
     WorkflowItem,
 )
+from .turns import ClientToolTurn
 
 
 def client_tool_continuation_input(
-    item: ClientToolCallItem,
+    turn: ClientToolTurn,
 ) -> list[TResponseInputItem]:
     """Prepare model input from a completed browser tool's native continuation.
 
     A local continuation supplies the whole native input list. A Responses continuation
     supplies only the missing outputs and requires the matching provider context.
     """
-    if item.status != "completed":
+    item = turn.tool_call
+    invocation = turn.invocation
+    if item.status != "completed" or invocation.continuation_turn_id is None:
         raise ValueError("Complete the client tool before preparing its continuation")
-    if item.model_continuation is None:
+    if (item.id, item.thread_id) != (invocation.item_id, invocation.thread_id):
+        raise ValueError("The client tool result and private invocation must match")
+    if invocation.model_continuation is None:
         raise ValueError("This client tool has no captured native model continuation")
 
-    items = deepcopy(item.model_continuation.items)
+    items = deepcopy(invocation.model_continuation.items)
     matching_outputs = [
         value
         for value in items
         if value.get("type") == "function_call_output"
-        and value.get("call_id") == item.call_id
+        and value.get("call_id") == invocation.call_id
     ]
     if len(matching_outputs) != 1:
         raise ValueError(

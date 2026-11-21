@@ -63,9 +63,6 @@ from .models import (
     AssistantMessageContent,
     AssistantMessageItem,
     ClientToolCallItem,
-    ClientToolLocalContinuation,
-    ClientToolModelContinuation,
-    ClientToolResponsesContinuation,
     DurationSummary,
     FileSource,
     GeneratedImage,
@@ -79,7 +76,14 @@ from .models import (
     WorkflowSummary,
 )
 from .store import StoreItemType, ThreadStore
-from .turns import PersistWorkflow, ResponderEvent
+from .turns import (
+    ClientToolLocalContinuation,
+    ClientToolModelContinuation,
+    ClientToolRequest,
+    ClientToolResponsesContinuation,
+    PersistWorkflow,
+    ResponderEvent,
+)
 from .widget_stream import stream_widget
 from .widgets import Markdown, Text, WidgetRootInput
 
@@ -656,16 +660,16 @@ async def stream_agent_response(
             item_id = request.item_id
             if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
                 item_id = context.generate_id("tool_call")
-            yield ThreadItemDoneEvent(
+            yield ClientToolRequest(
                 item=ClientToolCallItem(
                     id=item_id,
                     thread_id=context.thread.id,
                     name=request.name,
                     arguments=request.arguments,
                     created_at=datetime.now(UTC),
-                    call_id=request.call_id,
-                    model_continuation=_capture_model_continuation(request, result),
                 ),
+                call_id=request.call_id,
+                model_continuation=_capture_model_continuation(request, result),
             )
 
 

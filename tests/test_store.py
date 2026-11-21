@@ -10,7 +10,6 @@ import pytest
 from chatkit.models import (
     AssistantMessageItem,
     ClientToolCallItem,
-    ClientToolResponsesContinuation,
     InferenceOptions,
     StructuredInputItem,
     ThreadMetadata,
@@ -18,8 +17,9 @@ from chatkit.models import (
 )
 from chatkit.store import ConflictError, NotFoundError
 from chatkit.store_checks import check_thread_store
+from chatkit.turns import ClientToolResponsesContinuation, TurnOutcome, TurnState
 from docs.examples.in_memory_thread_store import InMemoryThreadStore
-from docs.examples.sqlite_thread_store import ItemData, SQLiteThreadStore
+from docs.examples.sqlite_thread_store import SQLiteThreadStore
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
 from tests.helpers.storage_contract import (
@@ -28,6 +28,7 @@ from tests.helpers.storage_contract import (
     AttachmentMetadataStoreContract,
     ThreadStoreContract,
     make_thread,
+    tool_invocation,
 )
 
 
@@ -193,84 +194,103 @@ async def test_file_backed_example_reopens_with_stable_timestamp_order(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_client_tool_lifecycle_reopens_and_leaves_legacy_items_readable(
+async def test_sqlite_lifecycle_reopens_with_private_invocation_separate_from_item(
     tmp_path: Path,
 ):
     path = tmp_path / "callbacks.sqlite3"
     context = DEFAULT_CONTEXT
     thread = make_thread()
     initial = SQLiteThreadStore[RequestContext](path)
-    await initial.save_thread(thread, context)
+    await initial.begin_turn(thread.id, "parent", context, create_thread=thread)
+    await initial.start_turn(thread.id, "parent", context)
     active = ClientToolCallItem(
         id="active",
         thread_id=thread.id,
         created_at=thread.created_at,
-        call_id="call_active",
         name="example",
         arguments={"value": "active"},
-        model_continuation=ClientToolResponsesContinuation(
-            response_id="resp_original",
-            items=[
-                {
-                    "type": "function_call_output",
-                    "call_id": "call_active",
-                    "output": "None",
-                }
-            ],
-        ),
     )
-    old_pending = active.model_copy(
-        update={"id": "legacy_pending", "model_continuation": None}
-    )
-    old_completed = old_pending.model_copy(
-        update={"id": "legacy_completed", "status": "completed", "output": "old"}
-    )
-    with closing(sqlite3.connect(path)) as connection, connection:
-        # These transcript rows predate the callback lifecycle and have no binding.
-        for item in (old_pending, old_completed):
-            connection.execute(
-                """INSERT INTO items (id, thread_id, user_id, created_at, data)
-                VALUES (?, ?, ?, ?, ?)""",
-                (
-                    item.id,
-                    thread.id,
-                    context.user_id,
-                    thread.created_at.isoformat(),
-                    ItemData(item=item).model_dump_json(exclude_none=True),
-                ),
+    invocation = tool_invocation(active, "parent").model_copy(
+        update={
+            "model_continuation": ClientToolResponsesContinuation(
+                response_id="resp_original",
+                items=[
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_private",
+                        "output": "None",
+                    }
+                ],
             )
-    await initial.add_thread_item(thread.id, active, context)
+        }
+    )
+    invalid_invocation = invocation.model_copy(
+        update={"continuation_turn_id": "prefilled"}
+    )
+    with pytest.raises(ValueError, match="must be pending"):
+        await initial.register_client_tool_call(
+            thread.id, active, invalid_invocation, context
+        )
+    with pytest.raises(ConflictError, match="registration and completion"):
+        await initial.add_thread_item(thread.id, active, context, turn_id="parent")
+    with pytest.raises(NotFoundError):
+        await initial.load_item(thread.id, active.id, context)
+    await initial.register_client_tool_call(thread.id, active, invocation, context)
+    await initial.finish_turn(thread.id, "parent", TurnOutcome.WAITING, context)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        (transcript,) = connection.execute(
+            "SELECT data FROM items WHERE id = ?", (active.id,)
+        ).fetchone()
+    assert "call_active" not in transcript
+    assert "resp_original" not in transcript
+    assert "model_continuation" not in transcript
     reopened = SQLiteThreadStore[RequestContext](path)
     assert await reopened.load_item(thread.id, active.id, context) == active
+    assert (
+        await reopened.load_client_tool_invocation(thread.id, active.id, context)
+        == invocation
+    )
     assert (
         await reopened.load_client_tool_status(thread.id, active.id, context)
         == "pending"
     )
     with pytest.raises(NotFoundError):
-        await reopened.load_client_tool_status(thread.id, old_pending.id, context)
-    with pytest.raises(ConflictError):
-        await reopened.claim_pending_item(
-            thread.id,
-            old_pending,
-            old_pending.model_copy(update={"status": "completed"}),
-            context,
+        await reopened.load_client_tool_invocation(
+            thread.id, active.id, ALTERNATIVE_CONTEXT
         )
     public = await reopened.load_thread_items(
         thread.id, None, 2, "asc", context, include_hidden=False
     )
-    assert {item.id for item in public.data} == {active.id, old_completed.id}
+    assert public.data == [active]
     assert not public.has_more
-    assert await reopened.load_item(thread.id, old_pending.id, context) == old_pending
 
     completed = active.model_copy(update={"status": "completed", "output": "current"})
+    with pytest.raises(ValueError, match="continuation turn ID"):
+        await reopened.claim_pending_item(thread.id, active, completed, context)
     with pytest.raises(ValueError, match="only complete the item with output"):
         await reopened.claim_pending_item(
             thread.id,
             active,
-            completed.model_copy(update={"model_continuation": None}),
+            completed.model_copy(update={"arguments": {"value": "changed"}}),
             context,
+            next_turn_id="next",
         )
-    await reopened.claim_pending_item(thread.id, active, completed, context)
+    claimed = await reopened.claim_pending_item(
+        thread.id, active, completed, context, next_turn_id="next"
+    )
+    expected = invocation.model_copy(update={"continuation_turn_id": "next"})
+    assert claimed == expected
+    assert (
+        await initial.load_client_tool_invocation(thread.id, active.id, context)
+        == expected
+    )
+    assert (
+        await reopened.load_turn_state(thread.id, "parent", context)
+        is TurnState.WAITING
+    )
+    assert (
+        await reopened.load_turn_state(thread.id, "next", context) is TurnState.ACCEPTED
+    )
     assert (
         await initial.load_client_tool_status(thread.id, active.id, context)
         == "completed"
@@ -285,7 +305,8 @@ async def test_sqlite_only_one_client_tool_registers_across_connections(tmp_path
     second_store = SQLiteThreadStore[RequestContext](path)
     thread = make_thread()
     context = DEFAULT_CONTEXT
-    await first_store.save_thread(thread, context)
+    await first_store.begin_turn(thread.id, "parent", context, create_thread=thread)
+    await first_store.start_turn(thread.id, "parent", context)
     barrier = Barrier(2, timeout=5)
 
     def register(store: SQLiteThreadStore[RequestContext], item_id: str) -> bool:
@@ -293,13 +314,16 @@ async def test_sqlite_only_one_client_tool_registers_across_connections(tmp_path
             id=item_id,
             thread_id=thread.id,
             created_at=thread.created_at,
-            call_id=f"call_{item_id}",
             name="example",
             arguments={},
         )
         barrier.wait()
         try:
-            asyncio.run(store.add_thread_item(thread.id, item, context))
+            asyncio.run(
+                store.register_client_tool_call(
+                    thread.id, item, tool_invocation(item, "parent"), context
+                )
+            )
         except ConflictError:
             return False
         return True
@@ -316,6 +340,20 @@ async def test_sqlite_only_one_client_tool_registers_across_connections(tmp_path
         await second_store.load_client_tool_status(thread.id, winner, context)
         == "pending"
     )
+    loser = ("first", "second")[results.index(False)]
+    with pytest.raises(NotFoundError):
+        await first_store.load_client_tool_invocation(thread.id, loser, context)
+
+    await first_store.finish_turn(thread.id, "parent", TurnOutcome.FAILED, context)
+    assert (
+        await second_store.load_client_tool_status(thread.id, winner, context)
+        == "cancelled"
+    )
+    assert not (
+        await second_store.load_thread_items(
+            thread.id, None, 10, "asc", context, include_hidden=False
+        )
+    ).data
 
 
 @pytest.mark.asyncio
@@ -323,16 +361,30 @@ async def test_in_memory_save_user_message_cancels_unfinished_callback():
     store = InMemoryThreadStore()
     context: dict[str, object] = {}
     thread = make_thread()
-    await store.save_thread(thread, context)
+    await store.begin_turn(thread.id, "parent", context, create_thread=thread)
+    await store.start_turn(thread.id, "parent", context)
     tool = ClientToolCallItem(
         id="tool",
         thread_id=thread.id,
         created_at=thread.created_at,
-        call_id="call_test",
         name="example",
         arguments={},
     )
-    await store.add_thread_item(thread.id, tool, context)
+    continuation = ClientToolResponsesContinuation(
+        response_id="resp_private", items=[{"example": "original"}]
+    )
+    invocation = tool_invocation(tool, "parent").model_copy(
+        update={"model_continuation": continuation}
+    )
+    await store.register_client_tool_call(thread.id, tool, invocation, context)
+    continuation.items[0]["example"] = "changed after registration"
+    saved = await store.load_client_tool_invocation(thread.id, tool.id, context)
+    assert isinstance(saved.model_continuation, ClientToolResponsesContinuation)
+    assert saved.model_continuation.items == [{"example": "original"}]
+    saved.model_continuation.items[0]["example"] = "changed after reading"
+    reloaded = await store.load_client_tool_invocation(thread.id, tool.id, context)
+    assert isinstance(reloaded.model_continuation, ClientToolResponsesContinuation)
+    assert reloaded.model_continuation.items == [{"example": "original"}]
     user_message = UserMessageItem(
         id="user",
         thread_id=thread.id,

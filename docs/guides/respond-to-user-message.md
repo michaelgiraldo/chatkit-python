@@ -26,7 +26,6 @@ from dataclasses import dataclass
 @dataclass
 class MyRequestContext:
     user_id: str
-    staged_response_id: str | None = None
 ```
 
 ### Implement your `ChatKitServer`
@@ -79,7 +78,7 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
 | Input | Payload |
 | --- | --- |
 | `UserMessageTurn` | The saved user `.message` on a new or existing thread. |
-| `ClientToolTurn` | The saved `.tool_call` with the client's result. |
+| `ClientToolTurn` | The saved display item in `.tool_call` and its private `.invocation`. |
 | `StructuredInputTurn` | The answered or skipped structured input `.item`. |
 | `RetryTurn` | The existing user `.message` that starts the retry. |
 
@@ -197,9 +196,9 @@ SSE. The encoders wrap pending browser tool arguments as `{item_id, input}`.
 Application events, models, and storage keep the browser arguments and
 output unwrapped. A custom encoder must preserve the wire format in both streamed
 events and saved items loaded by the browser. The inbound operation supplies
-the browser's `{item_id, output}` inside `params.result`. Keep
-`ClientToolCallItem.model_continuation` server-side when encoding a browser
-response.
+the browser's `{item_id, output}` inside `params.result`.
+`ClientToolCallItem` and `ThreadStreamEvent` contain browser data only.
+`ClientToolRequest` and `ClientToolInvocation` are server-side types.
 [Protocol helpers](../api/chatkit/protocol.md) ·
 [Browser callback contract](update-client-during-response.md#register-the-client-tool-in-chatkitjs)
 
@@ -241,26 +240,27 @@ operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-str
 
 ### Implement the client tool lifecycle
 
-Implement `load_client_tool_status(thread_id, item_id, context)` and
-`cancel_client_tool_call(thread_id, item_id, context)` when your app uses
-browser tools. The state belongs to the same authenticated owner, thread, and
-item as the tool call. Keep it durable and independent of the transcript's
-ordering or visibility. Maintain at most one pending call per scoped thread.
+Keep the browser's `ClientToolCallItem` in the transcript and the
+`ClientToolInvocation` in private storage, keyed by the same authenticated
+owner, thread, and item ID. The private record holds the original turn ID,
+provider call ID, and any native model data. Apply your application's
+model-history access and retention rules to that record.
 
-- In `add_thread_item`, create a pending `ClientToolCallItem` and record
-  its pending status in one transaction. Reject a second pending call or
-  reuse of any recorded callback ID in that thread. Inserting a new user
-  message cancels the pending call in the same transaction, including when
-  `save_item` inserts the message. Use `claim_pending_item` to complete a
-  tool call and reject direct tool item writes through `save_item`.
-- Store `model_continuation` with the call and preserve it when completing
-  the call. It can contain native model inputs and outputs. Apply your
-  application's access and retention rules for model history to that data.
-- In `claim_pending_item`, compare the exact saved pending item and its
-  pending status, then save the completed item and its completed status in
-  the same transaction. Only one claimant can succeed. If you use
-  `validate_pending_claim`, call it with the existing item, expected item,
-  and replacement. The `latest_item_id` argument was removed.
+- In `register_client_tool_call`, verify the originating turn is current
+  and running, then insert both records and the pending status in one
+  transaction. Reject another pending call in the same thread, reuse of
+  a callback ID, and attempts to write a tool item through ordinary
+  transcript methods.
+- In `claim_pending_item`, compare the exact saved item and pending status,
+  and verify the originating turn still owns the thread. In that single
+  transaction save the completed display item and lifecycle status,
+  accept the next turn, and link it as `continuation_turn_id`. Return the
+  claimed invocation to the server. A structured-input claim returns
+  `None`. Use `validate_pending_claim` for the display-item comparison.
+- Expose `load_client_tool_status` and `load_client_tool_invocation` only
+  through the authorized store. From the invocation, use its
+  `continuation_turn_id` with `load_turn_state` to tell whether the
+  accepted callback's responder ran.
 - In `truncate_after`, cancel the pending call as part of the retry.
   In `delete_thread_item`, cancel the pending call if its item is deleted.
   Keep lifecycle records after retry or item deletion so
@@ -273,6 +273,8 @@ ordering or visibility. Maintain at most one pending call per scoped thread.
   specified pending ID. If the call is already completed or cancelled, or a
   different ID is pending, keep that state unchanged. ChatKit uses this
   during cleanup when a stream fails to finish its browser-tool handoff.
+  Finishing a current turn without a handoff also closes its pending
+  callback.
 
 Store implementations can use the [in-memory](../examples/in_memory_thread_store.py)
 and [SQLite](../examples/sqlite_thread_store.py) examples as references.
@@ -446,18 +448,22 @@ from agents import ModelSettings, RunConfig, Runner
 
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
-from chatkit.turns import ResponderEvent, Turn, TurnOutcome, UserMessageTurn
+from chatkit.turns import ResponderEvent, Turn, UserMessageTurn
 
 
 class MyChatKitServer(ChatKitServer[MyRequestContext]):
     async def respond(
         self, turn: Turn[MyRequestContext]
     ) -> AsyncIterator[ResponderEvent]:
-        thread, context = turn.thread, turn.context
+        context = turn.context
+        thread = await self.store.load_thread(turn.thread.id, context)
         saved_id = thread.metadata.get("last_response_id")
         if saved_id is not None:
             await self.store.patch_thread(
-                thread.id, {"metadata_delete": ("last_response_id",)}, context
+                thread.id,
+                {"metadata_delete": ("last_response_id",)},
+                context,
+                turn_id=turn.id,
             )
 
         previous_response_id = None
@@ -488,21 +494,19 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
         async with aclosing(stream_agent_response(agent_context, result)) as events:
             async for event in events:
                 yield event
-        context.staged_response_id = result.last_response_id
-
-    async def on_turn_finished(
-        self, turn: Turn[MyRequestContext], outcome: TurnOutcome
-    ) -> None:
-        if outcome is TurnOutcome.COMPLETED and turn.context.staged_response_id:
+        if result.is_complete and not result.interruptions and result.last_response_id:
             await self.store.patch_thread(
-                turn.thread.id,
-                {"metadata_set": {"last_response_id": turn.context.staged_response_id}},
-                turn.context,
+                thread.id,
+                {"metadata_set": {"last_response_id": result.last_response_id}},
+                context,
+                turn_id=turn.id,
             )
 ```
 
 `result.last_response_id` becomes available as the runner receives model
-responses. Save it only after the stream finishes successfully. If the provider
+responses. Save it after the model stream finishes, while your responder
+still owns the turn. The fenced patch prevents an older responder from
+overwriting a newer turn's checkpoint. If the provider
 reports that the saved response is no longer retrievable, a fresh user-message
 run can use descriptive thread context or the original input and output
 history available to your app. Resuming a browser tool requires its matching

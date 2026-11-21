@@ -42,7 +42,9 @@ from chatkit.requests import (
     ThreadsSyncCustomActionReq,
 )
 from chatkit.turns import (
+    ClientToolRequest,
     ClientToolTurn,
+    ResponderEvent,
     StructuredInputTurn,
     Turn,
     UserMessageTurn,
@@ -56,20 +58,21 @@ from tests.helpers.server import (
 
 
 async def test_respond_with_tool_call():
-    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ResponderEvent]:
         thread = turn.thread
         if isinstance(turn.input, UserMessageTurn):
-            yield ThreadItemDoneEvent(
+            yield ClientToolRequest(
                 item=ClientToolCallItem(
                     id="msg_1",
                     created_at=datetime.now(UTC),
                     name="tool_call_1",
                     arguments={"arg1": "val1", "arg2": False},
-                    call_id="tool_call_1",
                     thread_id=thread.id,
                 ),
+                call_id="provider_call_1",
             )
         elif isinstance(turn.input, ClientToolTurn):
+            assert turn.input.invocation.call_id == "provider_call_1"
             yield ThreadItemDoneEvent(
                 item=AssistantMessageItem(
                     id="msg_2",
@@ -108,7 +111,7 @@ async def test_respond_with_tool_call():
         assert events[3].item.id == "msg_1"
         assert events[3].item.name == "tool_call_1"
         assert events[3].item.arguments == {"arg1": "val1", "arg2": False}
-        assert events[3].item.call_id == "tool_call_1"
+        assert "provider_call_1" not in events[3].model_dump_json()
 
         events = await server.process_streaming(
             ThreadsAddClientToolOutputReq(

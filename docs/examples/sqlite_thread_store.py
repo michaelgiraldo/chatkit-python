@@ -25,9 +25,10 @@ from chatkit.store import (
     ThreadStore,
     TurnSupersededError,
     apply_thread_patch,
+    validate_client_tool_registration,
     validate_pending_claim,
 )
-from chatkit.turns import TurnOutcome, TurnState
+from chatkit.turns import ClientToolInvocation, TurnOutcome, TurnState
 
 
 class UserContext(Protocol):
@@ -106,7 +107,8 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                 thread_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'cancelled')),
-                turn_id TEXT,
+                turn_id TEXT NOT NULL,
+                invocation TEXT NOT NULL,
                 PRIMARY KEY (thread_id, user_id, id),
                 FOREIGN KEY (thread_id, user_id) REFERENCES threads (id, user_id)
                     ON DELETE CASCADE,
@@ -184,7 +186,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                     raise ConflictError("The thread already exists")
             self._replace_current_turn(conn, *scope, turn_id)
             if message is not None:
-                self._add_item(conn, *scope, message, None)
+                self._insert_item(conn, *scope, message)
 
     def _replace_current_turn(
         self,
@@ -301,6 +303,10 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                 state = TurnState.ABANDONED
             else:
                 return state
+            if state != TurnState.WAITING:
+                self._cancel_pending_callbacks(
+                    conn, thread_id, context.user_id, turn_id=turn_id
+                )
             self._write_turn_state(conn, scope, state)
             return state
 
@@ -452,20 +458,21 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
         *,
         turn_id: str | None = None,
     ) -> None:
+        if isinstance(item, ClientToolCallItem):
+            raise ConflictError("Client tool items require registration and completion")
         with closing(self._create_connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             scope = (thread_id, context.user_id)
             self._require_running_turn(conn, *scope, turn_id)
             self._require_thread(conn, *scope)
-            self._add_item(conn, *scope, item, turn_id)
+            self._insert_item(conn, *scope, item)
 
-    def _add_item(
+    def _insert_item(
         self,
         conn: sqlite3.Connection,
         thread_id: str,
         user_id: str,
         item: ThreadItem,
-        turn_id: str | None,
     ) -> None:
         if item.thread_id != thread_id:
             raise ValueError("Item must belong to the requested thread")
@@ -481,21 +488,46 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                 ItemData(item=item).model_dump_json(),
             ),
         )
-        if isinstance(item, ClientToolCallItem):
-            if item.status != "pending":
-                raise ValueError("A new client tool call must be pending")
+        if isinstance(item, UserMessageItem):
+            self._cancel_pending_callbacks(conn, *scope)
+
+    async def register_client_tool_call(
+        self,
+        thread_id: str,
+        item: ClientToolCallItem,
+        invocation: ClientToolInvocation,
+        context: TContext,
+    ) -> None:
+        validate_client_tool_registration(thread_id, item, invocation)
+        with closing(self._create_connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            scope = (thread_id, context.user_id)
+            self._require_running_turn(conn, *scope, invocation.turn_id)
+            self._insert_item(conn, *scope, item)
             try:
                 conn.execute(
-                    """INSERT INTO client_tool_callbacks (thread_id, user_id, id, status, turn_id)
-                    VALUES (?, ?, ?, 'pending', ?)""",
-                    (*scope, item.id, turn_id),
+                    """INSERT INTO client_tool_callbacks
+                        (thread_id, user_id, id, status, turn_id, invocation)
+                    VALUES (?, ?, ?, 'pending', ?, ?)""",
+                    (*scope, item.id, invocation.turn_id, invocation.model_dump_json()),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ConflictError(
                     "The thread already has a pending client tool callback"
                 ) from exc
-        elif isinstance(item, UserMessageItem):
-            self._cancel_pending_callbacks(conn, *scope)
+
+    async def load_client_tool_invocation(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> ClientToolInvocation:
+        with closing(self._create_connection()) as conn:
+            row = conn.execute(
+                """SELECT invocation FROM client_tool_callbacks
+                WHERE thread_id = ? AND user_id = ? AND id = ?""",
+                (thread_id, context.user_id, item_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("Client tool callback not found")
+            return ClientToolInvocation.model_validate_json(row[0])
 
     async def save_item(
         self,
@@ -579,7 +611,9 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
         with closing(self._create_connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             self._require_running_turn(conn, thread_id, context.user_id, turn_id)
-            self._cancel_pending_callbacks(conn, thread_id, context.user_id, item_id)
+            self._cancel_pending_callbacks(
+                conn, thread_id, context.user_id, item_id, turn_id=turn_id
+            )
 
     @staticmethod
     def _cancel_pending_callbacks(
@@ -587,12 +621,14 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
         thread_id: str,
         user_id: str,
         item_id: str | None = None,
+        *,
+        turn_id: str | None = None,
     ) -> None:
         conn.execute(
             """UPDATE client_tool_callbacks SET status = 'cancelled'
             WHERE thread_id = ? AND user_id = ? AND status = 'pending'
-                AND (? IS NULL OR id = ?)""",
-            (thread_id, user_id, item_id, item_id),
+                AND (? IS NULL OR id = ?) AND (? IS NULL OR turn_id = ?)""",
+            (thread_id, user_id, item_id, item_id, turn_id, turn_id),
         )
 
     async def claim_pending_item(
@@ -603,7 +639,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
         context: TContext,
         *,
         next_turn_id: str | None = None,
-    ) -> None:
+    ) -> ClientToolInvocation | None:
         with closing(self._create_connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             scope = (thread_id, context.user_id)
@@ -621,23 +657,29 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             validate_pending_claim(
                 ItemData.model_validate_json(row[0]).item, expected, replacement
             )
+            invocation = None
             if isinstance(expected, ClientToolCallItem):
-                owner = conn.execute(
-                    """UPDATE client_tool_callbacks SET status = 'completed'
+                if next_turn_id is None:
+                    raise ValueError(
+                        "A client tool claim requires a continuation turn ID"
+                    )
+                claimed = conn.execute(
+                    """UPDATE client_tool_callbacks SET status = 'completed',
+                        invocation = json_set(invocation, '$.continuation_turn_id', ?)
                     WHERE id = ? AND thread_id = ? AND user_id = ? AND status = 'pending'
-                    RETURNING turn_id""",
-                    params,
+                    RETURNING turn_id, invocation""",
+                    (next_turn_id, *params),
                 ).fetchone()
-                if owner is None:
+                if claimed is None:
                     raise ConflictError("The client tool callback is no longer pending")
-                if next_turn_id is not None and (
-                    owner[0] is None
-                    or self._require_current_turn(conn, *scope, owner[0])
-                    not in (TurnState.RUNNING, TurnState.WAITING)
+                if self._require_current_turn(conn, *scope, claimed[0]) not in (
+                    TurnState.RUNNING,
+                    TurnState.WAITING,
                 ):
                     raise ConflictError(
                         "The client tool callback no longer owns this thread"
                     )
+                invocation = ClientToolInvocation.model_validate_json(claimed[1])
             conn.execute(
                 "UPDATE items SET data = ? WHERE id = ? AND thread_id = ? AND user_id = ?",
                 (ItemData(item=replacement).model_dump_json(), *params),
@@ -649,6 +691,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                     next_turn_id,
                     continuing=isinstance(expected, ClientToolCallItem),
                 )
+            return invocation
 
     async def truncate_after(
         self,
