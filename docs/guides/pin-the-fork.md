@@ -72,6 +72,8 @@ PY
    together. A lockfile records the intended build input. An image tag can
    move. The resolved artifact and its installed metadata establish what is
    serving traffic.
+4. Use a fresh visitor session to check that the deployed route can read from
+   the app's store. [Signed thread-list check](prepare-your-app-for-production.md#check-thread-history-with-a-signed-visitor-session)
 
 [uv URL dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/#url) ·
 [Python direct URL metadata](https://packaging.python.org/en/latest/specifications/direct-url-data-structure/)
