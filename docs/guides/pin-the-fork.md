@@ -75,10 +75,10 @@ PY
 
 To roll back, switch traffic to the previous verified artifact if your
 platform supports it. For a rebuild, restore the previous manifest and
-lockfile. Verify the serving revision again after switching traffic. For
-the Turnspan 6 browser callback change, roll back the browser bundle and
-store implementation with the server.
-[Callback upgrade and rollback](update-client-during-response.md#upgrade-from-older-turnspan-versions)
+lockfile. Verify the serving revision again after switching traffic. If
+you are rolling back the Turnspan 6 browser callback change, restore the
+browser bundle, server, and matching store data together.
+[Turnspan 3 to 6 rollback guide](upgrade-turnspan-3-to-6.md#roll-back-together)
 
 [uv URL dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/#url) ·
 [Python direct URL metadata](https://packaging.python.org/en/latest/specifications/direct-url-data-structure/)

@@ -320,6 +320,9 @@ a newer turn starts.
 
 ### Upgrade from older Turnspan versions
 
+If you are starting from Turnspan 3, follow the [application migration and
+rollback guide](upgrade-turnspan-3-to-6.md).
+
 1. Update the browser handler to read `params.input` and return the matching
    `item_id` with `output`. Deploy it with the matching Turnspan server.
    If you wrote a custom transport, update its tool-call serialization to

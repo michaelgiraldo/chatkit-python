@@ -2,12 +2,19 @@
 
 Turnspan is a maintained Python 3.14 fork of the OpenAI ChatKit backend SDK.
 
-- [Quick start](quickstart.md)
+--8<-- "README.md:development-status"
+
+--8<-- "README.md:stable-start"
+
+## Development documentation
+
+- [Run the demo from a development checkout](quickstart.md)
 - [Core concepts](concepts/threads.md)
 - [Respond to a user message](guides/respond-to-user-message.md)
 - [Prepare your app for production](guides/prepare-your-app-for-production.md)
 - [API reference](api/chatkit/index.md)
 - [ChatKit JS docs](https://openai.github.io/chatkit-js/)
+- [Upgrade from Turnspan 3 to 6](guides/upgrade-turnspan-3-to-6.md)
 - [Changelog](release.md)
 - [Upstream status](upstream-status.md)
 
