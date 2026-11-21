@@ -6,18 +6,20 @@ from typing import Literal
 
 import pytest
 from fastapi import FastAPI
+from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message, Scope
 
 from chatkit.events import (
     AssistantMessageContentPartTextDelta,
+    ProgressUpdateEvent,
     ThreadCreatedEvent,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemUpdatedEvent,
     ThreadStreamEvent,
 )
-from chatkit.fastapi import process_request
+from chatkit.fastapi import ChatKitStreamingResponse, process_request
 from chatkit.models import (
     AssistantMessageContent,
     AssistantMessageItem,
@@ -36,6 +38,7 @@ from chatkit.requests import (
     ThreadsCreateReq,
     ThreadsGetByIdReq,
 )
+from chatkit.server import StreamingResult
 from chatkit.turns import Turn, UserMessageTurn
 from chatkit.widget_models import WidgetRoot
 from chatkit.widget_stream import stream_widget
@@ -45,7 +48,7 @@ from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 
 @pytest.mark.parametrize(
     ("asgi_version", "disconnect_at"),
-    [("2.3", "read"), ("2.3", "send"), ("2.4", "send")],
+    [("2.3", "read"), ("2.3", "send"), ("2.4", "read"), ("2.4", "send")],
 )
 async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
     asgi_version: str,
@@ -148,7 +151,9 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
             server, Request(scope, receive), DEFAULT_CONTEXT
         )
         expected_exit = (
-            pytest.raises(ClientDisconnect) if asgi_version == "2.4" else nullcontext()
+            pytest.raises(ClientDisconnect)
+            if asgi_version == "2.4" and disconnect_at == "send"
+            else nullcontext()
         )
         async with asyncio.timeout(5):
             with expected_exit:
@@ -186,6 +191,43 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
             True,
             [("partial-reply", "Partial reply")],
         )
+
+
+async def test_http_stream_completion_finishes_listener_before_background_work():
+    listening = asyncio.Event()
+    final_body = asyncio.Event()
+    listener_closed = asyncio.Event()
+    background_finished = asyncio.Event()
+
+    async def receive() -> Message:
+        listening.set()
+        try:
+            # A server may report a disconnect after a successful response.
+            await final_body.wait()
+            return {"type": "http.disconnect"}
+        finally:
+            listener_closed.set()
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body" and not message["more_body"]:
+            final_body.set()
+
+    async def events() -> AsyncIterator[ThreadStreamEvent]:
+        await listening.wait()
+        yield ProgressUpdateEvent(text="Done")
+
+    async def background() -> None:
+        assert listener_closed.is_set()
+        await asyncio.sleep(0)
+        background_finished.set()
+
+    response = ChatKitStreamingResponse(StreamingResult(events()))
+    response.background = BackgroundTask(background)
+    scope: Scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    async with asyncio.timeout(5):
+        await response(scope, receive, send)
+    assert final_body.is_set()
+    assert background_finished.is_set()
 
 
 @pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])

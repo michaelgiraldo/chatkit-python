@@ -7,6 +7,7 @@ from threading import Barrier
 
 import pytest
 
+from chatkit.errors import UnsupportedOperationError
 from chatkit.models import (
     AssistantMessageItem,
     ClientToolCallItem,
@@ -15,8 +16,8 @@ from chatkit.models import (
     ThreadMetadata,
     UserMessageItem,
 )
-from chatkit.store import ConflictError, NotFoundError
-from chatkit.store_checks import check_thread_store
+from chatkit.store import ConflictError, NotFoundError, ThreadStore
+from chatkit.store_checks import check_client_tool_store, check_thread_store
 from chatkit.turns import ClientToolResponsesContinuation, TurnOutcome, TurnState
 from docs.examples.in_memory_thread_store import InMemoryThreadStore
 from docs.examples.sqlite_thread_store import SQLiteThreadStore
@@ -156,12 +157,110 @@ async def test_sqlite_claim_and_patch_across_independent_connections(tmp_path: P
 @pytest.mark.asyncio
 async def test_app_store_checks_work_with_independent_instances(tmp_path: Path):
     path = tmp_path / "contract.sqlite3"
+    store = SQLiteThreadStore[RequestContext](path)
+    peer = SQLiteThreadStore[RequestContext](path)
     await check_thread_store(
-        SQLiteThreadStore[RequestContext](path),
-        DEFAULT_CONTEXT,
-        other_context=ALTERNATIVE_CONTEXT,
-        peer=SQLiteThreadStore[RequestContext](path),
+        store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
     )
+    await check_client_tool_store(
+        store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
+    )
+
+
+async def test_core_store_check_works_without_browser_tools(tmp_path: Path):
+    class TextOnlyStore(SQLiteThreadStore[RequestContext]):
+        register_client_tool_call = ThreadStore.register_client_tool_call
+        load_client_tool_invocation = ThreadStore.load_client_tool_invocation
+        load_client_tool_status = ThreadStore.load_client_tool_status
+        cancel_client_tool_call = ThreadStore.cancel_client_tool_call
+
+    path = tmp_path / "text.sqlite3"
+    store = TextOnlyStore(path)
+    peer = TextOnlyStore(path)
+    await check_thread_store(
+        store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
+    )
+    with pytest.raises(UnsupportedOperationError):
+        await check_client_tool_store(
+            store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT, peer=peer
+        )
+    assert not (await peer.load_threads(10, None, "asc", DEFAULT_CONTEXT)).data
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def form_store(request, tmp_path: Path):
+    if request.param == "memory":
+        memory = InMemoryThreadStore()
+        return lambda: memory, {}
+    path = tmp_path / "forms.sqlite3"
+    return lambda: SQLiteThreadStore[RequestContext](path), DEFAULT_CONTEXT
+
+
+@pytest.mark.parametrize("write", ["add", "upsert_new", "upsert_existing"])
+async def test_active_turn_accepts_only_its_own_form(form_store, write):
+    open_store, context = form_store
+    store = open_store()
+    thread = make_thread()
+    older = StructuredInputItem(
+        id="older", thread_id=thread.id, created_at=thread.created_at, inputs=[]
+    )
+    current = older.model_copy(update={"id": "current"})
+    await store.begin_turn(thread.id, "first", context, create_thread=thread)
+    await store.start_turn(thread.id, "first", context)
+    await store.add_thread_item(thread.id, older, context, turn_id="first")
+    if write == "upsert_existing":
+        await store.add_thread_item(thread.id, current, context, turn_id="first")
+
+    await store.begin_turn(thread.id, "second", context)
+    await store.start_turn(thread.id, "second", context)
+    issue_form = store.add_thread_item if write == "add" else store.save_item
+    await issue_form(thread.id, current, context, turn_id="second")
+
+    reader = open_store()
+    with pytest.raises(ConflictError):
+        await reader.claim_pending_item(
+            thread.id,
+            older,
+            older.model_copy(update={"status": "answered"}),
+            context,
+            next_turn_id="reply",
+        )
+    assert await reader.load_item(thread.id, older.id, context) == older
+    assert (
+        await reader.load_turn_state(thread.id, "second", context) == TurnState.RUNNING
+    )
+    answer = current.model_copy(update={"status": "answered"})
+    assert (
+        await reader.claim_pending_item(
+            thread.id, current, answer, context, next_turn_id="reply"
+        )
+        is None
+    )
+    assert await reader.load_item(thread.id, current.id, context) == answer
+    assert (
+        await reader.load_turn_state(thread.id, "reply", context) == TurnState.ACCEPTED
+    )
+
+
+async def test_reopening_an_answered_form_requires_an_explicit_owner(form_store):
+    open_store, context = form_store
+    store = open_store()
+    thread = make_thread()
+    pending = StructuredInputItem(
+        id="form", thread_id=thread.id, created_at=thread.created_at, inputs=[]
+    )
+    answered = pending.model_copy(update={"status": "answered"})
+    await store.begin_turn(thread.id, "owner", context, create_thread=thread)
+    await store.start_turn(thread.id, "owner", context)
+    await store.add_thread_item(thread.id, pending, context, turn_id="owner")
+    await store.claim_pending_item(thread.id, pending, answered, context)
+
+    await store.save_item(thread.id, pending, context)
+    with pytest.raises(ConflictError):
+        await store.claim_pending_item(thread.id, pending, answered, context)
+    await store.save_item(thread.id, pending, context, turn_id="owner")
+    await store.claim_pending_item(thread.id, pending, answered, context)
+    assert await store.load_item(thread.id, pending.id, context) == answered
 
 
 @pytest.mark.asyncio

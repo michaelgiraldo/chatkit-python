@@ -106,7 +106,7 @@ or cancellation cleanup.
 | Outcome | Meaning |
 | --- | --- |
 | `COMPLETED` | The response finished successfully. |
-| `WAITING` | The response left a pending client tool call or structured input. |
+| `WAITING` | The response left a pending browser tool, a form, or a saved approval checkpoint. |
 | `CANCELLED` | The response was interrupted. |
 | `FAILED` | An error stopped the response or was sent in the stream. |
 | `SUPERSEDED` | A newer request took ownership of the thread before this response finished. |
@@ -127,6 +127,37 @@ milestone in storage. Your app owns any recovery of external side effects.
 
 Attach request-scoped resources to the response lifetime and release them
 when it closes. ChatKit logs exceptions from `on_turn_finished`.
+
+### Pause for tool approval
+
+The Agents SDK can end its event stream while protected tools are waiting for a human decision. When `stream_agent_response` receives pending SDK interruptions, it passes a private, serialized `RunState` to your server. Override this hook on your `ChatKitServer` subclass when an agent uses tool approvals:
+
+```python
+async def save_approval_checkpoint(self, thread, turn_id, checkpoint, context):
+    await self.approvals.save(context.user_id, thread.id, turn_id, checkpoint)
+```
+
+Here `self.approvals` is your application's private checkpoint repository. Scope records by the authenticated owner, thread, and turn. The turn reaches `WAITING` after the save succeeds. A missing hook or failed save produces `FAILED`. The checkpoint stays out of the event stream and thread history.
+
+For a run using `AgentContext`, rebuild its store and request context at review time. Save any additional application data that tools need alongside the checkpoint. Authenticate the reviewer and validate a boolean decision for each pending tool call ID. In one storage transaction, verify that the original turn still owns the thread and is waiting, then claim its checkpoint once. The following helper takes the claimed server-side record and those validated decisions.
+
+```python
+from agents import RunContextWrapper, Runner, RunState
+
+
+async def resume_reviewed_run(agent, agent_context, checkpoint, decisions):
+    state = await RunState.from_string(
+        agent, checkpoint, context_override=RunContextWrapper(context=agent_context)
+    )
+    for action in state.get_interruptions():
+        if decisions[action.call_id]:
+            state.approve(action)
+        else:
+            state.reject(action)
+    return Runner.run_streamed(agent, state)
+```
+
+Forward this result through `stream_agent_response` inside an application-authorized responder to deliver the resumed reply to ChatKit. Another SDK pause produces a new checkpoint. Your application owns the review interface and storage. [OpenAI's guide to server-side approval state](https://openai.github.io/openai-agents-python/human_in_the_loop/#keep-approval-state-on-the-server)
 
 ### Wire ChatKit to your web framework
 
@@ -226,6 +257,14 @@ to that response. While forwarding transient updates, the server checks
 ownership at most once per 250 ms of emitted updates, with fresh checks
 at durable event boundaries. A transient frame already in flight can
 still reach the browser when a newer turn takes ownership.
+
+If a visitor submits an older form from a second tab while a newer reply is
+starting or running, the FastAPI adapter returns HTTP 409. The newer reply
+continues and the form stays pending. To implement this behavior, save the
+issuing turn ID with the form. Compare it with the active turn inside the
+transaction that claims the form. A form issued by the active turn can be
+answered immediately. Once the newer reply finishes, an older pending form
+can be submitted again.
 
 For a retry, `truncate_after` returns the retained `UserMessageItem`. Before
 returning, atomically make later items disappear from pagination and direct
@@ -336,27 +375,29 @@ pages and retries that cross the boundary between legacy and newer items.
 
 ### Check your app's store
 
-Run `check_thread_store` against a store that supports browser tools using
-a disposable database and contexts for two distinct test users. The check
-writes and deletes a synthetic thread. It verifies scoped reads,
-tied-timestamp pagination, concurrent patches, form claims, callback
-completion and cancellation, and retry truncation.
+Run `check_thread_store` for every thread store, including text-only apps. It
+checks user isolation, stable pagination, turn ownership, concurrent patches,
+form claims, hidden items, and retry truncation. If the store also supports
+browser tools, run `check_client_tool_store` to verify private invocations,
+exact callback claims, cancellation, and visible history. Each check creates
+and deletes its own synthetic thread in a disposable database.
 
 ```python
 import pytest
 
-from chatkit.store_checks import check_thread_store
+from chatkit.store_checks import check_client_tool_store, check_thread_store
 
 
 @pytest.mark.asyncio
 async def test_app_store(tmp_path):
     path = tmp_path / "contract.sqlite3"
-    await check_thread_store(
-        SQLiteThreadStore[RequestContext](path),
-        RequestContext(user_id="example-user"),
-        other_context=RequestContext(user_id="other-example-user"),
-        peer=SQLiteThreadStore[RequestContext](path),
-    )
+    store = SQLiteThreadStore[RequestContext](path)
+    peer = SQLiteThreadStore[RequestContext](path)
+    user = RequestContext(user_id="example-user")
+    other = RequestContext(user_id="other-example-user")
+    await check_thread_store(store, user, other_context=other, peer=peer)
+    # Include this check for stores that support browser tools.
+    await check_client_tool_store(store, user, other_context=other, peer=peer)
 ```
 
 For async adapters, supply independent store instances sharing the test database
@@ -382,6 +423,10 @@ Before you call your model, decide what conversation context you want the model 
 #### Load thread history (recommended default)
 
 Fetch recent items to give the model descriptive context from the thread.
+For assistant messages, the default converter sends the displayed text with its
+original `commentary` or `final_answer` phase when the provider supplied one.
+Turnspan stores that phase with the message and omits it from the ChatKit wire
+format. Messages without a recorded phase replay without the field.
 The default converter omits client tool items. Native Responses replay
 requires the provider's original items, including reasoning and assistant
 phase when supplied. For an accepted browser result, use the saved
@@ -612,6 +657,33 @@ async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
 ```
 
 `stream_agent_response` forwards these events alongside assistant text and tool updates. To call a browser callback from an agent tool, use [`request_client_tool`](update-client-during-response.md#define-a-client-tool-in-your-agent).
+
+### Deliver reviewed text
+
+For a chat that promises to check an answer before a visitor can see or reload
+it, configure an Agents SDK output guardrail on the agent that produces the
+final answer or on its `RunConfig`. Select reviewed delivery when forwarding
+that run.
+
+```python
+async with aclosing(
+    stream_agent_response(agent_context, result, delivery="reviewed_text")
+) as events:
+    async for event in events:
+        yield event
+```
+
+The visitor receives one completed assistant item containing the exact string
+that passed review. A successful empty answer leaves the transcript unchanged.
+If a check rejects, raises an error, or is cancelled, the candidate stays out
+of the ChatKit response and transcript. The adapter requires a successful
+output guardrail result for the final text. A run without one fails.
+
+Output guardrails inspect the final answer. Reviewed delivery discards
+intermediate commentary, progress, citations, widgets, and other app events.
+Use ordinary streaming for interactive browser tool handoffs. Model calls,
+server tool side effects, SDK session storage, and tracing each follow
+their own policies. [OpenAI's output guardrails](https://openai.github.io/openai-agents-python/guardrails/#output-guardrails)
 
 ### Save structured tool results after a turn
 

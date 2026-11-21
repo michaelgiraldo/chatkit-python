@@ -71,7 +71,16 @@ class ClientToolRequest:
     )
 
 
-type ResponderEvent = ThreadStreamEvent | PersistWorkflow | ClientToolRequest
+@dataclass(frozen=True, slots=True)
+class ApprovalRequired:
+    """Private run checkpoint awaiting application review."""
+
+    checkpoint: str = field(repr=False)
+
+
+type ResponderEvent = (
+    ThreadStreamEvent | PersistWorkflow | ClientToolRequest | ApprovalRequired
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from chatkit.models import (
     ClientToolCallItem,
     Page,
+    StructuredInputItem,
     ThreadItem,
     ThreadMetadata,
     UserMessageItem,
@@ -44,6 +45,7 @@ class ThreadData(BaseModel):
 
 class ItemData(BaseModel):
     item: ThreadItem
+    form_turn_id: str | None = None
 
 
 def _sort_timestamp(created_at: datetime) -> str:
@@ -465,7 +467,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             scope = (thread_id, context.user_id)
             self._require_running_turn(conn, *scope, turn_id)
             self._require_thread(conn, *scope)
-            self._insert_item(conn, *scope, item)
+            self._insert_item(conn, *scope, item, turn_id=turn_id)
 
     def _insert_item(
         self,
@@ -473,6 +475,8 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
         thread_id: str,
         user_id: str,
         item: ThreadItem,
+        *,
+        turn_id: str | None = None,
     ) -> None:
         if item.thread_id != thread_id:
             raise ValueError("Item must belong to the requested thread")
@@ -485,7 +489,12 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                 item.id,
                 *scope,
                 _sort_timestamp(item.created_at),
-                ItemData(item=item).model_dump_json(),
+                ItemData(
+                    item=item,
+                    form_turn_id=turn_id
+                    if isinstance(item, StructuredInputItem)
+                    else None,
+                ).model_dump_json(),
             ),
         )
         if isinstance(item, UserMessageItem):
@@ -545,7 +554,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             self._require_running_turn(conn, *scope, turn_id)
             self._require_thread(conn, *scope)
             current = conn.execute(
-                """SELECT json_extract(data, '$.item.type') FROM items
+                """SELECT json_extract(data, '$.item.type'), json_extract(data, '$.form_turn_id') FROM items
                 WHERE thread_id = ? AND user_id = ? AND id = ?""",
                 (*scope, item.id),
             ).fetchone()
@@ -557,6 +566,11 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                 raise ConflictError(
                     "Client tool items require registration and completion"
                 )
+            form_turn_id = None
+            if isinstance(item, StructuredInputItem):
+                form_turn_id = turn_id
+                if turn_id is None and current is not None:
+                    form_turn_id = current[1]
             saved = conn.execute(
                 """
                 INSERT INTO items (id, thread_id, user_id, created_at, data)
@@ -572,7 +586,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                     thread_id,
                     context.user_id,
                     _sort_timestamp(item.created_at),
-                    ItemData(item=item).model_dump_json(),
+                    ItemData(item=item, form_turn_id=form_turn_id).model_dump_json(),
                 ),
             )
             if not saved.rowcount:
@@ -654,11 +668,18 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                     f"Item {expected.id} not found in thread {thread_id}"
                 )
 
-            validate_pending_claim(
-                ItemData.model_validate_json(row[0]).item, expected, replacement
-            )
+            stored = ItemData.model_validate_json(row[0])
+            validate_pending_claim(stored.item, expected, replacement)
             invocation = None
-            if isinstance(expected, ClientToolCallItem):
+            if isinstance(expected, StructuredInputItem):
+                active = conn.execute(
+                    """SELECT id FROM thread_turns WHERE thread_id = ? AND user_id = ?
+                    AND is_current = 1 AND state IN (?, ?)""",
+                    (*scope, TurnState.ACCEPTED, TurnState.RUNNING),
+                ).fetchone()
+                if active is not None and active[0] != stored.form_turn_id:
+                    raise ConflictError("A newer reply is active on this thread")
+            else:
                 if next_turn_id is None:
                     raise ValueError(
                         "A client tool claim requires a continuation turn ID"

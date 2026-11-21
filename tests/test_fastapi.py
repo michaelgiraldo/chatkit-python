@@ -14,11 +14,13 @@ from chatkit.fastapi import ChatKitStreamingResponse, process_request
 from chatkit.models import (
     HiddenContextItem,
     SDKHiddenContextItem,
+    StructuredInputItem,
     ThreadMetadata,
     WidgetItem,
 )
 from chatkit.protocol import encode_sse
 from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.turns import TurnOutcome, TurnState
 from chatkit.widgets import Card, Text
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
@@ -286,6 +288,45 @@ def test_process_request_reports_missing_thread(client: TestClient):
     assert response.status_code == 404
     assert response.json()["detail"]
     assert "example-missing" not in response.text
+
+
+@pytest.mark.parametrize("state", [TurnState.ACCEPTED, TurnState.RUNNING])
+async def test_older_form_conflicts_only_while_newer_reply_is_active(state: TurnState):
+    thread = make_thread()
+    form = StructuredInputItem(
+        id="first-form", thread_id=thread.id, created_at=thread.created_at, inputs=[]
+    )
+    submission = {
+        "type": "threads.add_structured_input",
+        "params": {
+            "thread_id": thread.id,
+            "item_id": form.id,
+            "input": {"status": "skipped"},
+        },
+    }
+    ctx = DEFAULT_CONTEXT
+    with make_server() as server, make_client(server) as client:
+        store = server.store
+        await store.begin_turn(thread.id, "first", ctx, create_thread=thread)
+        await store.start_turn(thread.id, "first", ctx)
+        await store.add_thread_item(thread.id, form, ctx, turn_id="first")
+        await store.finish_turn(thread.id, "first", TurnOutcome.WAITING, ctx)
+        await store.begin_turn(thread.id, "newer", ctx)
+        if state is TurnState.RUNNING:
+            await store.start_turn(thread.id, "newer", ctx)
+
+        response = client.post("/chatkit", json=submission)
+        assert response.status_code == 409
+        assert await store.load_item(thread.id, form.id, ctx) == form
+        assert await store.load_turn_state(thread.id, "newer", ctx) is state
+
+        if state is TurnState.ACCEPTED:
+            await store.start_turn(thread.id, "newer", ctx)
+        await store.finish_turn(thread.id, "newer", TurnOutcome.COMPLETED, ctx)
+        assert client.post("/chatkit", json=submission).status_code == 200
+        assert await store.load_item(thread.id, form.id, ctx) == form.model_copy(
+            update={"status": "skipped"}
+        )
 
 
 def test_streaming_request_resolves_thread_before_sending_headers(client: TestClient):

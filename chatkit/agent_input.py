@@ -11,7 +11,6 @@ from openai.types.responses import (
     ResponseInputImageParam,
     ResponseInputMessageContentListParam,
     ResponseInputTextParam,
-    ResponseOutputText,
 )
 from openai.types.responses.response_input_item_param import Message
 
@@ -369,22 +368,14 @@ class ThreadItemConverter:
     async def assistant_message_to_input(
         self, item: AssistantMessageItem
     ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        return EasyInputMessageParam(
+        message = EasyInputMessageParam(
             type="message",
-            content=[
-                # content param doesn't support the assistant message content types
-                cast(
-                    ResponseInputContentParam,
-                    ResponseOutputText(
-                        type="output_text",
-                        text=c.text,
-                        annotations=[],  # TODO: these should be sent back as well
-                    ).model_dump(),
-                )
-                for c in item.content
-            ],
+            content="".join(part.text for part in item.content),
             role="assistant",
         )
+        if item.phase is not None:
+            message["phase"] = item.phase
+        return message
 
     async def client_tool_call_to_input(
         self, item: ClientToolCallItem
