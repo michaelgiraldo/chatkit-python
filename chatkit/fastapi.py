@@ -1,13 +1,15 @@
 """HTTP responses for FastAPI apps using ChatKit."""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from anyio import CancelScope
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from starlette.types import Receive, Scope, Send
+from starlette.requests import ClientDisconnect
+from starlette.types import Message, Receive, Scope, Send
 
 from .errors import (
     InvalidOperationError,
@@ -17,6 +19,20 @@ from .errors import (
 from .protocol import encode_message, encode_sse, parse_request
 from .server import ChatKitServer, StreamingResult
 from .store import ConflictError, NotFoundError
+
+
+@asynccontextmanager
+async def _closing_task(
+    coroutine: Coroutine[Any, Any, None],
+) -> AsyncIterator[asyncio.Task[None]]:
+    task = asyncio.create_task(coroutine)
+    try:
+        yield task
+    finally:
+        # Cancel once so the producer's cleanup can still await store writes.
+        task.cancel()
+        with CancelScope(shield=True), suppress(asyncio.CancelledError):
+            await task
 
 
 class ChatKitStreamingResponse(StreamingResponse):
@@ -31,19 +47,32 @@ class ChatKitStreamingResponse(StreamingResponse):
             yield encode_sse(event)
 
     async def stream_response(self, send: Send) -> None:
-        # Cancel the stream task once so its cleanup can still await store I/O.
-        task = asyncio.create_task(super().stream_response(send))
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            task.cancel()
-            with CancelScope(shield=True), suppress(asyncio.CancelledError):
-                await task
-            raise
+        async with _closing_task(super().stream_response(send)) as stream:
+            await asyncio.shield(stream)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
-            await super().__call__(scope, receive, send)
+            version = scope.get("asgi", {}).get("spec_version", "2.0")
+            if scope["type"] != "http" or tuple(map(int, version.split("."))) < (2, 4):
+                return await super().__call__(scope, receive, send)
+
+            async def send_http(message: Message) -> None:
+                try:
+                    await send(message)
+                except OSError as error:
+                    raise ClientDisconnect() from error
+
+            async with (
+                _closing_task(self.listen_for_disconnect(receive)) as disconnect,
+                _closing_task(self.stream_response(send_http)) as stream,
+            ):
+                finished, _ = await asyncio.wait(
+                    (stream, disconnect), return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in finished:
+                    task.result()
+            if self.background is not None:
+                await self.background()
         finally:
             with CancelScope(shield=True):
                 await self._result.aclose()

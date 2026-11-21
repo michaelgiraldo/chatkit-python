@@ -32,9 +32,26 @@ install command, tested dependency versions, and links to docs at that commit.
 
 ## Unreleased
 
+- Widget actions omit server-only context from browser replies. The FastAPI
+  adapter notices when a visitor leaves during a silent stream. Ordinary
+  streaming saves the partial reply for reload.
+- Agents integrations can select `delivery="reviewed_text"` to publish the
+  final answer after an output guardrail approves it. Closing the connection
+  during review leaves the candidate out of the transcript.
+- Agents using tool approvals must implement `save_approval_checkpoint`.
+  Turnspan reports `WAITING` after the save. A failed save reports `FAILED`.
+- Transcript replay uses assistant input text and preserves a recorded
+  Responses message phase for the next model request.
 - The server keeps its own copies of streamed content, citations, and workflow
   tasks. A responder can assemble its final message without duplicating text,
   and edits it hasn't emitted stay out of a partial reply saved on disconnect.
+- **Custom stores** must reject an older form while a different turn is
+  starting or running. Implement the ownership check in the claim transaction.
+- **Store tests** can run `check_thread_store` for core operations. Suites
+  that previously used it to cover browser tools must also run
+  `check_client_tool_store`. [Store and responder guide](guides/respond-to-user-message.md)
+- The Agents integration requires OpenAI Python 3.57.0 or newer within the
+  3.x series. Documentation builds use Zensical 0.1.3 or newer within 0.1.x.
 
 ## Turnspan 6 (`1.6.5+turnspan.6`)
 

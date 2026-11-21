@@ -53,9 +53,12 @@ it finishes a client tool handoff, ChatKit cancels the exact pending call
 it opened. A completed handoff leaves the call pending for the browser.
 [Client tool lifecycle](../guides/update-client-during-response.md#know-when-a-callback-can-complete)
 
-For FastAPI or Starlette, use `chatkit.fastapi.process_request` to keep the
-iterator open for the lifetime of the HTTP response and close it when the
-framework reports a disconnect. [FastAPI adapter reference](../api/chatkit/fastapi.md)
+For FastAPI or Starlette, use `chatkit.fastapi.process_request`. Its default
+streaming response listens for `http.disconnect` while it waits for the next
+event, so a visitor can leave even when the producer is silent. On servers
+advertising ASGI HTTP spec 2.4 or later, a failed write can also signal that
+the connection closed. [ASGI HTTP specification](https://asgi.readthedocs.io/en/stable/specs/www.html#disconnected-client-send-exception)
+· [FastAPI adapter reference](../api/chatkit/fastapi.md)
 
 When your own `respond` or `action` generator forwards another async generator,
 wrap the inner generator in `contextlib.aclosing`. This carries early closure

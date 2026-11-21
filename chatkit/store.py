@@ -394,7 +394,10 @@ class ThreadStore[TContext = Any](ABC):
         requires `next_turn_id` and a registered pending callback with a current
         owner. Save its result and the accepted continuation turn in the same
         transaction and return the private invocation linked to that turn.
-        Structured input claims return `None`.
+        A structured input claim returns `None`. Record which turn issued a
+        form. If a different turn is ACCEPTED or RUNNING, reject the claim
+        with `ConflictError` in the same transaction, leaving the form pending.
+        A form with no recorded owner can be claimed when the thread is idle.
 
         Raise `ConflictError` on stale or closed state and `NotFoundError` for
         an unavailable item or thread. Commit the claim before starting inference.

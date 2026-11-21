@@ -131,8 +131,8 @@ async def test_input_item_converter_to_input_items_mixed():
         AssistantMessageItem(
             id="123",
             content=[
-                AssistantMessageContent(text="How are you doing?"),
-                AssistantMessageContent(text="Can't do that"),
+                AssistantMessageContent(text="How are "),
+                AssistantMessageContent(text="you doing?"),
             ],
             thread_id=_THREAD_ID,
             created_at=datetime.now(),
@@ -168,20 +168,7 @@ async def test_input_item_converter_to_input_items_mixed():
         "type": "message",
     }
     assert input_items[2] == {
-        "content": [
-            {
-                "annotations": [],
-                "text": "How are you doing?",
-                "logprobs": None,
-                "type": "output_text",
-            },
-            {
-                "annotations": [],
-                "text": "Can't do that",
-                "logprobs": None,
-                "type": "output_text",
-            },
-        ],
+        "content": "How are you doing?",
         "type": "message",
         "role": "assistant",
     }

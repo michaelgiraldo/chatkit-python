@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from chatkit.models import (
     ClientToolCallItem,
     Page,
+    StructuredInputItem,
     ThreadItem,
     ThreadMetadata,
     UserMessageItem,
@@ -45,6 +46,7 @@ class InMemoryThreadStore(ThreadStore[Context]):
         self._callbacks: dict[str, dict[str, _ClientToolCallback]] = {}
         self._turns: dict[str, dict[str, TurnState]] = {}
         self._current_turns: dict[str, str] = {}
+        self._current_forms: dict[str, set[str]] = {}
 
     async def load_thread(self, thread_id: str, context: Context) -> ThreadMetadata:
         if thread_id not in self.threads:
@@ -96,6 +98,7 @@ class InMemoryThreadStore(ThreadStore[Context]):
         ):
             turns[previous] = TurnState.WAITING if continuing else TurnState.SUPERSEDED
         self._cancel_pending_callbacks(thread_id)
+        self._current_forms.pop(thread_id, None)
         turns[turn_id] = TurnState.ACCEPTED
         self._current_turns[thread_id] = turn_id
 
@@ -211,6 +214,8 @@ class InMemoryThreadStore(ThreadStore[Context]):
         if isinstance(item, ClientToolCallItem):
             raise ConflictError("Client tool items require registration and completion")
         self._insert_item(thread_id, item)
+        if turn_id is not None and isinstance(item, StructuredInputItem):
+            self._current_forms.setdefault(thread_id, set()).add(item.id)
 
     def _insert_item(self, thread_id: str, item: ThreadItem) -> None:
         items = self.items.setdefault(thread_id, {})
@@ -245,6 +250,11 @@ class InMemoryThreadStore(ThreadStore[Context]):
         if current is None and isinstance(stored, UserMessageItem):
             self._cancel_pending_callbacks(thread_id)
         items[item.id] = stored
+        if isinstance(stored, StructuredInputItem):
+            if turn_id is not None:
+                self._current_forms.setdefault(thread_id, set()).add(item.id)
+        elif thread_id in self._current_forms:
+            self._current_forms[thread_id].discard(item.id)
 
     def _require_item_scope(self, thread_id: str, item: ThreadItem) -> None:
         if item.thread_id != thread_id:
@@ -333,7 +343,18 @@ class InMemoryThreadStore(ThreadStore[Context]):
         validate_pending_claim(current, expected, replacement)
         stored = replacement.model_copy(deep=True)
         claimed = None
-        if isinstance(expected, ClientToolCallItem):
+        if isinstance(expected, StructuredInputItem):
+            owner = self._current_turns.get(thread_id)
+            if (
+                owner is not None
+                and self._turns[thread_id][owner]
+                in (TurnState.ACCEPTED, TurnState.RUNNING)
+                and expected.id not in self._current_forms.get(thread_id, ())
+            ):
+                raise ConflictError("A newer reply is active on this thread")
+            if thread_id in self._current_forms:
+                self._current_forms[thread_id].discard(expected.id)
+        else:
             if next_turn_id is None:
                 raise ValueError("A client tool claim requires a continuation turn ID")
             callback = self._callbacks.get(thread_id, {}).get(expected.id)
@@ -389,6 +410,8 @@ class InMemoryThreadStore(ThreadStore[Context]):
             self._cancel_pending_callbacks(thread_id)
         for later_id in later:
             del items[later_id]
+        if thread_id in self._current_forms:
+            self._current_forms[thread_id].difference_update(later)
         return retained
 
     async def load_item(
@@ -405,6 +428,7 @@ class InMemoryThreadStore(ThreadStore[Context]):
         self._callbacks.pop(thread_id, None)
         self._turns.pop(thread_id, None)
         self._current_turns.pop(thread_id, None)
+        self._current_forms.pop(thread_id, None)
 
     async def delete_thread_item(
         self,
@@ -417,6 +441,8 @@ class InMemoryThreadStore(ThreadStore[Context]):
         self._require_running_turn(thread_id, turn_id)
         self._cancel_pending_callbacks(thread_id, item_id)
         self.items.get(thread_id, {}).pop(item_id, None)
+        if thread_id in self._current_forms:
+            self._current_forms[thread_id].discard(item_id)
 
     @staticmethod
     def _sort_key(row: ThreadMetadata | ThreadItem) -> tuple[datetime, str]:

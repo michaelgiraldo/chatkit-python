@@ -1,5 +1,5 @@
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import Literal
 from unittest.mock import AsyncMock
@@ -17,7 +17,8 @@ from agents import (
     function_tool,
 )
 from agents.tool_context import ToolContext
-from openai import AsyncOpenAI
+from openai.types.responses.response_input_item_param import ResponseInputItemParam
+from pydantic import TypeAdapter
 
 from chatkit.agent_input import client_tool_continuation_input, simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
@@ -58,206 +59,13 @@ from chatkit.turns import (
     UserMessageTurn,
 )
 from tests._types import RequestContext
+from tests.helpers.provider import (
+    chat_completions_stream,
+    client_tool_stream,
+    mock_client,
+    responses_stream,
+)
 from tests.helpers.server import DEFAULT_CONTEXT, make_server
-
-
-def _responses_stream(turn: int) -> str:
-    citation = {
-        "type": "url_citation",
-        "start_index": 0,
-        "end_index": 7,
-        "title": "Example",
-        "url": "https://example.com/source",
-    }
-    item = {
-        "id": f"msg_{turn}",
-        "type": "message",
-        "role": "assistant",
-        "status": "completed",
-        "content": [
-            {"type": "output_text", "text": "Example reply", "annotations": [citation]}
-        ],
-    }
-    response = {
-        "id": f"resp_{turn}",
-        "created_at": 1,
-        "model": "gpt-6-luna",
-        "object": "response",
-        "output": [item],
-        "parallel_tool_calls": True,
-        "tool_choice": "auto",
-        "tools": [],
-        "status": "completed",
-    }
-    events = [
-        {
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {**item, "status": "in_progress", "content": []},
-        },
-        {
-            "type": "response.content_part.added",
-            "output_index": 0,
-            "item_id": item["id"],
-            "content_index": 0,
-            "part": {"type": "output_text", "text": "", "annotations": []},
-        },
-        {
-            "type": "response.output_text.delta",
-            "output_index": 0,
-            "item_id": item["id"],
-            "content_index": 0,
-            "delta": "Example reply",
-            "logprobs": [],
-        },
-        {
-            "type": "response.output_text.done",
-            "output_index": 0,
-            "item_id": item["id"],
-            "content_index": 0,
-            "text": "Example reply",
-            "logprobs": [],
-        },
-        *(
-            {
-                "type": "response.output_text.annotation.added",
-                "item_id": item["id"],
-                "output_index": 0,
-                "content_index": 0,
-                "annotation_index": index,
-                "annotation": annotation,
-            }
-            for index, annotation in enumerate((None, citation))
-        ),
-        {"type": "response.output_item.done", "output_index": 0, "item": item},
-        {"type": "response.completed", "response": response},
-    ]
-    return "".join(
-        f"data: {json.dumps(dict(event, sequence_number=index))}\n\n"
-        for index, event in enumerate(events)
-    )
-
-
-def _mock_client(
-    handler: Callable[[httpx2.Request], httpx2.Response],
-) -> AsyncOpenAI:
-    return AsyncOpenAI(
-        api_key="test-key",
-        base_url="https://example.com/v1",
-        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
-        max_retries=0,
-    )
-
-
-def _chat_completions_stream(turn: int, choices: list[dict]) -> str:
-    chunk = {
-        "id": f"chatcmpl_example_{turn}",
-        "object": "chat.completion.chunk",
-        "created": 1,
-        "model": "gpt-6-luna",
-    }
-    return (
-        "".join(
-            f"data: {json.dumps(dict(chunk, choices=[choice]))}\n\n"
-            for choice in choices
-        )
-        + "data: [DONE]\n\n"
-    )
-
-
-def _client_tool_stream(
-    api: Literal["responses", "chat_completions"], turn: int, model_arguments: str
-) -> str:
-    names = ("client_read", "server_lookup")
-    if api == "chat_completions":
-        calls = [
-            {
-                "index": index,
-                "id": f"call_{name}_{turn}",
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "arguments": model_arguments if name == "client_read" else "{}",
-                },
-            }
-            for index, name in enumerate(names)
-        ]
-        return _chat_completions_stream(
-            turn,
-            [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "tool_calls": calls},
-                    "finish_reason": None,
-                },
-                {"index": 0, "delta": {}, "finish_reason": "tool_calls"},
-            ],
-        )
-
-    commentary_content = {
-        "type": "output_text",
-        "text": "I’ll check the selection.",
-        "annotations": [],
-    }
-    items = [
-        {
-            "id": f"rs_tool_{turn}",
-            "type": "reasoning",
-            "summary": [],
-            "encrypted_content": "synthetic-opaque-reasoning",
-            "status": "completed",
-        },
-        {
-            "id": f"msg_commentary_{turn}",
-            "type": "message",
-            "role": "assistant",
-            "phase": "commentary",
-            "content": [commentary_content],
-            "status": "completed",
-        },
-        *[
-            {
-                "id": f"fc_{name}_{turn}",
-                "type": "function_call",
-                "call_id": f"call_{name}_{turn}",
-                "name": name,
-                "arguments": model_arguments if name == "client_read" else "{}",
-                "status": "completed",
-            }
-            for name in names
-        ],
-    ]
-    events = [
-        {
-            "type": f"response.output_item.{stage}",
-            "output_index": index,
-            "item": (
-                {**item, "content": [], "status": "in_progress"}
-                if stage == "added" and item["type"] == "message"
-                else item
-            ),
-        }
-        for index, item in enumerate(items)
-        for stage in ("added", "done")
-    ]
-    events.append({
-        "type": "response.completed",
-        "response": {
-            "id": f"resp_tool_{turn}",
-            "created_at": 1,
-            "model": "gpt-6-luna",
-            "object": "response",
-            "output": items,
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-            "status": "completed",
-        },
-    })
-    return "".join(
-        f"data: {json.dumps(dict(event, sequence_number=index))}\n\n"
-        for index, event in enumerate(events)
-    )
 
 
 def _message_input(text: str) -> UserMessageInput:
@@ -290,8 +98,12 @@ def _completed_reply(events: list[ThreadStreamEvent]) -> AssistantMessageItem:
     return reply
 
 
-async def test_responses_stream_preserves_headers_decodes_citations_and_chains_turns(
+@pytest.mark.parametrize(
+    "replay_transcript", [False, True], ids=["chain", "transcript"]
+)
+async def test_responses_stream_preserves_headers_citations_and_turn_context(
     monkeypatch: pytest.MonkeyPatch,
+    replay_transcript: bool,
 ):
     previous_ids: list[str | None] = []
 
@@ -305,13 +117,27 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
         assert body["stream"] is True
         assert body["store"] is True
         previous_ids.append(body.get("previous_response_id"))
+        turn = len(previous_ids)
+        if replay_transcript and turn == 2:
+            _, reply, _ = body["input"]
+            TypeAdapter(ResponseInputItemParam).validate_python(reply)
+            assert reply == {
+                "role": "assistant",
+                "type": "message",
+                "content": "Example reply",
+                "phase": "commentary",
+            }
         return httpx2.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
-            text=_responses_stream(len(previous_ids)),
+            text=responses_stream(
+                turn,
+                initial_phase="commentary" if turn == 1 else None,
+                phase="final_answer" if turn == 2 else None,
+            ),
         )
 
-    async with _mock_client(handle_request) as client:
+    async with mock_client(handle_request) as client:
         agent = Agent(
             name="Example agent",
             model=OpenAIResponsesModel("gpt-6-luna", client),
@@ -334,12 +160,19 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
                 request_context=turn.context,
                 resume_from=None,
             )
+            if replay_transcript:
+                history = await server.store.load_thread_items(
+                    turn.thread.id, None, 20, "asc", turn.context
+                )
+                inputs = await simple_to_agent_input(history.data)
+            else:
+                inputs = await simple_to_agent_input(turn.input.message)
             result = Runner.run_streamed(
                 agent,
-                await simple_to_agent_input(turn.input.message),
+                inputs,
                 context=context,
                 run_config=RunConfig(tracing_disabled=True),
-                previous_response_id=response_id,
+                previous_response_id=None if replay_transcript else response_id,
             )
             async with aclosing(stream_agent_response(context, result)) as events:
                 async for event in events:
@@ -369,12 +202,14 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
                     )
                 )
             )
-            history.assert_not_awaited()
+            if not replay_transcript:
+                history.assert_not_awaited()
             loaded = await server.process_non_streaming(
                 ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
             )
 
         for turn, events in enumerate((first_turn, second_turn), start=1):
+            assert all(b'"phase"' not in encode_sse(event) for event in events)
             annotations = [
                 event.update
                 for event in events
@@ -388,15 +223,26 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
             assert source.url == "https://example.com/source"
             reply = _completed_reply(events)
             assert (reply.id, reply.content[0].text) == (f"msg_{turn}", "Example reply")
+            (started_reply,) = [
+                event.item
+                for event in events
+                if isinstance(event, ThreadItemAddedEvent)
+                and isinstance(event.item, AssistantMessageItem)
+            ]
+            assert started_reply.phase == ("commentary" if turn == 1 else None)
 
-    assert previous_ids == [None, "resp_1"]
+    assert previous_ids == [None, None if replay_transcript else "resp_1"]
     assert completed_ids == ["resp_1", "resp_2"]
     assert isinstance(loaded, Thread)
+    assert b'"phase"' not in encode_message(loaded)
     assert [
-        (item.id, item.content[0].text)
+        (item.id, item.phase, item.content[0].text)
         for item in loaded.items.data
         if isinstance(item, AssistantMessageItem)
-    ] == [("msg_1", "Example reply"), ("msg_2", "Example reply")]
+    ] == [
+        ("msg_1", "commentary", "Example reply"),
+        ("msg_2", "final_answer", "Example reply"),
+    ]
 
 
 async def test_chat_completions_stream_preserves_headers_and_persists_distinct_replies():
@@ -407,9 +253,13 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         assert request.url.path == "/v1/chat/completions"
         assert request.headers["User-Agent"] == "ExampleApp/1.0"
         assert request.headers["X-Example-Route"] == "example"
-        assert json.loads(request.content)["stream"] is True
+        body = json.loads(request.content)
+        assert body["stream"] is True
         requested_paths.append(request.url.path)
         turn = len(requested_paths)
+        if turn == 2:
+            _, reply, _ = body["messages"]
+            assert reply == {"role": "assistant", "content": "Example reply 1"}
         choices = [
             {
                 "index": 0,
@@ -422,10 +272,10 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         return httpx2.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
-            text=_chat_completions_stream(turn, choices),
+            text=chat_completions_stream(turn, choices),
         )
 
-    async with _mock_client(handle_request) as client:
+    async with mock_client(handle_request) as client:
         agent = Agent(
             name="Example agent",
             model=OpenAIChatCompletionsModel("gpt-6-luna", client),
@@ -447,9 +297,12 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
                 request_context=turn.context,
                 resume_from=None,
             )
+            history = await server.store.load_thread_items(
+                turn.thread.id, None, 20, "asc", turn.context
+            )
             result = Runner.run_streamed(
                 agent,
-                await simple_to_agent_input(turn.input.message),
+                await simple_to_agent_input(history.data),
                 context=context,
                 run_config=RunConfig(tracing_disabled=True),
             )
@@ -545,7 +398,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                 else None
             )
         if not is_callback:
-            stream = _client_tool_stream(api, turn, model_arguments)
+            stream = client_tool_stream(api, turn, model_arguments)
         elif api == "responses":
             inputs = body["input"]
             if continuation == "responses":
@@ -582,7 +435,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                 expected_client_id: json.dumps(expected_result),
                 expected_server_id: "Server data",
             }
-            stream = _responses_stream(turn)
+            stream = responses_stream(turn)
         else:
             messages = body["messages"]
             assert messages[0]["role"] == "user"
@@ -602,7 +455,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                 expected_client_id: json.dumps(expected_result),
                 expected_server_id: "Server data",
             }
-            stream = _chat_completions_stream(
+            stream = chat_completions_stream(
                 turn,
                 [
                     {
@@ -637,7 +490,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         return "Server data"
 
     pending_items: list[ClientToolCallItem] = []
-    async with _mock_client(handle_request) as client:
+    async with mock_client(handle_request) as client:
         model_type = (
             OpenAIResponsesModel if api == "responses" else OpenAIChatCompletionsModel
         )
