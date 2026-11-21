@@ -83,5 +83,14 @@ Run `make serve-docs` to preview the Zensical site and `make docs-check` to
 build it into `site/`. Zensical generates the API reference from `chatkit/`.
 Add new public modules to the API navigation in [zensical.toml](zensical.toml).
 
+### Where to start a fix
+
+| Symptom | Code to read first | Regression to run |
+| --- | --- | --- |
+| A reply is doubled or missing after a disconnect | [Partial-item assembly](chatkit/_pending_items.py) builds the text. [Server cancellation](chatkit/server.py) decides what to save. | [Partial replies](tests/test_stream_lifecycle.py) and [disconnect, reload, and next turn](tests/test_http_disconnect.py) |
+| A private item appears in chat or a thread reopens with missing messages | [Browser output](chatkit/_browser_output.py) checks visibility. [Request handling](chatkit/server.py) reads the first page and handles continuation requests. | [Browser history requests](tests/test_fastapi.py), especially `test_browser_reopens_thread_and_continues_from_first_page_cursor` |
+| A provider citation, image preview, or reply ID is wrong | [Agent output conversion](chatkit/_agent_output.py) turns provider events into ChatKit items. | [Output conversion](tests/test_agent_output.py) and [both SDK model paths](tests/test_openai_sdk_stream.py) |
+| A custom store skips or repeats items across pages | [ThreadStore](chatkit/store.py) defines cursor behavior. [Store checks](chatkit/store_checks.py) exercise the app’s implementation. | [Store regressions](tests/test_store.py), especially `test_core_store_check_detects_repeated_visible_page` |
+
 ## License
 This project is licensed under the [Apache License 2.0](LICENSE).
