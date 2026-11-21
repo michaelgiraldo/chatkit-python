@@ -187,6 +187,30 @@ async def test_core_store_check_works_without_browser_tools(tmp_path: Path):
     assert not (await peer.load_threads(10, None, "asc", DEFAULT_CONTEXT)).data
 
 
+@pytest.mark.parametrize("broken_order", ["asc", "desc"])
+async def test_core_store_check_detects_repeated_visible_page(
+    tmp_path: Path, broken_order: str
+):
+    class RepeatingPageStore(SQLiteThreadStore[RequestContext]):
+        async def load_thread_items(
+            self, thread_id, after, limit, order, context, *, include_hidden=True
+        ):
+            if not include_hidden and order == broken_order:
+                after = None
+            return await super().load_thread_items(
+                thread_id, after, limit, order, context, include_hidden=include_hidden
+            )
+
+    store = RepeatingPageStore(tmp_path / "repeated-page.sqlite3")
+    with pytest.raises(
+        AssertionError, match=f"browser-visible {broken_order} history at page 2"
+    ):
+        await check_thread_store(
+            store, DEFAULT_CONTEXT, other_context=ALTERNATIVE_CONTEXT
+        )
+    assert not (await store.load_threads(10, None, "asc", DEFAULT_CONTEXT)).data
+
+
 @pytest.fixture(params=["memory", "sqlite"])
 def form_store(request, tmp_path: Path):
     if request.param == "memory":

@@ -242,7 +242,10 @@ thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `patch_thread` to edit saved fields, and yield the result of
 `ChatKitServer.update_thread` when a connected client should see an edit.
 For `load_thread_items(..., include_hidden=False)`, filter the model-only items
-before computing the page and its cursor.
+before computing the page and its cursor. Turnspan rejects a store result
+that contains either hidden item type. When a responder supplies its own
+paginated thread snapshot, apply the same filter before calculating its
+cursor. Turnspan can filter a complete, unpaginated snapshot directly.
 
 Keep one current turn ID per authenticated thread. `begin_turn` saves the
 trigger, supersedes the current turn, and cancels any pending callback in
@@ -376,8 +379,11 @@ pages and retries that cross the boundary between legacy and newer items.
 ### Check your app's store
 
 Run `check_thread_store` for every thread store, including text-only apps. It
-checks user isolation, stable pagination, turn ownership, concurrent patches,
-form claims, hidden items, and retry truncation. If the store also supports
+checks user isolation, turn ownership, concurrent patches, form claims, and
+retry truncation. It follows history cursors in both directions through
+interleaved visible items and app and SDK context notes. Each visible item
+must appear exactly once, and a browser cursor must never expose a private
+item ID. If the store also supports
 browser tools, run `check_client_tool_store` to verify private invocations,
 exact callback claims, cancellation, and visible history. Each check creates
 and deletes its own synthetic thread in a disposable database.

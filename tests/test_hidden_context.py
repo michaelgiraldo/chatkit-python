@@ -1,7 +1,10 @@
 from collections.abc import AsyncIterator
 from datetime import datetime
 
+import pytest
+
 from chatkit.events import (
+    ErrorEvent,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemRemovedEvent,
@@ -18,13 +21,15 @@ from chatkit.models import (
     UserMessageInput,
     UserMessageTextContent,
 )
+from chatkit.protocol import encode_message
 from chatkit.requests import ThreadCreateParams, ThreadsCreateReq
 from chatkit.turns import Turn, UserMessageTurn
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, make_server
 
 
-async def test_stream_keeps_hidden_items_server_side():
+@pytest.mark.parametrize("paginated", [False, True])
+async def test_stream_keeps_hidden_items_server_side(paginated: bool):
     async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         assert isinstance(turn.input, UserMessageTurn)
         app_item = HiddenContextItem(
@@ -46,7 +51,11 @@ async def test_stream_keeps_hidden_items_server_side():
         yield ThreadUpdatedEvent(
             thread=Thread(
                 **turn.thread.model_dump(exclude={"items"}),
-                items=Page(data=[app_item, turn.input.message, sdk_item]),
+                items=Page(
+                    data=[app_item, turn.input.message, sdk_item],
+                    has_more=paginated,
+                    after=sdk_item.id if paginated else None,
+                ),
             )
         )
         yield ThreadItemRemovedEvent(item_id=sdk_item.id)
@@ -67,6 +76,10 @@ async def test_stream_keeps_hidden_items_server_side():
         assert created.type == "thread.created"
         assert user_message.type == "thread.item.done"
         assert options.type == "stream_options"
+        if paginated:
+            assert isinstance(updated, ErrorEvent)
+            assert b"sdk-note" not in encode_message(updated)
+            return
         assert updated.type == "thread.updated"
         assert updated.thread.items.data == [user_message.item]
         stored = await server.store.load_thread_items(

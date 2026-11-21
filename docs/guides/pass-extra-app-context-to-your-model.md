@@ -42,7 +42,12 @@ class RequestContext:
     plan: str
 ```
 
-Use this context in your `respond` method, tools, and store methods to keep the model and your business logic aware of the current app state.
+Pass the authenticated `RequestContext` to the server. Inside `respond`,
+use `AgentContext(thread=turn.thread, store=self.store, request_context=turn.context, resume_from=None)`.
+A tool can then read `ctx.context.request_context.org_id`. For data that belongs
+to one agent run, declare a typed field on an `AgentContext` subclass.
+The constructor reports unknown fields by name.
+[Example of a typed run context](respond-to-user-message.md#save-structured-tool-results-after-a-turn)
 
 ## Fetch context on demand with tools
 

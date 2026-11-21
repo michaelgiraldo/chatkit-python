@@ -108,6 +108,7 @@ ignore = [
 preview = true
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 addopts = ["--import-mode=importlib"]
 pythonpath = ["."]
 asyncio_mode = "auto"

@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import timedelta
 
 import pytest
 from fastapi import FastAPI, Request, Response
@@ -12,9 +13,13 @@ from chatkit.events import (
 )
 from chatkit.fastapi import ChatKitStreamingResponse, process_request
 from chatkit.models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
     HiddenContextItem,
+    Page,
     SDKHiddenContextItem,
     StructuredInputItem,
+    ThreadItem,
     ThreadMetadata,
     WidgetItem,
 )
@@ -27,14 +32,16 @@ from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
 from tests.helpers.storage_contract import make_thread
 
 
-def make_client(server: ChatKitServer[RequestContext]) -> TestClient:
+def make_client(
+    server: ChatKitServer[RequestContext], *, raise_server_exceptions: bool = True
+) -> TestClient:
     app = FastAPI()
 
     @app.post("/chatkit")
     async def chatkit(request: Request) -> Response:
         return await process_request(server, request, DEFAULT_CONTEXT)
 
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 @pytest.fixture
@@ -288,6 +295,100 @@ def test_process_request_reports_missing_thread(client: TestClient):
     assert response.status_code == 404
     assert response.json()["detail"]
     assert "example-missing" not in response.text
+
+
+async def test_browser_reopens_thread_and_continues_from_first_page_cursor():
+    thread = make_thread()
+    visible_ids = [f"message-{i:02}" for i in range(1, 26)]
+    with make_server() as server, make_client(server) as client:
+        await server.store.save_thread(thread, DEFAULT_CONTEXT)
+        for index, item_id in enumerate(visible_ids, start=1):
+            message = AssistantMessageItem(
+                id=item_id,
+                thread_id=thread.id,
+                created_at=thread.created_at + timedelta(seconds=index),
+                content=[AssistantMessageContent(text=f"Reply {index}")],
+            )
+            await server.store.add_thread_item(thread.id, message, DEFAULT_CONTEXT)
+        for second, note_type in (
+            (19.5, HiddenContextItem),
+            (20.5, SDKHiddenContextItem),
+        ):
+            note = note_type(
+                id=f"private-{second}",
+                thread_id=thread.id,
+                created_at=thread.created_at + timedelta(seconds=second),
+                content="Private note",
+            )
+            await server.store.add_thread_item(thread.id, note, DEFAULT_CONTEXT)
+
+        opened = client.post(
+            "/chatkit",
+            json={"type": "threads.get_by_id", "params": {"thread_id": thread.id}},
+        )
+        assert opened.status_code == 200
+        loaded = opened.json()
+        assert loaded["id"] == thread.id
+        assert loaded["title"] == thread.title
+        first = loaded["items"]
+        assert [item["id"] for item in first["data"]] == visible_ids[:20]
+        assert first["has_more"] is True
+        assert first["after"]
+
+        continued = client.post(
+            "/chatkit",
+            json={
+                "type": "items.list",
+                "params": {
+                    "thread_id": thread.id,
+                    "after": first["after"],
+                    "order": "asc",
+                    "limit": 9999,
+                },
+            },
+        )
+        assert continued.status_code == 200
+        last = continued.json()
+        assert [item["id"] for item in last["data"]] == visible_ids[20:]
+        assert last["has_more"] is False
+        assert "after" not in last
+        for response in (opened, continued):
+            assert "private-" not in response.text
+            assert "Private note" not in response.text
+
+
+@pytest.mark.parametrize("operation", ["items.list", "threads.get_by_id"])
+@pytest.mark.parametrize("item_type", [HiddenContextItem, SDKHiddenContextItem])
+async def test_history_rejects_a_store_page_containing_hidden_items(
+    operation, item_type, monkeypatch: pytest.MonkeyPatch
+):
+    thread = make_thread()
+    item = item_type(
+        id="private-item-id",
+        thread_id=thread.id,
+        created_at=thread.created_at,
+        content="private contents",
+    )
+    visibility_requests = []
+
+    async def broken_page(*args, include_hidden=True, **kwargs):
+        visibility_requests.append(include_hidden)
+        return Page[ThreadItem](data=[item], has_more=True, after=item.id)
+
+    with (
+        make_server() as server,
+        make_client(server, raise_server_exceptions=False) as client,
+    ):
+        await server.store.save_thread(thread, DEFAULT_CONTEXT)
+        monkeypatch.setattr(server.store, "load_thread_items", broken_page)
+        response = client.post(
+            "/chatkit", json={"type": operation, "params": {"thread_id": thread.id}}
+        )
+
+    assert visibility_requests == [False]
+    assert response.status_code == 500
+    assert item.id not in response.text
+    assert item.content not in response.text
 
 
 @pytest.mark.parametrize("state", [TurnState.ACCEPTED, TurnState.RUNNING])
