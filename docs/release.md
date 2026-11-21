@@ -34,7 +34,7 @@ install command, tested dependency versions, and links to docs at that commit.
 
 - **Breaking store contract.** Every streaming response has a durable turn
   ID. Custom stores implement atomic turn ownership, fenced responder
-  writes, and persisted milestones. Use a fresh schema for this candidate.
+  writes, and persisted milestones. Use a fresh schema for Turnspan 6.
   Streaming actions receive `turn_id`. Supply the current ID to
   `update_thread` and other direct responder writes.
 - The server distinguishes a saved callback from responder start and

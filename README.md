@@ -29,23 +29,23 @@ The demo uses sample replies and runs without a model API key.
 
 ## Install Turnspan in an app
 
-These docs describe the **Turnspan 6 release candidate**
-(`openai-chatkit 1.6.5+turnspan.6`). To try a reviewed development checkout,
-run the following from its repository root in your app's Python environment.
+[Turnspan 6](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.6)
+is the latest stable release (`openai-chatkit 1.6.5+turnspan.6`). Install it
+from the verified source commit in your app's Python environment.
+
+```sh
+python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/0d916c03ef8e48d4d77ddcc461431e1d6f7b8718.tar.gz'
+```
+
+Omit `[agents,fastapi]` for the core server alone. Add `templates` to the
+extras if your app loads `.widget` files. See the
+[docs at the release commit](https://github.com/michaelgiraldo/chatkit-python/tree/0d916c03ef8e48d4d77ddcc461431e1d6f7b8718/docs)
+for the matching Python and storage contracts.
+
+To install a local development checkout, run this from its repository root.
 
 ```sh
 python -m pip install '.[agents,fastapi]'
-```
-
-Use `.` for the core server alone. Add `templates` to the extras if your
-app loads `.widget` files.
-
-[Turnspan 3](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.3)
-is the latest published development build. Install it from its tested
-source commit and use [the docs for that commit](https://github.com/michaelgiraldo/chatkit-python/tree/e0decabf3101e4326af054ebfe2c766112e30e66/docs).
-
-```sh
-python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/e0decabf3101e4326af054ebfe2c766112e30e66.tar.gz'
 ```
 <!-- --8<-- [end:start-here] -->
 
