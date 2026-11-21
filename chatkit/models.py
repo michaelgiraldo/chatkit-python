@@ -3,7 +3,14 @@
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AnyUrl, BaseModel, Field, SerializationInfo, model_serializer
+from pydantic import (
+    AnyUrl,
+    BaseModel,
+    Field,
+    JsonValue,
+    SerializationInfo,
+    model_serializer,
+)
 
 from . import icons, widget_models
 
@@ -112,6 +119,27 @@ class AssistantMessageItem(ThreadItemBase):
     content: list[AssistantMessageContent]
 
 
+class ClientToolLocalContinuation(BaseModel):
+    """Native model input to replay after a browser tool returns."""
+
+    type: Literal["local"] = "local"
+    items: list[dict[str, JsonValue]]
+
+
+class ClientToolResponsesContinuation(BaseModel):
+    """New function outputs and their predecessor in OpenAI-managed context."""
+
+    type: Literal["responses"] = "responses"
+    response_id: str = Field(min_length=1)
+    items: list[dict[str, JsonValue]]
+
+
+type ClientToolModelContinuation = Annotated[
+    ClientToolLocalContinuation | ClientToolResponsesContinuation,
+    Field(discriminator="type"),
+]
+
+
 class ClientToolCallItem(ThreadItemBase):
     """Thread item capturing a client tool call."""
 
@@ -121,12 +149,17 @@ class ClientToolCallItem(ThreadItemBase):
     name: str
     arguments: dict[str, Any]
     output: Any | None = None
+    model_continuation: ClientToolModelContinuation | None = Field(
+        default=None, repr=False
+    )
 
     @model_serializer(mode="wrap")
     def _serialize(self, serializer, info: SerializationInfo):
         data = serializer(self)
-        if self.status == "pending" and (info.context or {}).get("browser_wire"):
-            data["arguments"] = {"item_id": self.id, "input": data["arguments"]}
+        if (info.context or {}).get("browser_wire"):
+            data.pop("model_continuation", None)
+            if self.status == "pending":
+                data["arguments"] = {"item_id": self.id, "input": data["arguments"]}
         return data
 
 

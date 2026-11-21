@@ -13,6 +13,7 @@ from agents import (
     InputGuardrail,
     InputGuardrailResult,
     InputGuardrailTripwireTriggered,
+    ModelResponse,
     OutputGuardrail,
     OutputGuardrailResult,
     OutputGuardrailTripwireTriggered,
@@ -21,6 +22,8 @@ from agents import (
     RunResultStreaming,
     StreamEvent,
     ToolCallItem,
+    ToolCallOutputItem,
+    Usage,
 )
 from agents.tool_context import ToolContext
 from openai.types.responses import (
@@ -445,14 +448,84 @@ async def test_duplicate_client_tool_requests_fail_the_handoff():
             ),
         )
 
-    context.request_client_tool(tool_context(1), name="get_selection", arguments={})
+    context.request_client_tool(
+        tool_context(1), name="get_selection", arguments={}, continuation="local"
+    )
     with pytest.raises(ValueError, match="Only one client tool"):
-        context.request_client_tool(tool_context(2), name="get_selection", arguments={})
+        context.request_client_tool(
+            tool_context(2), name="get_selection", arguments={}, continuation="local"
+        )
 
     # The SDK can turn a callback exception into a tool result and complete.
     result = make_result()
     result.done()
     with pytest.raises(ValueError, match="Only one client tool"):
+        await all_events(stream_agent_response(context, result))
+
+
+@pytest.mark.parametrize(
+    ("defect", "message"),
+    [
+        ("continued", "must stop"),
+        ("changed_arguments", "preserve the original"),
+        ("duplicate_output", "one output"),
+        ("chat_completions", "real OpenAI Responses response ID"),
+    ],
+)
+async def test_client_tool_handoff_requires_native_continuation(
+    defect: str, message: str, monkeypatch: pytest.MonkeyPatch
+):
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
+    call = ResponseFunctionToolCall(
+        id="fc_browser",
+        type="function_call",
+        call_id="call_browser",
+        name="get_selection",
+        arguments="{}",
+    )
+    tool_context = ToolContext(
+        context=context,
+        tool_name=call.name,
+        tool_arguments=call.arguments,
+        tool_call_id=call.call_id,
+        tool_call=call,
+    )
+    context.request_client_tool(
+        tool_context,
+        name="read_canvas_selection",
+        arguments={"kind": "selection"},
+        continuation="responses" if defect == "chat_completions" else "local",
+    )
+    output = {
+        "type": "function_call_output",
+        "call_id": call.call_id,
+        "output": "None",
+    }
+    response_id = "__fake_id__" if defect == "chat_completions" else "resp_browser"
+    result = make_result()
+    result.interruptions = []
+    result.raw_responses = [
+        ModelResponse(
+            output=[] if defect == "continued" else [call],
+            usage=Usage(),
+            response_id=response_id,
+        )
+    ]
+    result.new_items = [
+        ToolCallOutputItem(agent=Agent(name="example"), raw_item=output, output=None)
+    ]
+    replay_call = call.model_dump(mode="json", exclude_none=True)
+    if defect == "changed_arguments":
+        replay_call["arguments"] = '{"kind": "selection"}'
+    items = [replay_call, output]
+    if defect == "duplicate_output":
+        items.append(output)
+    monkeypatch.setattr(result, "to_input_list", Mock(return_value=items))
+    result.done()
+
+    with pytest.raises(ValueError, match=message):
         await all_events(stream_agent_response(context, result))
 
 

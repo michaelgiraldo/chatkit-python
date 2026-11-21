@@ -30,6 +30,21 @@ The `openai-chatkit` package on PyPI tracks the
   authorized thread. The store records completion or cancellation durably.
   Transcript order no longer determines which invocation can resume.
   Custom responders must publish pending calls with `ThreadItemDoneEvent`.
+- Agents SDK browser tools must call `request_client_tool` with an explicit
+  `continuation="local"` or `continuation="responses"` choice.
+  `StopAtTools` ends the originating run. Build the next run with
+  `client_tool_continuation_input` and the claimed call's saved model
+  continuation. Local replay preserves the original model call. Both
+  strategies carry sibling server tool results separately from the browser
+  handler arguments.
+- `simple_to_agent_input` omits client tool items. Its thread conversion
+  provides descriptive context. Use the native continuation record for a
+  browser-tool result, including the exact saved response ID or the app's
+  existing authorized conversation ID when using provider-held state.
+- Custom browser transports must keep `ClientToolCallItem.model_continuation`
+  server-side. Keep it with the pending callback in storage and apply the
+  application's model history retention rules. Legacy and direct custom
+  calls can remain visible with no continuation record.
 - Custom stores that support client tools must atomically couple the
   lifecycle with thread item writes and claims. The store utility
   `validate_pending_claim` removes the `latest_item_id` keyword. Custom
@@ -39,7 +54,13 @@ The `openai-chatkit` package on PyPI tracks the
 - Update the browser handler, Python server, and store together. Finish
   pending callbacks on the old release or restart those interactions after
   cutover. Use the [upgrade and rollback guide](guides/update-client-during-response.md#upgrade-from-older-turnspan-versions)
-  to verify both a new reply and a resumed browser-tool turn.
+  to verify a new reply, a resumed browser-tool turn after storage is
+  reopened, and the model inputs for your chosen continuation strategy.
+
+The offline integration tests run the installed Agents and OpenAI SDKs
+against mocked endpoints. They exercise local Responses replay, stored
+response IDs, provider-managed conversations, and local Chat Completions
+replay, including differences between model and browser arguments.
 
 ## Turnspan 5 (`1.6.5+turnspan.5`)
 

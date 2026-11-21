@@ -125,15 +125,27 @@ const chatkit = useChatKit({
 ## Call client tools mid-inference
 
 Client tool calls let the agent invoke browser or app callbacks
-mid-inference. Register the tool on the client and server. When the model
-calls the tool, ChatKit pauses the model, sends the tool request to the
-client, and resumes with the returned result.
+while preparing an answer. Register the tool on the client and server. The
+Agents SDK ends its current run at the tool. ChatKit sends the request to the
+browser, and your responder starts a new run with the returned result.
 
 Use client effects instead when you do not need to wait for the client callback response for the rest of your response.
 
 ### Define a client tool in your agent
 
-Annotate the tool with the Agents SDK's `ToolContext` and call `ctx.context.request_client_tool(ctx, ...)` to tie the browser callback to this invocation. Turnspan accepts one client tool request per turn. Include the client tool in `stop_at_tool_names` so the model pauses while the browser callback runs and returns its result.
+Annotate the tool with the Agents SDK's `ToolContext` and call
+`ctx.context.request_client_tool(ctx, ...)` to tie the browser callback to
+the model invocation. Include the client tool in `stop_at_tool_names`.
+`StopAtTools` ends the current run after tool execution. It can execute server
+tools from the same response, and Turnspan preserves their outputs for
+continuation. Turnspan accepts one browser tool invocation per run.
+
+Choose a continuation strategy before running the agent. Pass
+`continuation="local"` if your app holds the model input and output history,
+or `continuation="responses"` if OpenAI holds the preceding response or
+conversation. The browser handler name and parameters can differ from the
+model function name and arguments.
+[Agents SDK tool use](https://openai.github.io/openai-agents-python/agents/#tool-use-behavior)
 
 ```python
 from agents import Agent, StopAtTools, function_tool
@@ -147,13 +159,13 @@ async def get_selected_canvas_nodes(ctx: ToolContext[AgentContext]) -> None:
         ctx,
         name="get_selected_canvas_nodes",
         arguments={"project": my_project()},
+        continuation="local",
     )
 
 
 assistant = Agent[AgentContext](
     ...,
     tools=[get_selected_canvas_nodes],
-    # StopAtTools pauses model generation so the pending client callback can run and resume the run.
     tool_use_behavior=StopAtTools(stop_at_tool_names=[get_selected_canvas_nodes.name]),
 )
 ```
@@ -222,15 +234,68 @@ The Python request model exposes that result as
 The server uses the authenticated request context, the thread ID, and the
 item ID to find the pending invocation. It commits the claim and output before
 calling `respond` again. On that turn, `turn.input` is a `ClientToolTurn` and
-`turn.input.tool_call.output` contains the inner `output` value. The
-`ThreadItemConverter.client_tool_call_to_input` method supplies the model with
-the original tool arguments, the output, and the provider's original
-`call_id`. The callback envelope belongs to the browser transport.
+`turn.input.tool_call.output` contains the inner `output` value. Turnspan
+records the native model continuation in `tool_call.model_continuation`.
+Its built-in encoders send the browser envelope and keep the model
+continuation server-side.
 
-For each run, pass `resume_from=None` to start fresh or prepare an explicitly
-linked [saved workflow](respond-to-user-message.md#prepare-workflow-progress)
-before starting the agent. Use the claimed tool item to resolve a linked
-workflow from trusted storage if your app needs to resume one.
+### Build the next model request
+
+Use `client_tool_continuation_input(turn.input.tool_call)` to build the
+next input for the exact completed call. It uses the original model
+`call_id` for each tool result and preserves sibling server tool outputs.
+
+| Strategy | Input returned by the helper | How to invoke the runner |
+| --- | --- | --- |
+| `local` | Native input and output items through the stopped run, with the browser result replacing its placeholder. | Pass the list as the next run's input. |
+| `responses` | Function outputs the provider still needs, including the browser result. | Pass the list and the saved `model_continuation.response_id` as `previous_response_id`. If your app uses a provider-managed conversation, use its same trusted `conversation_id` instead. |
+
+For `responses`, configure the originating run so the provider retains the
+predecessor. For example, use `ModelSettings(store=True)` for response ID
+chaining when your application's provider retention policy allows it. Use
+exactly one provider context identifier. Resolve a conversation ID from your
+authorized application state. Keep captured continuation data in server-side
+storage with the same access and retention rules as your model history.
+[OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling#handling-function-calls) ·
+[OpenAI conversation state](https://developers.openai.com/api/docs/guides/conversation-state)
+
+For example, a responder that uses saved response IDs can build the callback
+run as follows:
+
+```python
+from agents import Runner
+
+from chatkit.agent_input import client_tool_continuation_input
+from chatkit.turns import ClientToolTurn
+
+
+if isinstance(turn.input, ClientToolTurn):
+    call = turn.input.tool_call
+    continuation = call.model_continuation
+    input_items = client_tool_continuation_input(call)
+    previous_response_id = (
+        continuation.response_id
+        if continuation is not None and continuation.type == "responses"
+        else None
+    )
+    result = Runner.run_streamed(
+        assistant,
+        input_items,
+        context=agent_context,
+        previous_response_id=previous_response_id,
+    )
+```
+
+Legacy calls and calls emitted by custom responders can have no
+`model_continuation`. They can appear in the transcript, and only calls with
+native continuation records can use this helper. Custom responders that
+generate their own provider input can use `ClientToolTurn` to receive the
+claimed result.
+
+Prepare UI progress separately. Pass `resume_from=None` to start a fresh
+display workflow or load an explicitly linked
+[saved workflow](respond-to-user-message.md#prepare-workflow-progress)
+from trusted storage before starting the next run.
 
 ### Know when a callback can complete
 
@@ -259,14 +324,21 @@ a newer turn starts.
    `item_id` with `output`. Deploy it with the matching Turnspan server.
    If you wrote a custom transport, update its tool-call serialization to
    match the [protocol helpers](respond-to-user-message.md#how-request-context-flows-into-chatkit).
-2. Update your store to track the new lifecycle. Let in-flight callbacks
-   finish on the old release before switching traffic, or have users reload
-   and restart affected interactions. Preserve completed transcript history
-   and let the new server issue any new tool call with a fresh ID.
-3. Verify a fresh reply and a browser callback completing its own tool
-   call after reopening a durable store. Confirm that a repeated callback
-   is rejected without rerunning the responder. Verify that a callback
-   issued before a new message or retry cannot resume an older turn.
+2. Select `local` or `responses` when you request the tool. In your
+   `ClientToolTurn` branch, build model input with
+   `client_tool_continuation_input`. With `responses`, configure provider
+   retention when the original run starts and supply the matching provider
+   context when continuing.
+3. Update your store to track the new lifecycle and preserve the native
+   continuation. Let in-flight callbacks finish on the old release before
+   switching traffic, or have users reload and restart affected interactions.
+   Preserve completed history and let the new server issue fresh tool IDs.
+4. Verify a fresh reply and a browser callback completing its own tool
+   call after reopening a durable store. Use different payloads for the
+   model call and browser handler. Check that the new model run receives the
+   browser result and any server tool results with the original `call_id`
+   values. Run the check with your chosen continuation strategy. Confirm
+   that duplicate callbacks and callbacks for a superseded turn are rejected.
 
 For a rollback, switch the browser handler, Python artifact, and store
 implementation together. Keep the previous compatible storage schema or a

@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 from typing import cast
 
@@ -9,13 +8,19 @@ from openai.types.responses import (
     ResponseInputTextParam,
 )
 from openai.types.responses.response_input_item_param import Message
+from pydantic import JsonValue
 
-from chatkit.agent_input import ThreadItemConverter, simple_to_agent_input
+from chatkit.agent_input import (
+    ThreadItemConverter,
+    client_tool_continuation_input,
+    simple_to_agent_input,
+)
 from chatkit.models import (
     AssistantMessageContent,
     AssistantMessageItem,
     Attachment,
     ClientToolCallItem,
+    ClientToolLocalContinuation,
     CustomTask,
     GeneratedImage,
     GeneratedImageItem,
@@ -402,7 +407,7 @@ async def test_input_item_converter_with_client_tool_call():
     ]
 
     input_items = await simple_to_agent_input(items)
-    assert len(input_items) == 4
+    assert len(input_items) == 2
     assert input_items[0] == {
         "content": [
             {
@@ -423,17 +428,47 @@ async def test_input_item_converter_with_client_tool_call():
         "type": "message",
         "role": "user",
     }
-    assert input_items[2] == {
-        "type": "function_call",
-        "name": "xyz",
-        "arguments": json.dumps({"foo": "bar"}),
-        "call_id": "ctc_123",
-    }
-    assert input_items[3] == {
+
+
+def test_client_tool_continuation_replaces_only_the_deferred_output():
+    call = ClientToolCallItem(
+        id="tc_example",
+        thread_id=_THREAD_ID,
+        created_at=datetime.now(),
+        name="browser_tool",
+        arguments={"browser_only": True},
+        call_id="call_example",
+    )
+    with pytest.raises(ValueError, match="Complete"):
+        client_tool_continuation_input(call)
+
+    completed = call.model_copy(update={"status": "completed", "output": None})
+    with pytest.raises(ValueError, match="no captured native model continuation"):
+        client_tool_continuation_input(completed)
+
+    deferred: dict[str, JsonValue] = {
         "type": "function_call_output",
-        "call_id": "ctc_123",
-        "output": json.dumps({"success": True}),
+        "call_id": call.call_id,
+        "output": "None",
     }
+    sibling: dict[str, JsonValue] = {
+        "type": "function_call_output",
+        "call_id": "call_sibling",
+        "output": "server result",
+    }
+    completed.model_continuation = ClientToolLocalContinuation(
+        items=[sibling, deferred]
+    )
+    assert client_tool_continuation_input(completed) == [
+        sibling,
+        {**deferred, "output": "null"},
+    ]
+    assert completed.model_continuation.items == [sibling, deferred]
+
+    for invalid_items in ([sibling], [deferred, deferred]):
+        completed.model_continuation = ClientToolLocalContinuation(items=invalid_items)
+        with pytest.raises(ValueError, match="exactly one matching output"):
+            client_tool_continuation_input(completed)
 
 
 async def test_input_item_converter_with_structured_input():

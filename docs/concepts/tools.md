@@ -5,7 +5,7 @@ Tools let the assistant call into your application logic during a turn—for exa
 At a high level:
 
 - **Server tools** run on your backend. The assistant calls them through your inference pipeline, and you stream their results back into the conversation.
-- **Client tools** run in the browser or host app. ChatKit surfaces a tool call as a streamed thread item, lets the client handle it, then resumes the conversation with the tool’s output.
+- **Client tools** run in the browser or host app. ChatKit surfaces the call as a streamed thread item. The tool’s output becomes input for a new agent run.
 
 ## Server tools
 
@@ -29,10 +29,10 @@ Some operations can only run on the client—for example:
 
 Client tools let the model request that kind of data mid-turn:
 
-- On the server, you instruct your inference pipeline to stop when a specific tool is called (for example, by using `StopAtTools` around that tool).
+- On the server, you configure the Agents SDK to end the current run at the client tool with `StopAtTools`. Turnspan accepts one browser invocation per run and preserves the outputs of server tools executed in the same response.
 - Your responder streams a `ClientToolCallItem` and the server records its pending status.
 - The client calls `onClientTool` with the tool name and `{item_id, input}`. The callback echoes that ID in `{item_id, output}`.
-- The server claims the exact pending call in the authorized thread, saves the output, and calls `respond` with a [`ClientToolTurn`](../api/chatkit/turns.md#chatkit.turns.ClientToolTurn). The responder can use the stored call and output as input to the next model run.
+- The server claims the exact pending call in the authorized thread, saves the output, and calls `respond` with a [`ClientToolTurn`](../api/chatkit/turns.md#chatkit.turns.ClientToolTurn). Use `client_tool_continuation_input` and the call's saved continuation strategy to build the next model request.
 
 A call can complete once. When a customer sends a new message or retries the
 turn, the store cancels the pending invocation. Any late callback for that

@@ -186,10 +186,12 @@ With FastAPI, pass the server, the HTTP request, and your context to
 `chatkit.fastapi.process_request`. For custom transports, use `parse_request`
 on inbound JSON and `encode_message` or `encode_sse` for outbound JSON or
 SSE. The encoders wrap pending browser tool arguments as `{item_id, input}`.
-Application events, models, and storage keep the original arguments and
-output. A custom encoder must preserve the wire format in both streamed
+Application events, models, and storage keep the browser arguments and
+output unwrapped. A custom encoder must preserve the wire format in both streamed
 events and saved items loaded by the browser. The inbound operation supplies
-the browser's `{item_id, output}` inside `params.result`.
+the browser's `{item_id, output}` inside `params.result`. Keep
+`ClientToolCallItem.model_continuation` server-side when encoding a browser
+response.
 [Protocol helpers](../api/chatkit/protocol.md) ·
 [Browser callback contract](update-client-during-response.md#register-the-client-tool-in-chatkitjs)
 
@@ -229,6 +231,9 @@ ordering or visibility. Maintain at most one pending call per scoped thread.
   message cancels the pending call in the same transaction, including when
   `save_item` inserts the message. Use `claim_pending_item` to complete a
   tool call and reject direct tool item writes through `save_item`.
+- Store `model_continuation` with the call and preserve it when completing
+  the call. It can contain native model inputs and outputs. Apply your
+  application's access and retention rules for model history to that data.
 - In `claim_pending_item`, compare the exact saved pending item and its
   pending status, then save the completed item and its completed status in
   the same transaction. Only one claimant can succeed. If you use
@@ -352,7 +357,12 @@ Before you call your model, decide what conversation context you want the model 
 
 #### Load thread history (recommended default)
 
-Fetch recent items so the model sees the conversation state before you build the next turn:
+Fetch recent items to give the model descriptive context from the thread.
+The default converter omits client tool items. Native Responses replay
+requires the provider's original items, including reasoning and assistant
+phase when supplied. For an accepted browser result, use the saved
+[client tool continuation](update-client-during-response.md#build-the-next-model-request).
+[OpenAI reasoning guidance](https://developers.openai.com/api/docs/guides/reasoning#keeping-reasoning-items-in-context)
 
 ```python
 items_page = await self.store.load_thread_items(
@@ -395,13 +405,17 @@ models and tools your app offers.
 
 The OpenAI Responses API can retrieve model-visible history from a stored
 response. If your app permits provider-side storage, pass a saved response ID
-as `previous_response_id` to `Runner.run_streamed()` on the next turn. For
-locally managed history or ChatKit-only items such as widgets, use the
-[thread history approach above](#load-thread-history-recommended-default).
+as `previous_response_id` to `Runner.run_streamed()` on the next turn. You
+can build descriptive context for ChatKit-only items such as widgets using
+the [thread history approach above](#load-thread-history-recommended-default).
+For local native replay, preserve the original model input and output items
+in order. [OpenAI conversation state](https://developers.openai.com/api/docs/guides/conversation-state)
 
-This responder enables provider-side storage for the run. ChatKit saves the
-incoming user message before calling `respond`, so the history fallback already
-includes it.
+This responder handles user messages and retries. It enables provider-side
+storage for the run. ChatKit saves the incoming user message before calling
+`respond`, so the descriptive history fallback already includes it. If your
+app also uses browser tools, handle `ClientToolTurn` with the saved
+[client tool continuation](update-client-during-response.md#build-the-next-model-request).
 
 ```python
 from contextlib import aclosing
@@ -467,9 +481,11 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
 
 `result.last_response_id` becomes available as the runner receives model
 responses. Save it only after the stream finishes successfully. If the provider
-reports that the saved response is no longer retrievable, a fresh attempt can
-rebuild its input from thread history. Only retry automatically if nothing has
-been sent to the client and no tools have taken action.
+reports that the saved response is no longer retrievable, a fresh user-message
+run can use descriptive thread context or the original input and output
+history available to your app. Resuming a browser tool requires its matching
+continuation. Only retry automatically if nothing has been sent to the client
+and no tools have taken action.
 
 ### Prepare workflow progress
 

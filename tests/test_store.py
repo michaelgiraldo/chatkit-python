@@ -10,6 +10,7 @@ import pytest
 from chatkit.models import (
     AssistantMessageItem,
     ClientToolCallItem,
+    ClientToolResponsesContinuation,
     InferenceOptions,
     StructuredInputItem,
     ThreadMetadata,
@@ -207,9 +208,21 @@ async def test_sqlite_client_tool_lifecycle_reopens_and_leaves_legacy_items_read
         call_id="call_active",
         name="example",
         arguments={"value": "active"},
+        model_continuation=ClientToolResponsesContinuation(
+            response_id="resp_original",
+            items=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_active",
+                    "output": "None",
+                }
+            ],
+        ),
     )
-    old_pending = active.model_copy(update={"id": "legacy_pending"})
-    old_completed = active.model_copy(
+    old_pending = active.model_copy(
+        update={"id": "legacy_pending", "model_continuation": None}
+    )
+    old_completed = old_pending.model_copy(
         update={"id": "legacy_completed", "status": "completed", "output": "old"}
     )
     with closing(sqlite3.connect(path)) as connection, connection:
@@ -223,11 +236,12 @@ async def test_sqlite_client_tool_lifecycle_reopens_and_leaves_legacy_items_read
                     thread.id,
                     context.user_id,
                     thread.created_at.isoformat(),
-                    ItemData(item=item).model_dump_json(),
+                    ItemData(item=item).model_dump_json(exclude_none=True),
                 ),
             )
     await initial.add_thread_item(thread.id, active, context)
     reopened = SQLiteThreadStore[RequestContext](path)
+    assert await reopened.load_item(thread.id, active.id, context) == active
     assert (
         await reopened.load_client_tool_status(thread.id, active.id, context)
         == "pending"
@@ -249,6 +263,13 @@ async def test_sqlite_client_tool_lifecycle_reopens_and_leaves_legacy_items_read
     assert await reopened.load_item(thread.id, old_pending.id, context) == old_pending
 
     completed = active.model_copy(update={"status": "completed", "output": "current"})
+    with pytest.raises(ValueError, match="only complete the item with output"):
+        await reopened.claim_pending_item(
+            thread.id,
+            active,
+            completed.model_copy(update={"model_continuation": None}),
+            context,
+        )
     await reopened.claim_pending_item(thread.id, active, completed, context)
     assert (
         await initial.load_client_tool_status(thread.id, active.id, context)

@@ -85,6 +85,7 @@ async def get_canvas_selection(ctx: ToolContext[AgentContext]) -> None:
         ctx,
         name="get_canvas_selection",
         arguments={},
+        continuation="local",
     )
 ```
 
@@ -113,9 +114,10 @@ const chatkit = useChatKit({
 ```
 
 Configure the agent to [stop at the client tool](update-client-during-response.md#define-a-client-tool-in-your-agent).
-ChatKit sends the echoed item ID and result back to the server. The run
-continues with the selected nodes after the server claims that exact call.
-See the [client tool callback guide](update-client-during-response.md#register-the-client-tool-in-chatkitjs).
+ChatKit sends the echoed item ID and result back to the server. After the
+server claims that exact call, use `client_tool_continuation_input` to
+provide the selected nodes in the next agent run.
+[Build the next model request](update-client-during-response.md#build-the-next-model-request)
 
 ## Inject extra context as model input item
 

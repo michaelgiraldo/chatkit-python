@@ -107,6 +107,7 @@ def validate_pending_claim(
         or replacement.call_id != expected.call_id
         or replacement.name != expected.name
         or replacement.arguments != expected.arguments
+        or replacement.model_continuation != expected.model_continuation
     ):
         raise ValueError("A client tool claim may only complete the item with output")
 

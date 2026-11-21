@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import (
     Annotated,
     Any,
+    Literal,
 )
 
 from agents import (
@@ -14,8 +15,10 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunResultStreaming,
     StreamEvent,
+    ToolCallOutputItem,
 )
 from agents.tool_context import ToolContext
+from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_message import Content
 from openai.types.responses.response_output_text import (
     Annotation as ResponsesAnnotation,
@@ -29,9 +32,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     PrivateAttr,
     SkipValidation,
     TypeAdapter,
+    ValidationError,
     model_validator,
 )
 
@@ -58,6 +63,9 @@ from .models import (
     AssistantMessageContent,
     AssistantMessageItem,
     ClientToolCallItem,
+    ClientToolLocalContinuation,
+    ClientToolModelContinuation,
+    ClientToolResponsesContinuation,
     DurationSummary,
     FileSource,
     GeneratedImage,
@@ -77,6 +85,7 @@ from .widgets import Markdown, Text, WidgetRootInput
 _CHAT_COMPLETIONS_PLACEHOLDER_ID = "__fake_id__"
 _CLIENT_TOOL_CONFLICT = "Only one client tool may be requested per turn."
 _ANNOTATION_ADAPTER = TypeAdapter[ResponsesAnnotation](ResponsesAnnotation)
+_CONTINUATION_ITEMS = TypeAdapter(list[dict[str, JsonValue]])
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +94,91 @@ class _ClientToolRequest:
     call_id: str
     name: str
     arguments: dict[str, Any]
+    continuation: Literal["local", "responses"]
+
+
+def _capture_model_continuation(
+    request: _ClientToolRequest, result: RunResultStreaming
+) -> ClientToolModelContinuation:
+    if not result.is_complete or not result.raw_responses or result.interruptions:
+        raise ValueError("The Agents SDK run did not finish on the browser tool call.")
+
+    calls = [
+        item
+        for item in result.raw_responses[-1].output
+        if isinstance(item, ResponseFunctionToolCall)
+    ]
+    call_ids = {item.call_id for item in calls}
+    if request.call_id not in call_ids or len(call_ids) != len(calls):
+        raise ValueError("The browser tool must stop the Agents SDK run at its call.")
+
+    try:
+        if request.continuation == "local":
+            items = _CONTINUATION_ITEMS.validate_python(
+                result.to_input_list(mode="normalized"), strict=True
+            )
+        else:
+            items = _CONTINUATION_ITEMS.validate_python(
+                [
+                    item.to_input_item()
+                    for item in result.new_items
+                    if isinstance(item, ToolCallOutputItem) and item.call_id in call_ids
+                ],
+                strict=True,
+            )
+    except ValidationError:
+        raise ValueError(
+            "The Agents SDK did not provide JSON continuation items."
+        ) from None
+
+    output_positions: dict[str, list[int]] = defaultdict(list)
+    for position, item in enumerate(items):
+        if (
+            item.get("type") == "function_call_output"
+            and isinstance(call_id := item.get("call_id"), str)
+            and call_id in call_ids
+        ):
+            if not isinstance(item.get("output"), (str, list)):
+                raise ValueError("The Agents SDK provided an invalid function output.")
+            output_positions[call_id].append(position)
+    if any(len(output_positions[call_id]) != 1 for call_id in call_ids):
+        raise ValueError(
+            "The Agents SDK did not provide one output for each pending function call."
+        )
+
+    if request.continuation == "local":
+        replayed = [
+            position
+            for position, item in enumerate(items)
+            if item.get("type") == "function_call"
+            and item.get("call_id") == request.call_id
+        ]
+        original = next(item for item in calls if item.call_id == request.call_id)
+        if (
+            len(replayed) != 1
+            or replayed[0] >= output_positions[request.call_id][0]
+            or any(
+                items[replayed[0]].get(key) != value
+                for key, value in {
+                    "name": original.name,
+                    "arguments": original.arguments,
+                    "namespace": original.namespace,
+                }.items()
+            )
+        ):
+            raise ValueError(
+                "The Agents SDK did not preserve the original browser function call."
+            )
+        return ClientToolLocalContinuation(items=items)
+
+    response_id = result.last_response_id
+    if not response_id or response_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+        raise ValueError(
+            "Responses continuation requires a real OpenAI Responses response ID."
+        )
+    if len(items) != len(call_ids):
+        raise ValueError("Responses continuation may contain only function outputs.")
+    return ClientToolResponsesContinuation(response_id=response_id, items=items)
 
 
 class AgentContext[TContext](BaseModel):
@@ -148,23 +242,28 @@ class AgentContext[TContext](BaseModel):
         *,
         name: str,
         arguments: dict[str, Any],
+        continuation: Literal["local", "responses"],
     ) -> None:
         """Request a browser callback for this invocation of an Agents SDK tool.
 
         Configure the agent to stop at the calling tool. The browser receives one
         pending call when the run finishes and supplies its result on the next turn.
+        Choose local replay or a continuation linked to a stored Responses response.
         """
         if tool.context is not self or not tool.tool_call_id:
             raise ValueError("Pass the ToolContext for the current tool invocation.")
         if self._client_tool_request is not None:
             self._client_tool_conflict = True
             raise ValueError(_CLIENT_TOOL_CONFLICT)
+        if continuation not in ("local", "responses"):
+            raise ValueError("Choose 'local' or 'responses' for model continuation.")
 
         self._client_tool_request = _ClientToolRequest(
             item_id=tool.tool_call.id if tool.tool_call is not None else None,
             call_id=tool.tool_call_id,
             name=name,
             arguments=arguments,
+            continuation=continuation,
         )
 
     async def stream_widget(
@@ -551,6 +650,21 @@ async def stream_agent_response(
         raise
     else:
         await _close_stream(model_events)
+        if (request := context._client_tool_request) is not None:
+            item_id = request.item_id
+            if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+                item_id = context.generate_id("tool_call")
+            yield ThreadItemDoneEvent(
+                item=ClientToolCallItem(
+                    id=item_id,
+                    thread_id=context.thread.id,
+                    name=request.name,
+                    arguments=request.arguments,
+                    created_at=datetime.now(UTC),
+                    call_id=request.call_id,
+                    model_continuation=_capture_model_continuation(request, result),
+                ),
+            )
 
 
 async def _stream_agent_response(
@@ -878,21 +992,6 @@ async def _stream_agent_response(
             await ctx.store.save_item(thread.id, workflow, ctx.request_context)
         else:
             await ctx.store.add_thread_item(thread.id, workflow, ctx.request_context)
-
-    if (request := context._client_tool_request) is not None:
-        item_id = request.item_id
-        if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
-            item_id = context.generate_id("tool_call")
-        yield ThreadItemDoneEvent(
-            item=ClientToolCallItem(
-                id=item_id,
-                thread_id=thread.id,
-                name=request.name,
-                arguments=request.arguments,
-                created_at=datetime.now(UTC),
-                call_id=request.call_id,
-            ),
-        )
 
 
 async def accumulate_text[TWidget: Markdown | Text](

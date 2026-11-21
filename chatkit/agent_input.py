@@ -1,19 +1,19 @@
 import json
 from collections.abc import Sequence
+from copy import deepcopy
 from inspect import cleandoc
 from typing import assert_never, cast
 
 from agents import TResponseInputItem
 from openai.types.responses import (
     EasyInputMessageParam,
-    ResponseFunctionToolCallParam,
     ResponseInputContentParam,
     ResponseInputImageParam,
     ResponseInputMessageContentListParam,
     ResponseInputTextParam,
     ResponseOutputText,
 )
-from openai.types.responses.response_input_item_param import FunctionCallOutput, Message
+from openai.types.responses.response_input_item_param import Message
 
 from .models import (
     AssistantMessageItem,
@@ -32,6 +32,34 @@ from .models import (
     WidgetItem,
     WorkflowItem,
 )
+
+
+def client_tool_continuation_input(
+    item: ClientToolCallItem,
+) -> list[TResponseInputItem]:
+    """Prepare model input from a completed browser tool's native continuation.
+
+    A local continuation supplies the whole native input list. A Responses continuation
+    supplies only the missing outputs and requires the matching provider context.
+    """
+    if item.status != "completed":
+        raise ValueError("Complete the client tool before preparing its continuation")
+    if item.model_continuation is None:
+        raise ValueError("This client tool has no captured native model continuation")
+
+    items = deepcopy(item.model_continuation.items)
+    matching_outputs = [
+        value
+        for value in items
+        if value.get("type") == "function_call_output"
+        and value.get("call_id") == item.call_id
+    ]
+    if len(matching_outputs) != 1:
+        raise ValueError(
+            "The model continuation must contain exactly one matching output"
+        )
+    matching_outputs[0]["output"] = json.dumps(item.output, allow_nan=False)
+    return cast(list[TResponseInputItem], items)
 
 
 class ThreadItemConverter:
@@ -204,8 +232,7 @@ class ThreadItemConverter:
         self, item: WorkflowItem
     ) -> TResponseInputItem | list[TResponseInputItem] | None:
         """
-        Convert a TaskItem into input item(s) to send to the model.
-        Returns WorkflowItem.response_items by default.
+        Describe visible custom workflow tasks as model input.
         """
         messages = []
         for task in item.workflow.tasks:
@@ -357,23 +384,8 @@ class ThreadItemConverter:
     async def client_tool_call_to_input(
         self, item: ClientToolCallItem
     ) -> TResponseInputItem | list[TResponseInputItem] | None:
-        if item.status == "pending":
-            # Filter out pending tool calls - they cannot be sent to the model
-            return None
-
-        return [
-            ResponseFunctionToolCallParam(
-                type="function_call",
-                call_id=item.call_id,
-                name=item.name,
-                arguments=json.dumps(item.arguments),
-            ),
-            FunctionCallOutput(
-                type="function_call_output",
-                call_id=item.call_id,
-                output=json.dumps(item.output),
-            ),
-        ]
+        """Skip browser tool display records. Use client_tool_continuation_input to resume."""
+        return None
 
     async def end_of_turn_to_input(
         self, item: EndOfTurnItem

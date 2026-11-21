@@ -19,7 +19,7 @@ from agents import (
 from agents.tool_context import ToolContext
 from openai import AsyncOpenAI
 
-from chatkit.agent_input import simple_to_agent_input
+from chatkit.agent_input import client_tool_continuation_input, simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
 from chatkit.events import (
     AssistantMessageContentPartAnnotationAdded,
@@ -34,6 +34,7 @@ from chatkit.events import (
 from chatkit.models import (
     AssistantMessageItem,
     ClientToolCallItem,
+    ClientToolResponsesContinuation,
     InferenceOptions,
     Thread,
     URLSource,
@@ -160,7 +161,7 @@ def _chat_completions_stream(turn: int, choices: list[dict]) -> str:
 
 
 def _client_tool_stream(
-    api: Literal["responses", "chat_completions"], turn: int
+    api: Literal["responses", "chat_completions"], turn: int, model_arguments: str
 ) -> str:
     names = ("client_read", "server_lookup")
     if api == "chat_completions":
@@ -169,7 +170,10 @@ def _client_tool_stream(
                 "index": index,
                 "id": f"call_{name}_{turn}",
                 "type": "function",
-                "function": {"name": name, "arguments": "{}"},
+                "function": {
+                    "name": name,
+                    "arguments": model_arguments if name == "client_read" else "{}",
+                },
             }
             for index, name in enumerate(names)
         ]
@@ -185,22 +189,48 @@ def _client_tool_stream(
             ],
         )
 
+    commentary_content = {
+        "type": "output_text",
+        "text": "I’ll check the selection.",
+        "annotations": [],
+    }
     items = [
         {
-            "id": f"fc_{name}_{turn}",
-            "type": "function_call",
-            "call_id": f"call_{name}_{turn}",
-            "name": name,
-            "arguments": "{}",
+            "id": f"rs_tool_{turn}",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "synthetic-opaque-reasoning",
             "status": "completed",
-        }
-        for name in names
+        },
+        {
+            "id": f"msg_commentary_{turn}",
+            "type": "message",
+            "role": "assistant",
+            "phase": "commentary",
+            "content": [commentary_content],
+            "status": "completed",
+        },
+        *[
+            {
+                "id": f"fc_{name}_{turn}",
+                "type": "function_call",
+                "call_id": f"call_{name}_{turn}",
+                "name": name,
+                "arguments": model_arguments if name == "client_read" else "{}",
+                "status": "completed",
+            }
+            for name in names
+        ],
     ]
     events = [
         {
             "type": f"response.output_item.{stage}",
             "output_index": index,
-            "item": item,
+            "item": (
+                {**item, "content": [], "status": "in_progress"}
+                if stage == "added" and item["type"] == "message"
+                else item
+            ),
         }
         for index, item in enumerate(items)
         for stage in ("added", "done")
@@ -466,43 +496,107 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
     ] == [(first_reply.id, "Example reply 1"), (second_reply.id, "Example reply 2")]
 
 
-@pytest.mark.parametrize("api", ["responses", "chat_completions"])
+@pytest.mark.parametrize(
+    "mode",
+    ["local_responses", "local_chat_completions", "previous_response", "conversation"],
+)
 async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
-    api: Literal["responses", "chat_completions"],
+    mode: Literal[
+        "local_responses", "local_chat_completions", "previous_response", "conversation"
+    ],
 ):
+    api: Literal["responses", "chat_completions"] = (
+        "chat_completions" if mode == "local_chat_completions" else "responses"
+    )
+    continuation: Literal["local", "responses"] = (
+        "responses" if mode in {"previous_response", "conversation"} else "local"
+    )
+    conversation_id = "conv_tool" if mode == "conversation" else None
     provider_requests = 0
     server_calls: list[str] = []
-    tool_arguments = {"kind": "selection"}
+    model_arguments = '{"source": "model"}'
+    browser_arguments = {"kind": "selection"}
+    browser_name = "read_canvas_selection"
 
     def handle_request(request: httpx2.Request) -> httpx2.Response:
         nonlocal provider_requests
         provider_requests += 1
         turn = (provider_requests + 1) // 2
-        expected_call_id = f"call_client_read_{turn}"
+        expected_client_id = f"call_client_read_{turn}"
+        expected_server_id = f"call_server_lookup_{turn}"
         expected_result = None if turn == 1 else {"selection": turn}
         body = json.loads(request.content)
+        is_callback = provider_requests % 2 == 0
+        assert request.method == "POST"
         assert request.url.path == (
             "/v1/responses" if api == "responses" else "/v1/chat/completions"
         )
-        if provider_requests % 2:
-            stream = _client_tool_stream(api, turn)
+        if api == "responses":
+            assert body.get("store") == (continuation == "responses")
+            assert body.get("conversation") == conversation_id
+            assert body.get("previous_response_id") == (
+                f"resp_tool_{turn}"
+                if mode == "previous_response" and is_callback
+                else None
+            )
+        if not is_callback:
+            stream = _client_tool_stream(api, turn, model_arguments)
         elif api == "responses":
-            call, output = body["input"]
-            assert (call["name"], call["call_id"]) == ("client_read", expected_call_id)
-            assert json.loads(call["arguments"]) == tool_arguments
-            assert output["call_id"] == expected_call_id
-            assert json.loads(output["output"]) == expected_result
+            inputs = body["input"]
+            if continuation == "responses":
+                assert [item["type"] for item in inputs] == [
+                    "function_call_output",
+                    "function_call_output",
+                ]
+            else:
+                assert [item["type"] for item in inputs] == [
+                    "message",
+                    "reasoning",
+                    "message",
+                    "function_call",
+                    "function_call",
+                    "function_call_output",
+                    "function_call_output",
+                ]
+                user, reasoning, commentary, client_call, server_call = inputs[:5]
+                assert user["role"] == "user"
+                assert reasoning["encrypted_content"] == "synthetic-opaque-reasoning"
+                assert commentary["phase"] == "commentary"
+                assert commentary["content"][0]["text"] == "I’ll check the selection."
+                assert (client_call["name"], client_call["call_id"]) == (
+                    "client_read",
+                    expected_client_id,
+                )
+                assert client_call["arguments"] == model_arguments
+                assert (server_call["name"], server_call["call_id"]) == (
+                    "server_lookup",
+                    expected_server_id,
+                )
+                assert server_call["arguments"] == "{}"
+            assert {item["call_id"]: item["output"] for item in inputs[-2:]} == {
+                expected_client_id: json.dumps(expected_result),
+                expected_server_id: "Server data",
+            }
             stream = _responses_stream(turn)
         else:
-            call, output = body["messages"]
-            (invocation,) = call["tool_calls"]
-            assert (invocation["function"]["name"], invocation["id"]) == (
-                "client_read",
-                expected_call_id,
-            )
-            assert json.loads(invocation["function"]["arguments"]) == tool_arguments
-            assert output["tool_call_id"] == expected_call_id
-            assert json.loads(output["content"]) == expected_result
+            messages = body["messages"]
+            assert messages[0]["role"] == "user"
+            assert [
+                (call["id"], call["function"]["name"], call["function"]["arguments"])
+                for message in messages
+                for call in message.get("tool_calls", [])
+            ] == [
+                (expected_client_id, "client_read", model_arguments),
+                (expected_server_id, "server_lookup", "{}"),
+            ]
+            outputs = [message for message in messages if message["role"] == "tool"]
+            assert len(outputs) == 2
+            assert {
+                message["tool_call_id"]: message["content"] for message in outputs
+            } == {
+                expected_client_id: json.dumps(expected_result),
+                expected_server_id: "Server data",
+            }
             stream = _chat_completions_stream(
                 turn,
                 [
@@ -519,10 +613,16 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         )
 
     @function_tool
-    async def client_read(ctx: ToolContext[AgentContext[RequestContext]]) -> None:
+    async def client_read(
+        ctx: ToolContext[AgentContext[RequestContext]], source: str
+    ) -> None:
         """Read a selection from the browser."""
+        assert source == "model"
         ctx.context.request_client_tool(
-            ctx, name="client_read", arguments=tool_arguments
+            ctx,
+            name=browser_name,
+            arguments=browser_arguments,
+            continuation=continuation,
         )
 
     @function_tool
@@ -539,6 +639,9 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         agent = Agent[AgentContext[RequestContext]](
             name="Tool example",
             model=model_type("gpt-6-luna", client),
+            model_settings=ModelSettings(
+                store=continuation == "responses" if api == "responses" else None
+            ),
             tools=[client_read, server_lookup],
             tool_use_behavior=StopAtTools(stop_at_tool_names=[client_read.name]),
         )
@@ -552,16 +655,24 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                 request_context=turn.context,
                 resume_from=None,
             )
+            previous_response_id = None
             if isinstance(turn.input, ClientToolTurn):
-                input_item = turn.input.tool_call
+                tool_call = turn.input.tool_call
+                input_items = client_tool_continuation_input(tool_call)
+                if mode == "previous_response":
+                    saved = tool_call.model_continuation
+                    assert isinstance(saved, ClientToolResponsesContinuation)
+                    previous_response_id = saved.response_id
             else:
                 assert isinstance(turn.input, UserMessageTurn)
-                input_item = turn.input.message
+                input_items = await simple_to_agent_input(turn.input.message)
             result = Runner.run_streamed(
                 agent,
-                await simple_to_agent_input(input_item),
+                input_items,
                 context=context,
                 run_config=RunConfig(tracing_disabled=True),
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
             )
             async with aclosing(stream_agent_response(context, result)) as events:
                 async for event in events:
@@ -598,15 +709,17 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                 pending = pending_event.item
                 assert isinstance(pending, ClientToolCallItem)
                 assert (pending.name, pending.call_id, pending.status) == (
-                    "client_read",
+                    browser_name,
                     f"call_client_read_{turn}",
                     "pending",
                 )
                 pending_items.append(pending)
-                expected_arguments = {"item_id": pending.id, "input": tool_arguments}
-                assert pending.arguments == tool_arguments
+                expected_arguments = {"item_id": pending.id, "input": browser_arguments}
+                assert pending.arguments == browser_arguments
+                assert pending.model_continuation is not None
                 frame = json.loads(encode_sse(pending_event).removeprefix(b"data: "))
                 assert frame["item"]["arguments"] == expected_arguments
+                assert "model_continuation" not in frame["item"]
 
                 loaded_pending = await server.process_non_streaming(
                     ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
@@ -620,6 +733,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                     if item["id"] == pending.id
                 ]
                 assert pending_from_history["arguments"] == expected_arguments
+                assert "model_continuation" not in pending_from_history
 
                 callback = parse_request(
                     json.dumps({
@@ -662,8 +776,13 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         )
         for index, item in enumerate(pending_items, 1)
     ]
-    assert [
-        item["arguments"]
+    browser_items = [
+        item
         for item in json.loads(encode_message(loaded))["items"]["data"]
         if item["type"] == "client_tool_call"
-    ] == [tool_arguments, tool_arguments]
+    ]
+    assert [item["arguments"] for item in browser_items] == [
+        browser_arguments,
+        browser_arguments,
+    ]
+    assert all("model_continuation" not in item for item in browser_items)
