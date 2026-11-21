@@ -18,6 +18,27 @@ The `openai-chatkit` package on PyPI tracks the
    release with the changelog, the full commit SHA for installation, and the
    passing CI run.
 
+## Turnspan 5 (`1.6.5+turnspan.5`)
+
+### Breaking changes
+
+- Creating an `AgentContext` now requires `resume_from`, which replaces
+  the `workflow_item` constructor argument. Pass `None` for a fresh run.
+  To continue progress from an earlier run, pass the exact saved
+  `WorkflowItem` after authorizing the thread and verifying that the
+  workflow can still be resumed. Build the context before calling
+  `Runner.run_streamed`. Read or update `context.workflow_item` for active
+  progress during the run.
+- `stream_agent_response` removes the `resume_workflow` keyword and the
+  lookup based on recent thread items. After updating the context
+  constructor, call the stream helper without that keyword. A resumed
+  workflow retains its item ID and a fresh run can still stream its
+  own progress.
+- Integrations that previously inferred resumption from thread history
+  should resolve their saved workflow from trusted application state.
+  See [fresh and resumed run examples](guides/respond-to-user-message.md#prepare-workflow-progress)
+  and test both paths before upgrading your pin.
+
 ## Turnspan 4 (`1.6.5+turnspan.4`)
 
 - Apps that never resume saved workflows can pass `resume_workflow=False`

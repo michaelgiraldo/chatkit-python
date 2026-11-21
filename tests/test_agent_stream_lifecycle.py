@@ -74,7 +74,9 @@ def _agent_context() -> AgentContext:
     thread = ThreadMetadata(id="example", created_at=datetime.now())
     store = Mock()
     store.load_thread_items = AsyncMock(return_value=Page())
-    return AgentContext(thread=thread, store=store, request_context=None)
+    return AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
 
 
 @pytest.mark.parametrize("exit", ["close", "cancel"])

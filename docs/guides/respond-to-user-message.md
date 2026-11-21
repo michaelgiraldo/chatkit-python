@@ -337,6 +337,7 @@ agent_context = AgentContext(
     thread=turn.thread,
     store=self.store,
     request_context=turn.context,
+    resume_from=None,
 )
 ```
 
@@ -392,7 +393,7 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
             input_items = await simple_to_agent_input(list(reversed(items_page.data)))
 
         agent_context = AgentContext(
-            thread=thread, store=self.store, request_context=context
+            thread=thread, store=self.store, request_context=context, resume_from=None
         )
         result = Runner.run_streamed(
             assistant_agent,
@@ -423,6 +424,51 @@ responses. Save it only after the stream finishes successfully. If the provider
 reports that the saved response is no longer retrievable, a fresh attempt can
 rebuild its input from thread history. Only retry automatically if nothing has
 been sent to the client and no tools have taken action.
+
+### Prepare workflow progress
+
+Choose the workflow state before `Runner.run_streamed` schedules the agent
+run. For a fresh run, pass `resume_from=None` when building the context, as
+in the examples above. Tools can still start, update, and finish progress
+during that run. The stream helper does no history lookup for workflow
+discovery.
+
+To continue saved progress, use your server's continuation state to verify
+that the operation can still resume and obtain its exact workflow item ID.
+The following example assumes your application already authorized and
+verified that association. It loads the item through the thread store
+before starting the agent.
+
+```python
+from agents import Runner
+
+from chatkit.agents import AgentContext
+from chatkit.errors import InvalidOperationError
+from chatkit.models import WorkflowItem
+
+saved_workflow = await self.store.load_item(
+    turn.thread.id, workflow_item_id, context=turn.context
+)
+if not isinstance(saved_workflow, WorkflowItem):
+    raise InvalidOperationError("The saved item is not a workflow.")
+
+agent_context = AgentContext(
+    thread=turn.thread,
+    store=self.store,
+    request_context=turn.context,
+    resume_from=saved_workflow,
+)
+result = Runner.run_streamed(assistant_agent, input_items, context=agent_context)
+```
+
+You can also pass a verified `WorkflowItem` your server has already loaded.
+Keep the association in durable application storage if it needs to survive a
+restart. Handle missing or stale continuations before starting the agent.
+When the run updates the resumed workflow, the client receives changes under
+the original item ID.
+
+This choice controls displayed workflow progress. Prepare model input
+independently using the history or provider continuation approach you chose.
 
 ### Run inference and stream events
 
@@ -475,11 +521,6 @@ async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
 ```
 
 `stream_agent_response` forwards these events alongside assistant text and tool updates. To call a browser callback from an agent tool, use [`request_client_tool`](update-client-during-response.md#define-a-client-tool-in-your-agent).
-
-By default, `stream_agent_response` checks the latest thread items for a
-saved workflow. If your app never stores workflows for later continuation,
-pass `resume_workflow=False` to skip that lookup. Progress from workflows
-created during the current run still streams normally.
 
 ### Save structured tool results after a turn
 
@@ -555,7 +596,7 @@ class FeedbackChatKitServer(ChatKitServer[FeedbackRequestContext]):
         )
         input_items = await simple_to_agent_input(list(reversed(items_page.data)))
         agent_context = FeedbackContext(
-            thread=thread, store=self.store, request_context=context
+            thread=thread, store=self.store, request_context=context, resume_from=None
         )
         result = Runner.run_streamed(feedback_agent, input_items, context=agent_context)
 

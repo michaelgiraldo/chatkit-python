@@ -2,6 +2,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from typing import Literal
+from unittest.mock import AsyncMock
 
 import httpx2
 import pytest
@@ -254,7 +255,9 @@ def _completed_reply(events: list[ThreadStreamEvent]) -> AssistantMessageItem:
     return reply
 
 
-async def test_responses_stream_preserves_headers_decodes_citations_and_chains_turns():
+async def test_responses_stream_preserves_headers_decodes_citations_and_chains_turns(
+    monkeypatch: pytest.MonkeyPatch,
+):
     previous_ids: list[str | None] = []
 
     def handle_request(request: httpx2.Request) -> httpx2.Response:
@@ -291,7 +294,10 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
             nonlocal response_id
             assert isinstance(turn.input, UserMessageTurn)
             context = AgentContext(
-                thread=turn.thread, store=server.store, request_context=turn.context
+                thread=turn.thread,
+                store=server.store,
+                request_context=turn.context,
+                resume_from=None,
             )
             result = Runner.run_streamed(
                 agent,
@@ -307,6 +313,8 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
             completed_ids.append(response_id)
 
         with make_server(respond) as server:
+            history = AsyncMock(wraps=server.store.load_thread_items)
+            monkeypatch.setattr(server.store, "load_thread_items", history)
             first_turn = await server.process_streaming(
                 ThreadsCreateReq(
                     params=ThreadCreateParams(
@@ -326,6 +334,7 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
                     )
                 )
             )
+            history.assert_not_awaited()
             loaded = await server.process_non_streaming(
                 ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
             )
@@ -398,7 +407,10 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         ) -> AsyncIterator[ThreadStreamEvent]:
             assert isinstance(turn.input, UserMessageTurn)
             context = AgentContext(
-                thread=turn.thread, store=server.store, request_context=turn.context
+                thread=turn.thread,
+                store=server.store,
+                request_context=turn.context,
+                resume_from=None,
             )
             result = Runner.run_streamed(
                 agent,
@@ -530,7 +542,10 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
             turn: Turn[RequestContext],
         ) -> AsyncIterator[ThreadStreamEvent]:
             context = AgentContext(
-                thread=turn.thread, store=server.store, request_context=turn.context
+                thread=turn.thread,
+                store=server.store,
+                request_context=turn.context,
+                resume_from=None,
             )
             if isinstance(turn.input, ClientToolTurn):
                 input_item = turn.input.tool_call

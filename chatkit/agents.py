@@ -25,7 +25,15 @@ from openai.types.responses.response_output_text import (
     AnnotationFileCitation,
     AnnotationURLCitation,
 )
-from pydantic import BaseModel, ConfigDict, PrivateAttr, SkipValidation, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SkipValidation,
+    TypeAdapter,
+    model_validator,
+)
 
 from ._stream import _close_stream
 from ._web_search import _WebSearchProgress
@@ -80,20 +88,49 @@ class _ClientToolRequest:
 
 
 class AgentContext[TContext](BaseModel):
-    """State and app events for a single response run."""
+    """State and app events for a single response run.
+
+    Set `resume_from` to a saved, authorized workflow from this thread or to
+    `None` for a fresh run. Construct the context before starting the runner.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     thread: ThreadMetadata
     store: Annotated[ThreadStore[TContext], SkipValidation]
     request_context: TContext
-    workflow_item: WorkflowItem | None = None
+    resume_from: WorkflowItem | None = Field(exclude=True, repr=False)
+    _workflow_item: WorkflowItem | None = None
     _resumed_workflow_id: str | None = None
     _client_tool_request: _ClientToolRequest | None = None
     _client_tool_conflict: bool = False
     _events: asyncio.Queue[ThreadStreamEvent] = PrivateAttr(
         default_factory=asyncio.Queue
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _require_explicit_workflow(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "workflow_item" in data:
+            raise ValueError("Replace workflow_item with resume_from.")
+        return data
+
+    def model_post_init(self, _context: Any, /) -> None:
+        if self.resume_from is None:
+            return
+        if self.resume_from.thread_id != self.thread.id:
+            raise ValueError("The saved workflow must belong to the current thread.")
+        self._workflow_item = self.resume_from.model_copy(deep=True)
+        self._resumed_workflow_id = self._workflow_item.id
+
+    @property
+    def workflow_item(self) -> WorkflowItem | None:
+        """The active workflow for this run."""
+        return self._workflow_item
+
+    @workflow_item.setter
+    def workflow_item(self, item: WorkflowItem | None) -> None:
+        self._workflow_item = item
 
     def generate_id(
         self, type: StoreItemType, thread: ThreadMetadata | None = None
@@ -217,7 +254,11 @@ class AgentContext[TContext](BaseModel):
         workflow = item.workflow
         workflow.tasks.append(task)
 
-        if workflow.type != "reasoning" and len(workflow.tasks) == 1:
+        if (
+            item.id != self._resumed_workflow_id
+            and workflow.type != "reasoning"
+            and len(workflow.tasks) == 1
+        ):
             await self.stream(ThreadItemAddedEvent(item=item))
         else:
             await self.stream(
@@ -462,7 +503,6 @@ async def stream_agent_response(
     result: RunResultStreaming,
     *,
     converter: ResponseStreamConverter = _DEFAULT_RESPONSE_STREAM_CONVERTER,
-    resume_workflow: bool = True,
 ) -> AsyncGenerator[ThreadStreamEvent]:
     """
     Convert a streamed Agents SDK run into ChatKit thread stream events.
@@ -475,9 +515,6 @@ async def stream_agent_response(
         result: The RunResultStreaming to convert.
         converter: Defines overridable methods for adapting streamed data (such as image
             generation results and partial updates) into the forms expected by ChatKit.
-        resume_workflow: Look for a saved workflow to continue. Set this to false
-            for stores without saved workflows to skip the history lookup. Workflows
-            created during the current run still stream normally.
 
     Returns:
         An async iterator that yields thread stream events representing the run result.
@@ -499,13 +536,7 @@ async def stream_agent_response(
     merged_events = _merge_generators(model_events, queue_iterator, on_abort=cancel_run)
     try:
         async with aclosing(
-            _stream_agent_response(
-                context,
-                merged_events,
-                queue_iterator,
-                converter,
-                resume_workflow=resume_workflow,
-            )
+            _stream_agent_response(context, merged_events, queue_iterator, converter)
         ) as events:
             async for event in events:
                 yield event
@@ -527,8 +558,6 @@ async def _stream_agent_response(
     events: AsyncIterator[StreamEvent | _EventWrapper],
     queue_iterator: _AsyncQueueIterator,
     converter: ResponseStreamConverter,
-    *,
-    resume_workflow: bool,
 ) -> AsyncGenerator[ThreadStreamEvent]:
     ctx = context
     thread = context.thread
@@ -540,20 +569,6 @@ async def _stream_agent_response(
     item_annotation_count: defaultdict[str, defaultdict[int, int]] = defaultdict(
         lambda: defaultdict(int)
     )
-
-    if resume_workflow:
-        # A workflow immediately before a client tool call can continue on resume.
-        items = await context.store.load_thread_items(
-            thread.id, None, 2, "desc", context.request_context
-        )
-        match items.data:
-            case [WorkflowItem() as saved, *_] | [
-                ClientToolCallItem(),
-                WorkflowItem() as saved,
-            ]:
-                ctx._resumed_workflow_id = saved.id
-                if ctx.workflow_item is None:
-                    ctx.workflow_item = saved
 
     def message_id(item_id: str, output_index: int) -> str:
         # Agents reuses this placeholder in its Responses-shaped Chat Completions

@@ -186,4 +186,9 @@ client's result. When you convert the saved thread history,
 `ThreadItemConverter.client_tool_call_to_input` supplies the model with both
 the call and the matching output.
 
+For each run, pass `resume_from=None` to start fresh or prepare an explicitly
+linked [saved workflow](respond-to-user-message.md#prepare-workflow-progress)
+before starting the agent. The application can use the claimed pending tool
+item to resolve its workflow from trusted storage.
+
 

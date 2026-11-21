@@ -119,7 +119,10 @@ class MyChatKitServer(ChatKitServer[dict[str, object]]):
         input_items = await simple_to_agent_input(list(reversed(items_page.data)))
 
         agent_context = AgentContext(
-            thread=turn.thread, store=self.store, request_context=turn.context
+            thread=turn.thread,
+            store=self.store,
+            request_context=turn.context,
+            resume_from=None,
         )
         result = Runner.run_streamed(assistant, input_items, context=agent_context)
         async with aclosing(stream_agent_response(agent_context, result)) as events:

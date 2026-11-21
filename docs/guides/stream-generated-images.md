@@ -90,7 +90,9 @@ from agents import Runner
 
 from chatkit.agents import AgentContext, stream_agent_response
 
-agent_context = AgentContext(thread=thread, store=self.store, request_context=context)
+agent_context = AgentContext(
+    thread=thread, store=self.store, request_context=context, resume_from=None
+)
 result = Runner.run_streamed(agent, input_items, context=agent_context)
 
 async with aclosing(
