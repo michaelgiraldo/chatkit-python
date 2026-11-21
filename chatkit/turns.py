@@ -3,12 +3,25 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .events import ThreadStreamEvent
 from .models import (
     ClientToolCallItem,
     StructuredInputItem,
     ThreadMetadata,
     UserMessageItem,
+    WorkflowItem,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PersistWorkflow:
+    """Save still-open workflow progress without sending a browser event."""
+
+    item: WorkflowItem
+    replace: bool
+
+
+type ResponderEvent = ThreadStreamEvent | PersistWorkflow
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +57,7 @@ type TurnInput = UserMessageTurn | ClientToolTurn | StructuredInputTurn | RetryT
 
 @dataclass(frozen=True, slots=True)
 class Turn[TContext]:
-    """A turn's thread snapshot, trigger, and app-supplied request context.
+    """A durable turn ID, thread snapshot, trigger, and request context.
 
     Persist thread changes with an explicit patch.
     """
@@ -52,6 +65,7 @@ class Turn[TContext]:
     thread: ThreadMetadata
     input: TurnInput
     context: TContext
+    id: str
 
 
 class TurnOutcome(StrEnum):
@@ -61,3 +75,17 @@ class TurnOutcome(StrEnum):
     WAITING = "waiting"
     CANCELLED = "cancelled"
     FAILED = "failed"
+    SUPERSEDED = "superseded"
+
+
+class TurnState(StrEnum):
+    """Durable server milestones for one thread's turn."""
+
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    ABANDONED = "abandoned"
+    SUPERSEDED = "superseded"

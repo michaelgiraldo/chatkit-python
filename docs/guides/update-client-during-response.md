@@ -311,10 +311,11 @@ other items were written to the transcript after the tool request. See
 [implement the client tool lifecycle](respond-to-user-message.md#implement-the-client-tool-lifecycle)
 for storage requirements.
 
-The lifecycle governs calls that a responder has already registered. Apps
-that allow overlapping responses in one thread own turn scheduling and
-must prevent a superseded responder from opening its first tool call after
-a newer turn starts.
+Turn ownership also covers the first registration. Once a newer request
+owns the thread, an older responder cannot register a tool or persist a
+reply. A callback claim starts a new turn atomically. Its saved display
+status means the server accepted the result. Use its turn state to find
+out whether the responder started or finished.
 
 ### Verify the browser tool
 

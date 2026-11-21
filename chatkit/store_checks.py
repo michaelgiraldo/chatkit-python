@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from .models import (
     ClientToolCallItem,
@@ -16,6 +17,7 @@ from .models import (
     UserMessageTextContent,
 )
 from .store import ConflictError, NotFoundError, PendingTurnItem, ThreadStore
+from .turns import TurnOutcome, TurnState
 
 
 def _require(condition: bool, message: str) -> None:
@@ -55,7 +57,7 @@ async def check_thread_store[TContext](
     other_context: TContext,
     peer: ThreadStore[TContext] | None = None,
 ) -> None:
-    """Check scoped reads, pagination, patches, callback lifecycle, and retry truncation.
+    """Check scoped reads, pagination, turn ownership, claims, and retries.
 
     Run against a disposable database with contexts for two distinct users.
     Supply an independent store instance sharing that database to check
@@ -94,6 +96,31 @@ async def check_thread_store[TContext](
             patched.title == "Renamed"
             and patched.metadata == {"kept": True, "saved": True},
             "Concurrent field patches must preserve unrelated state",
+        )
+
+        older_turn, newer_turn = str(uuid4()), str(uuid4())
+        await store.begin_turn(thread.id, older_turn, context)
+        await store.start_turn(thread.id, older_turn, context)
+        await peer.begin_turn(thread.id, newer_turn, context)
+        try:
+            await store.patch_thread(
+                thread.id, {"title": "Stale title"}, context, turn_id=older_turn
+            )
+        except ConflictError:
+            pass
+        else:
+            raise AssertionError("A superseded turn can still patch the thread")
+        _require(
+            await peer.load_turn_state(thread.id, older_turn, context)
+            == TurnState.SUPERSEDED,
+            "The older turn must retain its superseded state",
+        )
+        _require(
+            await store.finish_turn(
+                thread.id, newer_turn, TurnOutcome.CANCELLED, context
+            )
+            == TurnState.ABANDONED,
+            "Closing an accepted turn must record that it never started",
         )
 
         item_ids = set()

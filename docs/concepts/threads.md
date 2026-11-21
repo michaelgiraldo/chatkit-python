@@ -30,7 +30,7 @@ A typical thread lifecycle looks like this:
 
 - **Thread creation**: When a user submits a message and no thread exists yet, ChatKitServer creates one and persists it by calling your store’s `save_thread`.
 - **Appending items**: As the server streams a response, ChatKit persists thread items automatically as each item completes. Streaming events directly drive what gets stored.
-- **Updating metadata**. Apply a [`ThreadPatch`](../api/chatkit/store.md#chatkit.store.ThreadPatch) to the saved thread. In a responder, yield `await self.update_thread(turn.thread.id, {"title": "New title"}, turn.context)` to save the change and update the browser. Use `store.patch_thread` when the change needs no stream event.
+- **Updating metadata**. Apply a [`ThreadPatch`](../api/chatkit/store.md#chatkit.store.ThreadPatch) to the saved thread. In a responder, yield `await self.update_thread(turn.thread.id, {"title": "New title"}, turn.context, turn_id=turn.id)` to save the change and update the browser. Use `store.patch_thread` when the change needs no stream event.
 - **Loading history**: When history is enabled client-side, ChatKit retrieves past threads and their items. Users can continue an existing thread by default.
 - **Closing or locking**. Set the thread status to `closed` or `locked` to update the client's input UI. Enforce any write restrictions in your server. Delete a thread when it should be removed from history.
 

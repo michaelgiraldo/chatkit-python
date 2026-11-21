@@ -79,6 +79,7 @@ from .models import (
     WorkflowSummary,
 )
 from .store import StoreItemType, ThreadStore
+from .turns import PersistWorkflow, ResponderEvent
 from .widget_stream import stream_widget
 from .widgets import Markdown, Text, WidgetRootInput
 
@@ -602,12 +603,13 @@ async def stream_agent_response(
     result: RunResultStreaming,
     *,
     converter: ResponseStreamConverter = _DEFAULT_RESPONSE_STREAM_CONVERTER,
-) -> AsyncGenerator[ThreadStreamEvent]:
+) -> AsyncGenerator[ResponderEvent]:
     """
     Convert a streamed Agents SDK run into ChatKit thread stream events.
 
     This function consumes a streaming run result and yields `ThreadStreamEvent`
-    objects as the run progresses. Closing the stream early cancels an active run.
+    objects and server-only persistence events as the run progresses.
+    Closing the stream early cancels an active run.
 
     Args:
         context: The AgentContext to use for the stream.
@@ -672,7 +674,7 @@ async def _stream_agent_response(
     events: AsyncIterator[StreamEvent | _EventWrapper],
     queue_iterator: _AsyncQueueIterator,
     converter: ResponseStreamConverter,
-) -> AsyncGenerator[ThreadStreamEvent]:
+) -> AsyncGenerator[ResponderEvent]:
     ctx = context
     thread = context.thread
     produced_items = set()
@@ -987,11 +989,9 @@ async def _stream_agent_response(
     if finished_search_workflow is not None:
         yield finished_search_workflow
     elif workflow := ctx.workflow_item:
-        # Other workflows can continue in the next turn.
-        if workflow.id == ctx._resumed_workflow_id:
-            await ctx.store.save_item(thread.id, workflow, ctx.request_context)
-        else:
-            await ctx.store.add_thread_item(thread.id, workflow, ctx.request_context)
+        yield PersistWorkflow(
+            item=workflow, replace=workflow.id == ctx._resumed_workflow_id
+        )
 
 
 async def accumulate_text[TWidget: Markdown | Text](

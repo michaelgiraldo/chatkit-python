@@ -50,6 +50,7 @@ from chatkit.turns import (
     StructuredInputTurn,
     Turn,
     TurnOutcome,
+    TurnState,
     UserMessageTurn,
 )
 from tests._types import RequestContext
@@ -238,6 +239,177 @@ async def test_client_tool_routes_only_the_exact_active_item(tmp_path: Path):
     )
 
 
+async def test_accepting_a_turn_fences_the_older_responder_before_the_new_stream_starts(
+    tmp_path: Path,
+):
+    old_responder_started = asyncio.Event()
+    release_old_responder = asyncio.Event()
+    new_reply = "new-reply"
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        if turn.id == first.turn_id:
+            old_responder_started.set()
+            await release_old_responder.wait()
+            yield ThreadItemDoneEvent(item=client_tool_call(turn, "stale-first-tool"))
+            return
+        yield ThreadItemDoneEvent(item=assistant_message(turn, new_reply, "New reply"))
+
+    server = RecordingServer(tmp_path, respond)
+    first = await server.open_stream(create_thread())
+    assert first.thread_id is not None and first.turn_id is not None
+
+    async def collect(stream: StreamingResult) -> list[ThreadStreamEvent]:
+        return [event async for event in stream]
+
+    async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+        old_stream = tasks.create_task(collect(first))
+        await old_responder_started.wait()
+        second = await server.open_stream(
+            ThreadsAddUserMessageReq(
+                params=ThreadAddUserMessageParams(
+                    thread_id=first.thread_id, input=create_thread().params.input
+                )
+            )
+        )
+        assert second.turn_id is not None
+        assert (
+            await server.store.load_turn_state(
+                first.thread_id, second.turn_id, DEFAULT_CONTEXT
+            )
+            is TurnState.ACCEPTED
+        )
+        release_old_responder.set()
+        assert all(
+            not isinstance(event, ThreadItemDoneEvent)
+            or event.item.type == "user_message"
+            for event in await old_stream
+        )
+
+    await collect(second)
+    assert (
+        await server.store.load_turn_state(
+            first.thread_id, first.turn_id, DEFAULT_CONTEXT
+        )
+        is TurnState.SUPERSEDED
+    )
+    assert (
+        await server.store.load_turn_state(
+            first.thread_id, second.turn_id, DEFAULT_CONTEXT
+        )
+        is TurnState.COMPLETED
+    )
+    assert [outcome for _, outcome, _ in server.finished] == [
+        TurnOutcome.SUPERSEDED,
+        TurnOutcome.COMPLETED,
+    ]
+    _, _, final_items = server.finished[-1]
+    assert [item.type for item in final_items] == [
+        "user_message",
+        "user_message",
+        "assistant_message",
+    ]
+    assert final_items[-1].id == new_reply
+
+
+async def test_callback_accepted_before_stream_can_be_abandoned_but_not_replayed(
+    tmp_path: Path,
+):
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        assert isinstance(turn.input, UserMessageTurn)
+        yield ThreadItemDoneEvent(item=client_tool_call(turn, "example-tool"))
+
+    server = RecordingServer(tmp_path, respond)
+    await server.consume(create_thread())
+    (initial,) = server.received
+    callback = client_tool_callback(
+        initial.thread.id, "example-tool", "retained result"
+    )
+    stream = await server.open_stream(callback)
+    assert stream.turn_id is not None
+    assert (
+        await server.store.load_turn_state(
+            initial.thread.id, stream.turn_id, DEFAULT_CONTEXT
+        )
+        is TurnState.ACCEPTED
+    )
+    with pytest.raises(ConflictError):
+        await server.open_stream(callback)
+
+    await stream.aclose()
+    await stream.aclose()
+    assert (
+        await server.store.load_turn_state(
+            initial.thread.id, stream.turn_id, DEFAULT_CONTEXT
+        )
+        is TurnState.ABANDONED
+    )
+    assert await anext(stream, None) is None
+    assert server.received == [initial]
+    tool = await server.store.load_item(
+        initial.thread.id, "example-tool", DEFAULT_CONTEXT
+    )
+    assert isinstance(tool, ClientToolCallItem)
+    assert tool.status == "completed"
+    assert tool.output == "retained result"
+    with pytest.raises(ConflictError):
+        await server.open_stream(callback)
+
+
+async def test_pending_client_tool_can_resume_before_its_stream_finishes(
+    tmp_path: Path,
+):
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        if isinstance(turn.input, UserMessageTurn):
+            yield ThreadItemDoneEvent(item=client_tool_call(turn, "example-tool"))
+            yield ThreadItemDoneEvent(
+                item=assistant_message(turn, "stale", "Old reply")
+            )
+        else:
+            assert isinstance(turn.input, ClientToolTurn)
+            yield ThreadItemDoneEvent(
+                item=assistant_message(turn, "resumed", "New reply")
+            )
+
+    server = RecordingServer(tmp_path, respond)
+    async with aclosing(await server.open_stream(create_thread())) as first_stream:
+        async for event in first_stream:
+            if isinstance(event, ThreadItemDoneEvent) and isinstance(
+                event.item, ClientToolCallItem
+            ):
+                break
+
+        (initial,) = server.received
+        assert (
+            await server.store.load_turn_state(
+                initial.thread.id, initial.id, DEFAULT_CONTEXT
+            )
+            is TurnState.RUNNING
+        )
+        callback = client_tool_callback(initial.thread.id, "example-tool")
+        resumed_events = await server.consume(callback)
+        assert [
+            event.item.id
+            for event in resumed_events
+            if isinstance(event, ThreadItemDoneEvent)
+        ] == ["resumed"]
+        with pytest.raises(ConflictError):
+            await server.open_stream(callback)
+        assert await anext(first_stream, None) is None
+
+    assert (
+        await server.store.load_turn_state(
+            initial.thread.id, initial.id, DEFAULT_CONTEXT
+        )
+        is TurnState.WAITING
+    )
+    assert [(turn.id, outcome) for turn, outcome, _ in server.finished] == [
+        (server.received[1].id, TurnOutcome.COMPLETED),
+        (initial.id, TurnOutcome.WAITING),
+    ]
+    with pytest.raises(NotFoundError):
+        await server.store.load_item(initial.thread.id, "stale", DEFAULT_CONTEXT)
+
+
 async def test_client_tool_fails_closed_on_legacy_stores(tmp_path: Path):
     class LegacyStore(SQLiteStore):
         load_client_tool_status = ThreadStore.load_client_tool_status
@@ -309,9 +481,14 @@ async def test_disconnect_settles_in_flight_client_tool_registration(tmp_path: P
 
     class SlowStore(SQLiteStore):
         async def add_thread_item(
-            self, thread_id: str, item: ThreadItem, context: RequestContext
+            self,
+            thread_id: str,
+            item: ThreadItem,
+            context: RequestContext,
+            *,
+            turn_id: str | None = None,
         ) -> None:
-            await super().add_thread_item(thread_id, item, context)
+            await super().add_thread_item(thread_id, item, context, turn_id=turn_id)
             if isinstance(item, ClientToolCallItem):
                 started.set()
                 await release.wait()
@@ -470,6 +647,7 @@ async def test_turn_metadata_patch_does_not_overwrite_concurrent_title(tmp_path:
             turn.thread.id,
             {"metadata_set": {"provider_response": "example"}},
             turn.context,
+            turn_id=turn.id,
         )
 
     server = RecordingServer(tmp_path, respond)

@@ -51,7 +51,7 @@ from chatkit.requests import (
     ThreadsCreateReq,
     ThreadsGetByIdReq,
 )
-from chatkit.turns import ClientToolTurn, Turn, UserMessageTurn
+from chatkit.turns import ClientToolTurn, ResponderEvent, Turn, UserMessageTurn
 from tests._types import RequestContext
 from tests.helpers.server import make_server
 
@@ -320,7 +320,7 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
 
         async def respond(
             turn: Turn[RequestContext],
-        ) -> AsyncIterator[ThreadStreamEvent]:
+        ) -> AsyncIterator[ResponderEvent]:
             nonlocal response_id
             assert isinstance(turn.input, UserMessageTurn)
             context = AgentContext(
@@ -434,7 +434,7 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
 
         async def respond(
             turn: Turn[RequestContext],
-        ) -> AsyncIterator[ThreadStreamEvent]:
+        ) -> AsyncIterator[ResponderEvent]:
             assert isinstance(turn.input, UserMessageTurn)
             context = AgentContext(
                 thread=turn.thread,
@@ -648,7 +648,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
 
         async def respond(
             turn: Turn[RequestContext],
-        ) -> AsyncIterator[ThreadStreamEvent]:
+        ) -> AsyncIterator[ResponderEvent]:
             context = AgentContext(
                 thread=turn.thread,
                 store=server.store,

@@ -32,6 +32,15 @@ install command, tested dependency versions, and links to docs at that commit.
 
 ## Turnspan 6 (`1.6.5+turnspan.6`)
 
+- **Breaking store contract.** Every streaming response has a durable turn
+  ID. Custom stores implement atomic turn ownership, fenced responder
+  writes, and persisted milestones. Use a fresh schema for this candidate.
+  Streaming actions receive `turn_id`. Supply the current ID to
+  `update_thread` and other direct responder writes.
+- The server distinguishes a saved callback from responder start and
+  completion. Closing a response before processing starts records
+  `ABANDONED`. Started responders can report `SUPERSEDED` when a new
+  request takes ownership.
 - Browser tools return the ID of the exact saved invocation. Each callback can
   complete once, and a newer turn can cancel a pending invocation.
 - The Agents SDK adapter preserves the original model call and any sibling tool

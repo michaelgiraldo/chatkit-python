@@ -154,9 +154,13 @@ async def test_calls_action():
         action: Action[str, Any],
         sender: WidgetItem | None,
         context: Any,
+        turn_id: str,
     ) -> AsyncIterator[ThreadStreamEvent]:
         actions.append((action, sender))
         assert sender
+        yield await server.update_thread(
+            thread.id, {"title": "Updated by action"}, context, turn_id=turn_id
+        )
 
         yield ThreadItemUpdatedEvent(
             item_id=sender.id,
@@ -209,13 +213,15 @@ async def test_calls_action():
             widget_item,
         )
 
-        assert len(events) == 2
+        assert len(events) == 3
         assert events[0].type == "stream_options"
-        assert events[1].type == "thread.item.updated"
-        assert isinstance(events[1], ThreadItemUpdatedEvent)
-        assert events[1].update.type == "widget.root.updated"
+        assert events[1].type == "thread.updated"
+        assert events[1].thread.title == "Updated by action"
+        assert events[2].type == "thread.item.updated"
+        assert isinstance(events[2], ThreadItemUpdatedEvent)
+        assert events[2].update.type == "widget.root.updated"
         assert (
-            events[1].update.widget
+            events[2].update.widget
             == Card(children=[Text(value="Email sent!")]).build()
         )
 

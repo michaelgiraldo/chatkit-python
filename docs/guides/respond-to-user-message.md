@@ -32,7 +32,7 @@ class MyRequestContext:
 ### Implement your `ChatKitServer`
 
 Subclass `ChatKitServer` and implement `respond(turn)`. The turn includes
-`turn.thread`, `turn.context`, and a typed trigger in `turn.input`.
+`turn.id`, `turn.thread`, `turn.context`, and a typed trigger in `turn.input`.
 Yield the events that make up the response.
 
 ```python
@@ -102,7 +102,7 @@ reports no turn outcome.
 
 Use `on_turn_finished(turn, outcome)` for app work that depends on the
 result. Once a turn starts, ChatKit calls the hook after server persistence
-or cancellation cleanup. The outcome reports one of four states.
+or cancellation cleanup.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -110,18 +110,24 @@ or cancellation cleanup. The outcome reports one of four states.
 | `WAITING` | The response left a pending client tool call or structured input. |
 | `CANCELLED` | The response was interrupted. |
 | `FAILED` | An error stopped the response or was sent in the stream. |
+| `SUPERSEDED` | A newer request took ownership of the thread before this response finished. |
 
 Stage app data in the request context and commit it on the outcome your app
 expects. See the examples for [response IDs](#using-previous_response_id-openai-responses-api-only)
 and [structured results](#save-structured-tool-results-after-a-turn).
 [Turn types](../api/chatkit/turns.md)
 
-An HTTP request can end before the turn starts. Attach request-scoped
-resources, such as a lease, to the response lifetime and release them when
-the response closes. Track delivery to the browser separately from turn
-completion. ChatKit logs exceptions from `on_turn_finished`. If a write
-failure needs to reach the browser, make that write in `respond` before
-completing the turn.
+Use `store.load_turn_state(thread_id, turn_id, context)` to inspect the
+persisted milestones. A saved trigger or callback first records `ACCEPTED`.
+The server records `RUNNING` when it starts processing the stream. Closing
+it before that transition records `ABANDONED`, and the hook runs only for
+started turns. The browser can disconnect after a message or callback is
+saved, so delivery to the browser has its own evidence. Use a fresh user
+turn to recover an abandoned callback. A crash can leave the last saved
+milestone in storage. Your app owns any recovery of external side effects.
+
+Attach request-scoped resources to the response lifetime and release them
+when it closes. ChatKit logs exceptions from `on_turn_finished`.
 
 ### Wire ChatKit to your web framework
 
@@ -158,6 +164,8 @@ For custom buffering or send deadlines, pass
 the typed request before calling the factory with a `StreamingResult`,
 including committing any pending-item claim or retry truncation.
 Immediate results and HTTP errors use the adapter's regular responses.
+For logging, read `result.thread_id` and `result.turn_id`. Both are
+available before the first event of an accepted turn.
 
 Use `ChatKitStreamingResponse(result)` for the SDK's framing and disconnect
 handling. If you supply your own streaming response, it owns the result.
@@ -197,7 +205,7 @@ response.
 
 ## Implement your ChatKit data store
 
-Implement `ThreadStore` to persist threads, messages, tool calls, and widgets.
+Implement `ThreadStore` to persist threads, turn state, and transcript items.
 The [in-memory example](../examples/in_memory_thread_store.py) implements all
 thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `truncate_after` as short atomic operations in your database. Use
@@ -205,6 +213,20 @@ thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `ChatKitServer.update_thread` when a connected client should see an edit.
 For `load_thread_items(..., include_hidden=False)`, filter the model-only items
 before computing the page and its cursor.
+
+Keep one current turn ID per authenticated thread. `begin_turn` saves the
+trigger, supersedes the current turn, and cancels any pending callback in
+one transaction. A retry and a successful pending-item claim establish
+their new owner in the same transaction as the history change. Validate
+current ownership inside each responder write transaction. A read before
+the write is insufficient because another request can take ownership
+between the two operations. Keep network and model calls outside these
+transactions. Yield responder events through `ChatKitServer` for fenced
+SDK writes, and pass `turn.id` to any app-managed store writes that belong
+to that response. While forwarding transient updates, the server checks
+ownership at most once per 250 ms of emitted updates, with fresh checks
+at durable event boundaries. A transient frame already in flight can
+still reach the browser when a newer turn takes ownership.
 
 For a retry, `truncate_after` returns the retained `UserMessageItem`. Before
 returning, atomically make later items disappear from pagination and direct
@@ -424,13 +446,13 @@ from agents import ModelSettings, RunConfig, Runner
 
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
-from chatkit.turns import Turn, TurnOutcome, UserMessageTurn
+from chatkit.turns import ResponderEvent, Turn, TurnOutcome, UserMessageTurn
 
 
 class MyChatKitServer(ChatKitServer[MyRequestContext]):
     async def respond(
         self, turn: Turn[MyRequestContext]
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    ) -> AsyncIterator[ResponderEvent]:
         thread, context = turn.thread, turn.context
         saved_id = thread.metadata.get("last_response_id")
         if saved_id is not None:
@@ -534,7 +556,10 @@ independently using the history or provider continuation approach you chose.
 
 ### Run inference and stream events
 
-Run your agent and stream events back to the client. `stream_agent_response` converts an Agents run into ChatKit events; you can also yield events manually.
+Run your agent and yield its `ResponderEvent` stream to ChatKitServer.
+`stream_agent_response` yields both browser events and persistence requests
+for open workflow progress. The server saves progress under the current
+turn ID.
 
 ```python
 from contextlib import aclosing
@@ -645,13 +670,13 @@ from contextlib import aclosing
 
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import stream_agent_response
-from chatkit.turns import RetryTurn, Turn, TurnOutcome, UserMessageTurn
+from chatkit.turns import ResponderEvent, RetryTurn, Turn, TurnOutcome, UserMessageTurn
 
 
 class FeedbackChatKitServer(ChatKitServer[FeedbackRequestContext]):
     async def respond(
         self, turn: Turn[FeedbackRequestContext]
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    ) -> AsyncIterator[ResponderEvent]:
         thread, context = turn.thread, turn.context
         items_page = await self.store.load_thread_items(
             thread.id, after=None, limit=20, order="desc", context=context

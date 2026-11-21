@@ -125,11 +125,15 @@ async def test_http_disconnect_persists_partial_reply_and_allows_next_turn(
         add_thread_item = server.store.add_thread_item
 
         async def add_thread_item_with_io(
-            thread_id: str, item: ThreadItem, context: RequestContext
+            thread_id: str,
+            item: ThreadItem,
+            context: RequestContext,
+            *,
+            turn_id: str | None = None,
         ) -> None:
             # The in-memory SQLite fixture does not suspend during a write.
             await asyncio.sleep(0)
-            await add_thread_item(thread_id, item, context)
+            await add_thread_item(thread_id, item, context, turn_id=turn_id)
 
         monkeypatch.setattr(server.store, "add_thread_item", add_thread_item_with_io)
         request = ThreadsCreateReq(

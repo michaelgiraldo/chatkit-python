@@ -94,9 +94,8 @@ from agents import Agent, Runner
 
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
-from chatkit.events import ThreadStreamEvent
 from chatkit.server import ChatKitServer
-from chatkit.turns import Turn
+from chatkit.turns import ResponderEvent, Turn
 
 assistant = Agent(
     name="assistant",
@@ -108,7 +107,7 @@ assistant = Agent(
 class MyChatKitServer(ChatKitServer[dict[str, object]]):
     async def respond(
         self, turn: Turn[dict[str, object]]
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    ) -> AsyncIterator[ResponderEvent]:
         # Read the newest page and pass it to the model in chronological order.
         items_page = await self.store.load_thread_items(
             turn.thread.id,

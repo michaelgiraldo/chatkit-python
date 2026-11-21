@@ -16,7 +16,7 @@ from chatkit.models import (
 from chatkit.requests import NonStreamingReq, StreamingReq
 from chatkit.server import ChatKitServer, StreamingResult
 from chatkit.store import AttachmentStore
-from chatkit.turns import Turn
+from chatkit.turns import ResponderEvent, Turn
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
 
@@ -32,12 +32,12 @@ def decode_event(event: bytes) -> ThreadStreamEvent:
 
 @contextmanager
 def make_server(
-    responder: Callable[[Turn[RequestContext]], AsyncIterator[ThreadStreamEvent]]
+    responder: Callable[[Turn[RequestContext]], AsyncIterator[ResponderEvent]]
     | None = None,
     handle_feedback: Callable[[str, list[str], FeedbackKind, Any], None] | None = None,
     action_callback: Callable[
-        [ThreadMetadata, Action[str, Any], WidgetItem | None, Any],
-        AsyncIterator[ThreadStreamEvent],
+        [ThreadMetadata, Action[str, Any], WidgetItem | None, Any, str],
+        AsyncIterator[ResponderEvent],
     ]
     | None = None,
     sync_action_callback: Callable[
@@ -65,10 +65,12 @@ def make_server(
             action: Action[str, Any],
             sender: WidgetItem | None,
             context: Any,
-        ) -> AsyncIterator[ThreadStreamEvent]:
+            *,
+            turn_id: str,
+        ) -> AsyncIterator[ResponderEvent]:
             if action_callback is None:
                 raise ValueError("action_callback not wired up")
-            return action_callback(thread, action, sender, context)
+            return action_callback(thread, action, sender, context, turn_id)
 
         async def sync_action(
             self,
@@ -81,9 +83,7 @@ def make_server(
                 raise ValueError("sync_action_callback not wired up")
             return sync_action_callback(thread, action, sender, context)
 
-        def respond(
-            self, turn: Turn[RequestContext]
-        ) -> AsyncIterator[ThreadStreamEvent]:
+        def respond(self, turn: Turn[RequestContext]) -> AsyncIterator[ResponderEvent]:
             if responder is None:
                 return self._empty_responder()
             return responder(turn)

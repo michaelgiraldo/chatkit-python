@@ -84,7 +84,6 @@ from chatkit.events import (
     ThreadItemDoneEvent,
     ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
-    ThreadStreamEvent,
     WorkflowTaskAdded,
     WorkflowTaskUpdated,
 )
@@ -107,6 +106,7 @@ from chatkit.models import (
     Workflow,
     WorkflowItem,
 )
+from chatkit.turns import PersistWorkflow, ResponderEvent
 from chatkit.widgets import Card, Text
 from tests.helpers.mock_store import SQLiteStore
 from tests.helpers.server import DEFAULT_CONTEXT
@@ -178,8 +178,8 @@ def make_result() -> RunResult:
 
 
 async def all_events(
-    events: AsyncIterator[ThreadStreamEvent],
-) -> list[ThreadStreamEvent]:
+    events: AsyncIterator[ResponderEvent],
+) -> list[ResponderEvent]:
     return [event async for event in events]
 
 
@@ -584,7 +584,7 @@ async def test_stream_agent_response_yields_context_events_without_streaming_eve
     response_streamer = stream_agent_response(context, result)
     event = await response_streamer.__anext__()
 
-    assert event.type == "thread.item.added"
+    assert isinstance(event, ThreadItemAddedEvent)
 
     future = asyncio.ensure_future(response_streamer.__anext__())
     assert future.done() is False
@@ -635,7 +635,7 @@ async def test_stream_agent_response_maps_events():
     event1 = await response_streamer.__anext__()
     event2 = await response_streamer.__anext__()
 
-    assert {event1.type, event2.type} == {
+    assert {getattr(event1, "type", None), getattr(event2, "type", None)} == {
         "thread.item.added",
         "thread.item.updated",
     }
@@ -1626,7 +1626,7 @@ async def test_interleaved_image_generation_keeps_each_preview_and_result():
             context, result, converter=ResponseStreamConverter(partial_images=3)
         )
     )
-    assert [event.type for event in events] == [
+    assert [getattr(event, "type", None) for event in events] == [
         "thread.item.added",
         "thread.item.added",
         "thread.item.updated",
@@ -2064,8 +2064,7 @@ async def test_resumed_workflow_updates_existing_record(
     assert previous.workflow.tasks == [CustomTask(title="Previous step")]
     assert previous.workflow.summary is None
     if finish == "remain_open":
-        assert events == []
-        store.save_item.assert_awaited_once_with(thread.id, previous, None)
+        assert events == [PersistWorkflow(item=previous, replace=True)]
     else:
         assert isinstance(events[0], ThreadItemReplacedEvent)
         item = events[0].item
@@ -2074,7 +2073,7 @@ async def test_resumed_workflow_updates_existing_record(
         assert isinstance(item.workflow.summary, DurationSummary)
         assert item.workflow.expanded is (finish == "explicit")
         assert context.workflow_item is None
-        store.save_item.assert_not_awaited()
+    store.save_item.assert_not_awaited()
 
 
 async def test_prequeued_workflow_completion_does_not_reopen_workflow():
@@ -2125,12 +2124,14 @@ async def test_fresh_stream_ignores_saved_workflow():
     result = make_result()
     result.done()
 
-    (added,) = await all_events(stream_agent_response(context, result))
+    added, persisted = await all_events(stream_agent_response(context, result))
     assert isinstance(added, ThreadItemAddedEvent)
+    assert isinstance(added.item, WorkflowItem)
     assert added.item.id == "queued_workflow"
     assert context.workflow_item is added.item
     store.load_thread_items.assert_not_awaited()
-    store.add_thread_item.assert_awaited_once_with(thread.id, added.item, None)
+    assert persisted == PersistWorkflow(item=added.item, replace=False)
+    store.add_thread_item.assert_not_awaited()
     store.save_item.assert_not_awaited()
 
 
