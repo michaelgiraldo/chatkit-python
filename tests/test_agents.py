@@ -1,7 +1,8 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 from unittest.mock import AsyncMock, Mock
 
@@ -12,6 +13,7 @@ from agents import (
     InputGuardrail,
     InputGuardrailResult,
     InputGuardrailTripwireTriggered,
+    ModelResponse,
     OutputGuardrail,
     OutputGuardrailResult,
     OutputGuardrailTripwireTriggered,
@@ -20,6 +22,8 @@ from agents import (
     RunResultStreaming,
     StreamEvent,
     ToolCallItem,
+    ToolCallOutputItem,
+    Usage,
 )
 from agents.tool_context import ToolContext
 from openai.types.responses import (
@@ -62,6 +66,7 @@ from openai.types.responses.response_output_text import (
 )
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
 from openai.types.responses.response_text_done_event import ResponseTextDoneEvent
+from pydantic import ValidationError
 
 from chatkit.agents import (
     AgentContext,
@@ -79,7 +84,6 @@ from chatkit.events import (
     ThreadItemDoneEvent,
     ThreadItemReplacedEvent,
     ThreadItemUpdatedEvent,
-    ThreadStreamEvent,
     WorkflowTaskAdded,
     WorkflowTaskUpdated,
 )
@@ -102,7 +106,10 @@ from chatkit.models import (
     Workflow,
     WorkflowItem,
 )
+from chatkit.turns import PersistWorkflow, ResponderEvent
 from chatkit.widgets import Card, Text
+from tests.helpers.mock_store import SQLiteStore
+from tests.helpers.server import DEFAULT_CONTEXT
 
 thread = Thread(id="123", title="Test", created_at=datetime.now(), items=Page())
 
@@ -171,14 +178,73 @@ def make_result() -> RunResult:
 
 
 async def all_events(
-    events: AsyncIterator[ThreadStreamEvent],
-) -> list[ThreadStreamEvent]:
+    events: AsyncIterator[ResponderEvent],
+) -> list[ResponderEvent]:
     return [event async for event in events]
+
+
+def test_agent_context_requires_an_explicit_resume_choice():
+    with pytest.raises(ValidationError, match="resume_from"):
+        AgentContext.model_validate({
+            "thread": thread,
+            "store": mock_store,
+            "request_context": None,
+        })
+
+
+def test_agent_context_rejects_legacy_workflow_argument():
+    with pytest.raises(ValidationError, match="workflow_item"):
+        AgentContext.model_validate({
+            "thread": thread,
+            "store": mock_store,
+            "request_context": None,
+            "resume_from": None,
+            "workflow_item": None,
+        })
+
+
+def test_agent_context_rejects_workflow_from_another_thread():
+    other_workflow = WorkflowItem(
+        id="other_workflow",
+        thread_id="other_thread",
+        created_at=datetime.now(UTC),
+        workflow=Workflow(type="custom", tasks=[]),
+    )
+    with pytest.raises(ValidationError, match="thread"):
+        AgentContext(
+            thread=thread,
+            store=mock_store,
+            request_context=None,
+            resume_from=other_workflow,
+        )
+
+
+async def test_first_task_updates_an_empty_saved_workflow():
+    previous = WorkflowItem(
+        id="saved_workflow",
+        thread_id=thread.id,
+        created_at=datetime.now(UTC),
+        workflow=Workflow(type="custom", tasks=[]),
+    )
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=previous
+    )
+    task = CustomTask(title="First step")
+
+    await context.add_workflow_task(task)
+
+    assert context._events.get_nowait() == ThreadItemUpdatedEvent(
+        item_id=previous.id,
+        update=WorkflowTaskAdded(task_index=0, task=task),
+    )
+    assert previous.workflow.tasks == []
 
 
 @pytest.mark.parametrize("second_title", ["Processing", "Next step"])
 async def test_added_workflow_task_uses_appended_index(second_title):
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     await context.add_workflow_task(CustomTask(title="Processing"))
     await context.add_workflow_task(CustomTask(title=second_title))
 
@@ -195,7 +261,9 @@ async def test_added_workflow_task_uses_appended_index(second_title):
 
 @pytest.mark.parametrize("second_text", ["Thinking", "Another thought"])
 async def test_completed_reasoning_task_uses_appended_index(second_text):
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
     result.add_event(
         RawResponsesStreamEvent(
@@ -239,7 +307,9 @@ async def test_completed_reasoning_task_uses_appended_index(second_text):
 
 
 async def test_returns_widget_item():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
     result.add_event(
         RunItemStreamEvent(name="tool_called", item=Mock(spec=ToolCallItem))
@@ -261,7 +331,9 @@ async def test_returns_widget_item():
 
 
 async def test_returns_widget_item_generator():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
     result.add_event(
         RunItemStreamEvent(name="tool_called", item=Mock(spec=ToolCallItem))
@@ -303,7 +375,9 @@ async def test_returns_widget_item_generator():
 
 
 async def test_returns_widget_full_replace_generator():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
     result.add_event(
         RunItemStreamEvent(name="tool_called", item=Mock(spec=ToolCallItem))
@@ -355,6 +429,7 @@ async def test_duplicate_client_tool_requests_fail_the_handoff():
         thread=thread,
         store=mock_store,
         request_context=None,
+        resume_from=None,
     )
 
     def tool_context(index: int) -> ToolContext[AgentContext[None]]:
@@ -373,14 +448,84 @@ async def test_duplicate_client_tool_requests_fail_the_handoff():
             ),
         )
 
-    context.request_client_tool(tool_context(1), name="get_selection", arguments={})
+    context.request_client_tool(
+        tool_context(1), name="get_selection", arguments={}, continuation="local"
+    )
     with pytest.raises(ValueError, match="Only one client tool"):
-        context.request_client_tool(tool_context(2), name="get_selection", arguments={})
+        context.request_client_tool(
+            tool_context(2), name="get_selection", arguments={}, continuation="local"
+        )
 
     # The SDK can turn a callback exception into a tool result and complete.
     result = make_result()
     result.done()
     with pytest.raises(ValueError, match="Only one client tool"):
+        await all_events(stream_agent_response(context, result))
+
+
+@pytest.mark.parametrize(
+    ("defect", "message"),
+    [
+        ("continued", "must stop"),
+        ("changed_arguments", "preserve the original"),
+        ("duplicate_output", "one output"),
+        ("chat_completions", "real OpenAI Responses response ID"),
+    ],
+)
+async def test_client_tool_handoff_requires_native_continuation(
+    defect: str, message: str, monkeypatch: pytest.MonkeyPatch
+):
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
+    call = ResponseFunctionToolCall(
+        id="fc_browser",
+        type="function_call",
+        call_id="call_browser",
+        name="get_selection",
+        arguments="{}",
+    )
+    tool_context = ToolContext(
+        context=context,
+        tool_name=call.name,
+        tool_arguments=call.arguments,
+        tool_call_id=call.call_id,
+        tool_call=call,
+    )
+    context.request_client_tool(
+        tool_context,
+        name="read_canvas_selection",
+        arguments={"kind": "selection"},
+        continuation="responses" if defect == "chat_completions" else "local",
+    )
+    output = {
+        "type": "function_call_output",
+        "call_id": call.call_id,
+        "output": "None",
+    }
+    response_id = "__fake_id__" if defect == "chat_completions" else "resp_browser"
+    result = make_result()
+    result.interruptions = []
+    result.raw_responses = [
+        ModelResponse(
+            output=[] if defect == "continued" else [call],
+            usage=Usage(),
+            response_id=response_id,
+        )
+    ]
+    result.new_items = [
+        ToolCallOutputItem(agent=Agent(name="example"), raw_item=output, output=None)
+    ]
+    replay_call = call.model_dump(mode="json", exclude_none=True)
+    if defect == "changed_arguments":
+        replay_call["arguments"] = '{"kind": "selection"}'
+    items = [replay_call, output]
+    if defect == "duplicate_output":
+        items.append(output)
+    monkeypatch.setattr(result, "to_input_list", Mock(return_value=items))
+    result.done()
+
+    with pytest.raises(ValueError, match=message):
         await all_events(stream_agent_response(context, result))
 
 
@@ -420,7 +565,9 @@ async def test_accumulate_text():
 
 
 async def test_stream_agent_response_yields_context_events_without_streaming_events():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     event = ThreadItemAddedEvent(
@@ -437,7 +584,7 @@ async def test_stream_agent_response_yields_context_events_without_streaming_eve
     response_streamer = stream_agent_response(context, result)
     event = await response_streamer.__anext__()
 
-    assert event.type == "thread.item.added"
+    assert isinstance(event, ThreadItemAddedEvent)
 
     future = asyncio.ensure_future(response_streamer.__anext__())
     assert future.done() is False
@@ -454,7 +601,9 @@ async def test_stream_agent_response_yields_context_events_without_streaming_eve
 
 
 async def test_stream_agent_response_maps_events():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     event = ThreadItemAddedEvent(
@@ -486,7 +635,7 @@ async def test_stream_agent_response_maps_events():
     event1 = await response_streamer.__anext__()
     event2 = await response_streamer.__anext__()
 
-    assert {event1.type, event2.type} == {
+    assert {getattr(event1, "type", None), getattr(event2, "type", None)} == {
         "thread.item.added",
         "thread.item.updated",
     }
@@ -510,7 +659,9 @@ async def test_chat_completions_allocates_a_new_id_when_an_output_index_is_reuse
         generate_item_id=Mock(side_effect=["message_1", "message_2"]),
         load_thread_items=AsyncMock(return_value=Page()),
     )
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
     result = make_result()
     placeholder = ResponseOutputMessage(
         id="__fake_id__",
@@ -662,7 +813,9 @@ async def test_chat_completions_allocates_a_new_id_when_an_output_index_is_reuse
     ],
 )
 async def test_event_mapping(raw_event, expected_event):
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     result.add_event(raw_event)
@@ -676,7 +829,9 @@ async def test_event_mapping(raw_event, expected_event):
 
 
 async def test_stream_agent_response_emits_annotation_added_events():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
     item_id = "item_123"
 
@@ -759,7 +914,9 @@ async def test_stream_agent_response_emits_annotation_added_events():
 
 
 async def test_stream_agent_response_annotation_added_normalizes_annotations():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
     item_id = "item_123"
 
@@ -843,7 +1000,9 @@ async def test_stream_agent_response_annotation_added_normalizes_annotations():
 
 
 async def test_custom_annotation_conversion_used_by_stream_agent_response():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     class CustomResponseStreamConverter(ResponseStreamConverter):
@@ -963,7 +1122,15 @@ async def test_custom_annotation_conversion_used_by_stream_agent_response():
 
 @pytest.mark.parametrize("throw_guardrail", ["input", "output"])
 async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    previous = WorkflowItem(
+        id="saved_workflow",
+        thread_id=thread.id,
+        created_at=datetime.now(UTC),
+        workflow=Workflow(type="custom", tasks=[CustomTask(title="Previous step")]),
+    )
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=previous
+    )
     result = make_result()
     result.add_event(
         RawResponsesStreamEvent(
@@ -1010,14 +1177,15 @@ async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
 
     iterator = stream_agent_response(context, result)
 
-    n = 3
     events = []
-    # Grab first 3 events to
-    async for event in iterator:
-        n -= 1
-        events.append(event)
-        if n == 0:
-            break
+    seen = set()
+    async with asyncio.timeout(2):
+        async for event in iterator:
+            events.append(event)
+            if isinstance(event, (ThreadItemAddedEvent, ThreadItemDoneEvent)):
+                seen.add(event.item.id)
+            if seen == {"1", "2", "3"}:
+                break
 
     if throw_guardrail == "input":
         result.throw_input_guardrails()
@@ -1037,10 +1205,16 @@ async def test_stream_agent_response_yields_item_removed_event(throw_guardrail):
         event.item_id for event in events if event.type == "thread.item.removed"
     }
     assert deleted_item_ids == {"1", "2", "3"}
+    assert any(
+        isinstance(event, ThreadItemReplacedEvent) and event.item.id == previous.id
+        for event in events
+    )
 
 
 async def test_stream_agent_response_assistant_message_content_types():
-    AgentContext(thread=thread, store=mock_store, request_context=None)
+    AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     result.add_event(
@@ -1131,7 +1305,9 @@ async def test_stream_agent_response_assistant_message_content_types():
 
     result.done()
 
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     events = await all_events(stream_agent_response(context, result))
     assert len(events) == 1
     assert isinstance(events[0], ThreadItemDoneEvent)
@@ -1170,7 +1346,9 @@ async def test_stream_agent_response_assistant_message_content_types():
 
 
 async def test_stream_agent_response_image_generation_events():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     result.add_event(
@@ -1220,7 +1398,9 @@ async def test_stream_agent_response_image_generation_events():
 
 
 async def test_stream_agent_response_image_generation_events_with_custom_converter():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     result.add_event(
@@ -1282,7 +1462,9 @@ async def test_stream_agent_response_image_generation_events_with_custom_convert
 
 
 async def test_stream_agent_response_image_generation_partial_progress():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     result.add_event(
@@ -1354,7 +1536,9 @@ async def test_interleaved_image_generation_keeps_each_preview_and_result():
         generate_item_id=Mock(side_effect=["image_1", "image_2"]),
         load_thread_items=AsyncMock(return_value=Page()),
     )
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
     result = make_result()
     first = ImageGenerationCall(
         id="img_call_1", status="in_progress", type="image_generation_call"
@@ -1442,7 +1626,7 @@ async def test_interleaved_image_generation_keeps_each_preview_and_result():
             context, result, converter=ResponseStreamConverter(partial_images=3)
         )
     )
-    assert [event.type for event in events] == [
+    assert [getattr(event, "type", None) for event in events] == [
         "thread.item.added",
         "thread.item.added",
         "thread.item.updated",
@@ -1525,7 +1709,9 @@ def _web_search_done(
 
 
 async def test_interleaved_web_searches_keep_their_task_indices_and_citations():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
     first, second = "search_first", "search_second"
     first_url, second_url = "https://example.com/first", "https://example.com/second"
@@ -1690,7 +1876,9 @@ async def test_active_web_search_at_end_of_stream_finishes_workflow():
         load_thread_items=AsyncMock(return_value=Page()),
         add_thread_item=AsyncMock(),
     )
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
     result = make_result()
     item_id = "search_incomplete"
     result.add_event(
@@ -1746,10 +1934,11 @@ async def test_active_web_search_at_end_of_stream_finishes_workflow():
     assert task.queries == ["partial search"]
     assert task.status_indicator == "none"
     assert context.workflow_item is None
+    store.load_thread_items.assert_not_awaited()
     store.add_thread_item.assert_not_awaited()
 
 
-async def test_web_search_finishes_resumed_workflow_with_replacement():
+async def test_web_search_finishes_resumed_workflow_with_replacement(tmp_path: Path):
     thought = ThoughtTask(content="Existing reasoning")
     previous = WorkflowItem(
         id="saved_workflow",
@@ -1757,11 +1946,27 @@ async def test_web_search_finishes_resumed_workflow_with_replacement():
         created_at=datetime.now(UTC),
         workflow=Workflow(type="reasoning", tasks=[thought]),
     )
-    store = Mock(
-        load_thread_items=AsyncMock(return_value=Page(data=[previous])),
-        add_thread_item=AsyncMock(),
+    path = tmp_path / "thread.sqlite"
+    store = SQLiteStore(path)
+    await store.save_thread(thread, DEFAULT_CONTEXT)
+    await store.add_thread_item(thread.id, previous, DEFAULT_CONTEXT)
+    unrelated = previous.model_copy(
+        update={
+            "id": "unrelated_workflow",
+            "created_at": previous.created_at + timedelta(seconds=1),
+        }
     )
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    await store.add_thread_item(thread.id, unrelated, DEFAULT_CONTEXT)
+
+    reopened_store = SQLiteStore(path)
+    saved = await reopened_store.load_item(thread.id, previous.id, DEFAULT_CONTEXT)
+    assert isinstance(saved, WorkflowItem)
+    context = AgentContext(
+        thread=thread,
+        store=reopened_store,
+        request_context=DEFAULT_CONTEXT,
+        resume_from=saved,
+    )
     result = make_result()
     url = "https://example.com/resumed"
     result.add_event(
@@ -1790,8 +1995,15 @@ async def test_web_search_finishes_resumed_workflow_with_replacement():
     assert replaced.item.workflow.tasks == [thought, updated.update.task]
     assert isinstance(updated.update.task, SearchTask)
     assert updated.update.task.status_indicator == "complete"
-    store.generate_item_id.assert_not_called()
-    store.add_thread_item.assert_not_awaited()
+    await reopened_store.save_item(thread.id, replaced.item, DEFAULT_CONTEXT)
+    assert (
+        await reopened_store.load_item(thread.id, previous.id, DEFAULT_CONTEXT)
+        == replaced.item
+    )
+    assert (
+        await reopened_store.load_item(thread.id, unrelated.id, DEFAULT_CONTEXT)
+        == unrelated
+    )
 
 
 @pytest.mark.parametrize("finish", ["explicit", "assistant_message", "remain_open"])
@@ -1809,26 +2021,24 @@ async def test_resumed_workflow_updates_existing_record(
         add_thread_item=AsyncMock(),
         save_item=AsyncMock(),
     )
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=previous
+    )
+    active = context.workflow_item
+    assert active == previous
+    assert active is not previous
     result = make_result()
 
     async with aclosing(stream_agent_response(context, result)) as stream:
         if finish == "explicit":
-            # A reasoning update establishes that the relay loaded the saved workflow.
-            result.add_event(
-                RawResponsesStreamEvent(
-                    data=Mock(
-                        type="response.reasoning_summary_text.done",
-                        item_id="reasoning",
-                        summary_index=0,
-                        text="Next step",
-                    ),
-                )
-            )
+            # An agent tool can update and finish progress before the relay is consumed.
+            next_task = CustomTask(title="Next step")
+            await context.add_workflow_task(next_task)
+            await context.end_workflow(expanded=True)
             update = await anext(stream)
             assert isinstance(update, ThreadItemUpdatedEvent)
             assert update.item_id == previous.id
-            await context.end_workflow(expanded=True)
+            assert update.update == WorkflowTaskAdded(task_index=1, task=next_task)
         elif finish == "assistant_message":
             result.add_event(
                 RawResponsesStreamEvent(
@@ -1849,10 +2059,12 @@ async def test_resumed_workflow_updates_existing_record(
         result.done()
         events = await all_events(stream)
 
+    store.load_thread_items.assert_not_awaited()
     store.add_thread_item.assert_not_awaited()
+    assert previous.workflow.tasks == [CustomTask(title="Previous step")]
+    assert previous.workflow.summary is None
     if finish == "remain_open":
-        assert events == []
-        store.save_item.assert_awaited_once_with(thread.id, previous, None)
+        assert events == [PersistWorkflow(item=previous, replace=True)]
     else:
         assert isinstance(events[0], ThreadItemReplacedEvent)
         item = events[0].item
@@ -1861,7 +2073,7 @@ async def test_resumed_workflow_updates_existing_record(
         assert isinstance(item.workflow.summary, DurationSummary)
         assert item.workflow.expanded is (finish == "explicit")
         assert context.workflow_item is None
-        store.save_item.assert_not_awaited()
+    store.save_item.assert_not_awaited()
 
 
 async def test_prequeued_workflow_completion_does_not_reopen_workflow():
@@ -1870,7 +2082,9 @@ async def test_prequeued_workflow_completion_does_not_reopen_workflow():
         load_thread_items=AsyncMock(return_value=Page()),
         add_thread_item=AsyncMock(),
     )
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
     await context.start_workflow(
         Workflow(type="custom", tasks=[CustomTask(title="Queued step")])
     )
@@ -1888,7 +2102,7 @@ async def test_prequeued_workflow_completion_does_not_reopen_workflow():
         await context.stream(done)
 
 
-async def test_prequeued_workflow_takes_precedence_over_saved_workflow():
+async def test_fresh_stream_ignores_saved_workflow():
     previous = WorkflowItem(
         id="saved_workflow",
         thread_id=thread.id,
@@ -1901,18 +2115,23 @@ async def test_prequeued_workflow_takes_precedence_over_saved_workflow():
         add_thread_item=AsyncMock(),
         save_item=AsyncMock(),
     )
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
     await context.start_workflow(
         Workflow(type="custom", tasks=[CustomTask(title="Queued step")])
     )
     result = make_result()
     result.done()
 
-    (added,) = await all_events(stream_agent_response(context, result))
+    added, persisted = await all_events(stream_agent_response(context, result))
     assert isinstance(added, ThreadItemAddedEvent)
+    assert isinstance(added.item, WorkflowItem)
     assert added.item.id == "queued_workflow"
     assert context.workflow_item is added.item
-    store.add_thread_item.assert_awaited_once_with(thread.id, added.item, None)
+    store.load_thread_items.assert_not_awaited()
+    assert persisted == PersistWorkflow(item=added.item, replace=False)
+    store.add_thread_item.assert_not_awaited()
     store.save_item.assert_not_awaited()
 
 
@@ -1921,7 +2140,9 @@ async def test_cancelled_web_search_relay_closes_the_pending_model_read():
     store.generate_item_id.return_value = "workflow"
     store.load_thread_items = AsyncMock(return_value=Page())
     store.add_thread_item = AsyncMock()
-    context = AgentContext(thread=thread, store=store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
     result = Mock(spec=RunResultStreaming)
     result.is_complete = False
     pending_read = asyncio.Event()
@@ -1981,7 +2202,9 @@ async def test_cancelled_web_search_relay_closes_the_pending_model_read():
 
 
 async def test_workflow_streams_first_thought():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     # first thought
@@ -2140,7 +2363,9 @@ async def test_workflow_streams_first_thought():
 
 
 async def test_workflow_ends_on_message():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
     result = make_result()
 
     # first thought
@@ -2231,14 +2456,16 @@ async def test_workflow_ends_on_message():
 
 
 async def test_existing_workflow_summary_not_overwritten_on_automatic_end():
-    context = AgentContext(thread=thread, store=mock_store, request_context=None)
-    result = make_result()
-    context.workflow_item = WorkflowItem(
+    previous = WorkflowItem(
         id="wf_1",
         created_at=datetime.now(),
         workflow=Workflow(type="custom", tasks=[], summary=CustomSummary(title="Test")),
         thread_id=thread.id,
     )
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=previous
+    )
+    result = make_result()
 
     result.add_event(
         RawResponsesStreamEvent(
@@ -2263,9 +2490,10 @@ async def test_existing_workflow_summary_not_overwritten_on_automatic_end():
 
     event = await anext(stream)
 
-    assert isinstance(event, ThreadItemDoneEvent)
+    assert isinstance(event, ThreadItemReplacedEvent)
     assert context.workflow_item is None
     assert event.item.type == "workflow"
+    assert event.item.id == previous.id
     assert event.item.workflow.summary == CustomSummary(title="Test")
 
     try:

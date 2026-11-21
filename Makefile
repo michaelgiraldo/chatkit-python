@@ -1,4 +1,4 @@
-.PHONY: sync install format format-check lint pyright test build demo docs-check serve-docs check
+.PHONY: sync install format format-check lint pyright test build demo docs-check serve-docs check release-check
 
 # Pass the version explicitly because uv --no-config skips .python-version.
 UV_ENV := env -i PATH="$(PATH)" HOME="$(HOME)" UV_PYTHON="$(shell cat .python-version)" $(if $(UV_CACHE_DIR),UV_CACHE_DIR="$(UV_CACHE_DIR)")
@@ -42,3 +42,6 @@ serve-docs:
 	$(DOCS_RUN) zensical serve
 
 check: format-check lint pyright test docs-check
+
+release-check:
+	$(UV) run --no-project python scripts/check-release.py --sha "$(shell git rev-parse HEAD)"

@@ -1,4 +1,4 @@
-import json
+from dataclasses import replace
 from datetime import datetime
 from typing import cast
 
@@ -9,8 +9,13 @@ from openai.types.responses import (
     ResponseInputTextParam,
 )
 from openai.types.responses.response_input_item_param import Message
+from pydantic import JsonValue
 
-from chatkit.agent_input import ThreadItemConverter, simple_to_agent_input
+from chatkit.agent_input import (
+    ThreadItemConverter,
+    client_tool_continuation_input,
+    simple_to_agent_input,
+)
 from chatkit.models import (
     AssistantMessageContent,
     AssistantMessageItem,
@@ -31,6 +36,11 @@ from chatkit.models import (
     UserMessageTagContent,
     UserMessageTextContent,
     WidgetItem,
+)
+from chatkit.turns import (
+    ClientToolInvocation,
+    ClientToolLocalContinuation,
+    ClientToolTurn,
 )
 from chatkit.widgets import Card, Text
 
@@ -387,7 +397,6 @@ async def test_input_item_converter_with_client_tool_call():
             created_at=datetime.now(),
             name="xyz",
             arguments={"foo": "bar"},
-            call_id="ctc_123",
         ),
         ClientToolCallItem(
             id="ctc_123_done",
@@ -395,14 +404,13 @@ async def test_input_item_converter_with_client_tool_call():
             created_at=datetime.now(),
             name="xyz",
             arguments={"foo": "bar"},
-            call_id="ctc_123",
             status="completed",
             output={"success": True},
         ),
     ]
 
     input_items = await simple_to_agent_input(items)
-    assert len(input_items) == 4
+    assert len(input_items) == 2
     assert input_items[0] == {
         "content": [
             {
@@ -423,17 +431,65 @@ async def test_input_item_converter_with_client_tool_call():
         "type": "message",
         "role": "user",
     }
-    assert input_items[2] == {
-        "type": "function_call",
-        "name": "xyz",
-        "arguments": json.dumps({"foo": "bar"}),
-        "call_id": "ctc_123",
-    }
-    assert input_items[3] == {
+
+
+def test_client_tool_continuation_replaces_only_the_deferred_output():
+    call = ClientToolCallItem(
+        id="tc_example",
+        thread_id=_THREAD_ID,
+        created_at=datetime.now(),
+        name="browser_tool",
+        arguments={"browser_only": True},
+    )
+    invocation = ClientToolInvocation(
+        item_id=call.id, thread_id=_THREAD_ID, turn_id="origin", call_id="call_example"
+    )
+    turn = ClientToolTurn(call, invocation)
+    with pytest.raises(ValueError, match="Complete"):
+        client_tool_continuation_input(turn)
+
+    completed = call.model_copy(update={"status": "completed", "output": None})
+    turn = ClientToolTurn(
+        completed, invocation.model_copy(update={"continuation_turn_id": "callback"})
+    )
+    with pytest.raises(ValueError, match="must match"):
+        client_tool_continuation_input(
+            replace(turn, tool_call=completed.model_copy(update={"id": "other"}))
+        )
+    with pytest.raises(ValueError, match="no captured native model continuation"):
+        client_tool_continuation_input(turn)
+
+    deferred: dict[str, JsonValue] = {
         "type": "function_call_output",
-        "call_id": "ctc_123",
-        "output": json.dumps({"success": True}),
+        "call_id": invocation.call_id,
+        "output": "None",
     }
+    sibling: dict[str, JsonValue] = {
+        "type": "function_call_output",
+        "call_id": "call_sibling",
+        "output": "server result",
+    }
+    continuation = ClientToolLocalContinuation(items=[sibling, deferred])
+    turn = replace(
+        turn,
+        invocation=turn.invocation.model_copy(
+            update={"model_continuation": continuation}
+        ),
+    )
+    assert client_tool_continuation_input(turn) == [
+        sibling,
+        {**deferred, "output": "null"},
+    ]
+    assert continuation.items == [sibling, deferred]
+
+    for invalid_items in ([sibling], [deferred, deferred]):
+        invalid = turn.invocation.model_copy(
+            update={
+                "model_continuation": ClientToolLocalContinuation(items=invalid_items)
+            }
+        )
+        with pytest.raises(ValueError, match="exactly one matching output"):
+            client_tool_continuation_input(replace(turn, invocation=invalid))
 
 
 async def test_input_item_converter_with_structured_input():

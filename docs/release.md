@@ -1,160 +1,91 @@
-# Release process and changelog
+# Releases and changelog
 
 Turnspan keeps the OpenAI ChatKit base version and increments the
-`+turnspan.N` suffix for releases of this fork. Read the changelog for API
-and storage changes before updating a [commit pin](guides/pin-the-fork.md).
-
-Turnspan publishes [GitHub releases](https://github.com/michaelgiraldo/chatkit-python/releases).
-The `openai-chatkit` package on PyPI tracks the
+`+turnspan.N` suffix for fork builds. Get published builds from
+[Turnspan's GitHub releases](https://github.com/michaelgiraldo/chatkit-python/releases).
+The `openai-chatkit` package on PyPI is published by the
 [original OpenAI project](https://github.com/openai/chatkit-python/releases).
 
-## Cut a Turnspan release
+## Verify and publish a release
 
-1. Set the version in `pyproject.toml`, refresh `uv.lock`, and update the
-   README and changelog.
-2. Run `make check` and `make build` on Python 3.14. Verify that GitHub
-   Actions passes on the exact commit to be released.
-3. Tag that commit with the package version prefixed by `v`. Publish a GitHub
-   release with the changelog, the full commit SHA for installation, and the
-   passing CI run.
+1. Set the version in `pyproject.toml`, refresh `uv.lock`, and add a matching
+   changelog section. Commit the candidate and run `make check`, `make build`,
+   and `make release-check` with Python 3.14. The release check installs the
+   committed `HEAD` in isolation and exercises the quickstart, FastAPI, and
+   Agents SDK with synthetic inputs.
+2. Merge to `main` and wait for CI to pass. Run the **Verify Turnspan release**
+   workflow once with the full commit SHA. It verifies that commit's CI result
+   and repeats the consumer check using the public GitHub source archive.
+
+   ```sh
+   gh workflow run turnspan-release.yml --ref main -f sha=COMMIT_SHA
+   ```
+
+3. Copy the release notes from the workflow summary. Create the GitHub release
+   manually with the indicated tag and exact commit. If the tag already exists,
+   verify its target. After publishing, confirm the tag resolves to the tested
+   commit and update the shared install section in the README. The docs
+   landing page renders that same section.
+
+The workflow only verifies and produces notes. The notes include the commit,
+install command, tested dependency versions, and links to docs at that commit.
+
+## Turnspan 6 (`1.6.5+turnspan.6`)
+
+- **Breaking store contract.** Every streaming response has a durable turn
+  ID. Custom stores implement atomic turn ownership, fenced responder
+  writes, and persisted milestones. Use a fresh schema for this candidate.
+  Streaming actions receive `turn_id`. Supply the current ID to
+  `update_thread` and other direct responder writes.
+- The server distinguishes a saved callback from responder start and
+  completion. Closing a response before processing starts records
+  `ABANDONED`. Started responders can report `SUPERSEDED` when a new
+  request takes ownership.
+- **Breaking Python and storage contract.** Browser tools publish a
+  `ClientToolCallItem` containing display data. The server registers a
+  separate `ClientToolInvocation` with model data and the turn linkage.
+  Custom responders yield `ClientToolRequest` to register the pair.
+  Pass the complete `ClientToolTurn` to
+  `client_tool_continuation_input`. The ChatKit browser still sends the
+  same callback envelope.
+- Browser tools return the ID of the exact saved invocation. Each callback can
+  complete once, and a newer turn can cancel a pending invocation.
+- The Agents SDK adapter preserves the original model call and any sibling tool
+  results. Choose local replay or OpenAI-managed Responses context when
+  registering the tool.
+- The [browser tool guide](guides/update-client-during-response.md#call-client-tools-mid-inference)
+  documents the current callback, continuation, and storage contracts.
+
+## Turnspan 5 (`1.6.5+turnspan.5`)
+
+- Development milestone. `AgentContext` takes an explicit `resume_from` option
+  for a saved display workflow. Use `None` for a fresh run.
+
+## Turnspan 4 (`1.6.5+turnspan.4`)
+
+- Development milestone. Added control over workflow history reads.
 
 ## Turnspan 3 (`1.6.5+turnspan.3`)
 
-### What's new
-
-- The [FastAPI adapter](quickstart.md) returns clear HTTP errors for invalid
-  requests and closes event producers when the client disconnects. The
-  browser demo runs locally with `make demo`.
-- Use `prepare_user_message` to validate or enrich new messages before ChatKit
-  writes them. FastAPI integrations can supply a `streaming_response` factory
-  for custom streaming and cleanup. [Server lifecycle](guides/respond-to-user-message.md)
-- Streamed and reloaded widgets share a lossless representation. Card borders
-  survive reload, empty widget streams complete cleanly, and a disconnect
-  closes the widget producer.
-- Image previews and web-search progress are tracked by provider item ID.
-  Overlapping calls keep separate progress and results. Thanks to Francis
-  Poisson-Gagnon for the [web-search report](https://github.com/openai/chatkit-python/issues/28)
-  and [proposed fix](https://github.com/openai/chatkit-python/pull/29).
-- The [SQLite example](guides/respond-to-user-message.md#use-the-file-backed-sqlite-example)
-  demonstrates durable storage. `chatkit.store_checks` supplies reusable checks
-  for custom thread stores.
-- Test helpers live outside test modules, and pytest uses `importlib` mode
-  in clean checkouts. Thanks to Mark Zhang for
-  [reporting the import problem](https://github.com/openai/chatkit-python/pull/122).
-- The docs now build with Zensical and publish to
-  [GitHub Pages](https://michaelgiraldo.github.io/chatkit-python/).
-- The [pinning guide](guides/pin-the-fork.md#verify-what-serves-live-traffic)
-  shows how to verify the installed package in the artifact serving traffic.
-
-### Upgrade from Turnspan 2
-
-- Implement `respond(self, turn)` using the typed trigger on `turn.input`.
-  Use `on_turn_finished` to observe whether the server completed, is waiting
-  for input, cancelled, or failed.
-- Implement `ThreadStore` for thread and item persistence. Configure attachment
-  metadata and file operations through `AttachmentMetadataStore` and
-  `AttachmentStore` where needed.
-- Import thread records from `chatkit.models`, requests from `chatkit.requests`,
-  and stream events from `chatkit.events`. Use `ThreadItemUpdatedEvent` for
-  item updates and `chatkit.icons.IconName` for widget icons.
-- Import history conversion from `chatkit.agent_input`, widget producers from
-  `chatkit.widget_stream`, and widget JSON models from `chatkit.widget_models`.
-  Install the `templates` extra and import `WidgetTemplate` from
-  `chatkit.templates` to render `.widget` files. Relative template paths use
-  the process's working directory.
-- Custom stores filter hidden items before paginating when `load_thread_items`
-  receives `include_hidden=False`. New item IDs generated by the SDK use a
-  full UUID, and new SDK timestamps include a UTC offset.
-- Configure the `chatkit` logger in your application. Stream errors expose a
-  code and retry flag. Entity previews use the browser's `onRequestPreview`
-  callback.
-- Typed `Action` constructors take an explicit type and payload. The browser
-  request model accepts actions without a payload, and an action without a
-  name returns HTTP 422.
-- Pass provider continuation IDs to `Runner.run_streamed`. An `AgentContext`
-  belongs to one response run, and writes after it closes raise
-  `asyncio.QueueShutDown`.
-- Client tool callbacks use `AgentContext.request_client_tool` with the
-  Agents SDK's `ToolContext` to bind the browser callback to its invocation.
-- Custom HTTP transports parse the request with `chatkit.protocol.parse_request`,
-  pass the typed request to `ChatKitServer.process`, and serialize the typed
-  response or closeable event stream with the protocol helpers.
-- Thread stores implement atomic `claim_pending_item`, `patch_thread`, and
-  `truncate_after` operations. Return the retained user message from
-  `truncate_after` after later items disappear from pagination and direct
-  reads. The store checks cover both read paths. In a responder, yield the
-  event from `ChatKitServer.update_thread` to persist a display change and
-  show it to the client. Use `ThreadStore.patch_thread` for metadata-only writes.
-- Typed widget builders use `.build()` to produce a canonical widget tree
-  for direct item or update construction. Use `WidgetTemplate.build()` for
-  every template root, including entity previews.
-- Install the `agents` extra when using `chatkit.agents`. The `fastapi` extra
-  supplies the HTTP adapter's dependencies and Uvicorn.
+- Early published build. Added typed turns, explicit store operations, optional
+  integrations, a FastAPI adapter, and a runnable local demo.
+- Improved streamed and reloaded widgets. Image previews and web-search progress
+  use provider item IDs. The web-search work builds on the
+  [upstream report and proposed fix](https://github.com/openai/chatkit-python/pull/29).
+- Added the durable SQLite example, custom-store checks, and generated docs.
+  Thanks to Mark Zhang for the [test import report](https://github.com/openai/chatkit-python/pull/122).
 
 ## Turnspan 2 (`1.6.5+turnspan.2`)
 
-- Lists inside cards now parse as typed `ListView` widgets, including their rows
-  and click actions. Thanks to Saloni Garg for the [upstream fix](https://github.com/openai/chatkit-python/pull/137).
-- Chat Completions replies now get distinct message IDs. Each ID follows its
-  reply from streaming through reload. Responses keeps the IDs supplied by
-  OpenAI. Thanks to Jacob Babula for the [upstream fix](https://github.com/openai/chatkit-python/pull/128).
-- Requests made with the Agents SDK now use the SDK's default User-Agent or the
-  app's configured value. Turnspan no longer adds a `ChatKit/Python` suffix.
-  The dependency range remains at Agents SDK 0.25.x pending tests of the next
-  minor release.
-- Removed the private Agents SDK sentinel import implicated in
-  [PR #122](https://github.com/openai/chatkit-python/pull/122). The shared test
-  helpers and default `importlib` configuration followed in Turnspan 3.
-- The [structured feedback example](guides/respond-to-user-message.md#save-structured-tool-results-after-a-turn)
-  shows how tools can access the thread ID and how the app can save feedback
-  after a successful stream. Thanks to Jao Garcia for the
-  [persistence question](https://github.com/openai/chatkit-python/issues/120).
+- Fixed nested [ListView widgets](https://github.com/openai/chatkit-python/pull/137)
+  and preserved distinct [Chat Completions message IDs](https://github.com/openai/chatkit-python/pull/128)
+  across streaming and reload.
+- Added a [structured feedback example](guides/respond-to-user-message.md#save-structured-tool-results-after-a-turn)
+  following an [upstream persistence question](https://github.com/openai/chatkit-python/issues/120).
 
 ## Turnspan 1 (`1.6.5+turnspan.1`)
 
-- The fork now requires Python 3.14 or newer. For Python 3.10 through 3.13, the upstream `v1.6.5` release remains available.
-- Installing the fork requires OpenAI Python 3.56.0 through 3.x, Agents SDK
-  0.25.x, Pydantic 2.14.4 through 2.x, Uvicorn 0.54.0 through 0.x, and Jinja
-  3.1.6 through 3.x. Turnspan 1 uses internal per-request header overrides from
-  Agents SDK 0.25.x. Update any older pins in your app before installing the fork.
-  If your app passes a custom HTTP client to the OpenAI SDK, see the
-  [HTTPX2 migration guide](https://github.com/openai/openai-python/blob/v3.56.0/httpx2.md).
-- The `fastapi` extra installs the FastAPI version used by the quickstart.
-- Interrupted streams close cleanly. The FastAPI example verifies that a
-  partial reply can be reloaded and the thread can accept another turn.
-- Widget updates handle added and removed properties and text without IDs.
-  Repeated workflow tasks update the correct position, and empty streamed
-  citations leave subsequent citations intact.
+- Established the Python 3.14 baseline and improved stream cleanup, widget
+  updates, workflow task indexes, and streamed citation handling.
 
-## Upstream release history
-
-### 1.6.0
-
-- `Store.save_attachment` may now be called with updates to existing attachments (treated as an upsert), not only inserts.
-
-### 1.5.0
-
-Two-phase uploads:
-
-- `upload_url` was removed from `FileAttachment` and `ImageAttachment`; use `upload_descriptor` instead.
-- `ChatKitServer` now saves the created attachment metadata in the store when handling the `attachments.create` request; remove the store-write step in `AttachmentStore.create_attachment`.
-
-### 1.4.0
-
-- Widget and action classes are still usable but marked as deprecated in favor of using `WidgetTemplate` to build widgets from `.widget` files.
-- Added `jinja2` as a required dependency for widget template rendering.
-- A stop button is now shown by default during streaming, allowing users to cancel the stream mid-response. Integrations can override `ChatKitServer.get_stream_options` to change this behavior.
-
-### 1.3.0
-
-- Fixed the type for the `defaultChecked` property of `Checkbox` widgets, updating it from `string` to `bool`.
-
-### 1.2.0
-
-- Updated `agents.stream_agent_response` to add annotation parts as they are received rather than adding all the annotations at the end after the response is completed.
-- Added support for rendering `container_file_citation`.
-
-### 1.1.0
-
-- `CustomSummary`, `CustomTask`, and `EntitySource` types have been updated to restrict `icon` to `IconName`.
-- All `ThreadItemConverter` methods have been updated to be asynchronous.
+[OpenAI ChatKit release history](https://github.com/openai/chatkit-python/releases)

@@ -15,7 +15,7 @@ from chatkit.agents import (
     _merge_generators,
     stream_agent_response,
 )
-from chatkit.events import ProgressUpdateEvent
+from chatkit.events import ProgressUpdateEvent, ThreadItemUpdatedEvent
 from chatkit.models import Page, ThreadMetadata
 from docs.examples.stream_image_previews import stream_image_previews
 
@@ -74,7 +74,9 @@ def _agent_context() -> AgentContext:
     thread = ThreadMetadata(id="example", created_at=datetime.now())
     store = Mock()
     store.load_thread_items = AsyncMock(return_value=Page())
-    return AgentContext(thread=thread, store=store, request_context=None)
+    return AgentContext(
+        thread=thread, store=store, request_context=None, resume_from=None
+    )
 
 
 @pytest.mark.parametrize("exit", ["close", "cancel"])
@@ -128,7 +130,7 @@ async def test_interrupting_agent_response_cancels_runner_before_closing_events(
     )
     async with asyncio.timeout(2), aclosing(stream) as events:
         if exit == "close":
-            assert (await anext(events)).type == "thread.item.updated"
+            assert isinstance(await anext(events), ThreadItemUpdatedEvent)
         else:
             read = asyncio.create_task(anext(events))
             await entered.wait()

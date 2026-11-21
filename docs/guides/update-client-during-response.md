@@ -124,13 +124,28 @@ const chatkit = useChatKit({
 
 ## Call client tools mid-inference
 
-Client tool calls let the agent invoke browser/app callbacks mid-inference. Register the tool on both client and server; when triggered, ChatKit pauses the model, sends the tool request to the client, and resumes with the returned result.
+Client tool calls let the agent invoke browser or app callbacks
+while preparing an answer. Register the tool on the client and server. The
+Agents SDK ends its current run at the tool. ChatKit sends the request to the
+browser, and your responder starts a new run with the returned result.
 
 Use client effects instead when you do not need to wait for the client callback response for the rest of your response.
 
 ### Define a client tool in your agent
 
-Annotate the tool with the Agents SDK's `ToolContext` and call `ctx.context.request_client_tool(ctx, ...)` to tie the browser callback to this invocation. Turnspan accepts one client tool request per turn. Include the client tool in `stop_at_tool_names` so the model pauses while the browser callback runs and returns its result.
+Annotate the tool with the Agents SDK's `ToolContext` and call
+`ctx.context.request_client_tool(ctx, ...)` to tie the browser callback to
+the model invocation. Include the client tool in `stop_at_tool_names`.
+`StopAtTools` ends the current run after tool execution. It can execute server
+tools from the same response, and Turnspan preserves their outputs for
+continuation. Turnspan accepts one browser tool invocation per run.
+
+Choose a continuation strategy before running the agent. Pass
+`continuation="local"` if your app holds the model input and output history,
+or `continuation="responses"` if OpenAI holds the preceding response or
+conversation. The browser handler name and parameters can differ from the
+model function name and arguments.
+[Agents SDK tool use](https://openai.github.io/openai-agents-python/agents/#tool-use-behavior)
 
 ```python
 from agents import Agent, StopAtTools, function_tool
@@ -144,31 +159,47 @@ async def get_selected_canvas_nodes(ctx: ToolContext[AgentContext]) -> None:
         ctx,
         name="get_selected_canvas_nodes",
         arguments={"project": my_project()},
+        continuation="local",
     )
 
 
 assistant = Agent[AgentContext](
     ...,
     tools=[get_selected_canvas_nodes],
-    # StopAtTools pauses model generation so the pending client callback can run and resume the run.
     tool_use_behavior=StopAtTools(stop_at_tool_names=[get_selected_canvas_nodes.name]),
 )
 ```
 
 ### Register the client tool in ChatKit.js
 
-Provide a matching callback when initializing ChatKit on the client. Match the name passed to `request_client_tool`. The client sends the return value back to the server to resume the run.
+Register an `onClientTool` callback that handles the name passed to
+`request_client_tool`. Turnspan supplies the saved item ID and the tool
+arguments as `params.item_id` and `params.input`. Return the same item ID
+with your tool's JSON output. The canvas tool below takes a project ID
+under `input.project` and returns the selected nodes under `output.nodes`.
+[ChatKit.js callback API](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/chatkitoptions/#onclienttool)
 
 ```ts
 const chatkit = useChatKit({
   // ...
   onClientTool: async ({name, params}) => {
-    if (name !== "get_selected_canvas_nodes" || typeof params.project !== "string") {
+    const {item_id, input} = params;
+    if (
+      name !== "get_selected_canvas_nodes" ||
+      typeof item_id !== "string" ||
+      !item_id ||
+      typeof input !== "object" ||
+      input === null ||
+      !("project" in input) ||
+      typeof input.project !== "string"
+    ) {
       throw new Error("Unexpected client tool request");
     }
-    const nodes = myCanvas.getSelectedNodes(params.project);
+
+    const nodes = myCanvas.getSelectedNodes(input.project);
     return {
-      nodes: nodes.map((node) => ({id: node.id, kind: node.type})),
+      item_id,
+      output: {nodes: nodes.map((node) => ({id: node.id, kind: node.type}))},
     };
   },
 });
@@ -177,13 +208,146 @@ const chatkit = useChatKit({
 ### Stream and resume
 
 In `respond(self, turn)`, use `turn.thread` and `turn.context` to construct
-your `AgentContext`, then stream via `stream_agent_response`. ChatKit emits a
-pending client tool call, and the frontend posts the tool's output back.
+your `AgentContext`, then stream via `stream_agent_response`. ChatKit saves a
+pending client tool call before emitting the request to the browser. The
+agent helper emits a `ThreadItemDoneEvent` for the pending tool item. Use that
+event if you build the tool request directly in a custom responder.
 
-ChatKit saves the tool result before calling `respond` again. On that turn,
-`turn.input` is a `ClientToolTurn`, and `turn.input.tool_call.output` holds the
-client's result. When you convert the saved thread history,
-`ThreadItemConverter.client_tool_call_to_input` supplies the model with both
-the call and the matching output.
+ChatKit.js posts the callback's return value as `params.result` in the
+existing `threads.add_client_tool_output` operation.
+
+```json
+{
+  "type": "threads.add_client_tool_output",
+  "params": {
+    "thread_id": "thr_example",
+    "result": {
+      "item_id": "tc_example",
+      "output": {"nodes": [{"id": "node_1", "kind": "text"}]}
+    }
+  }
+}
+```
+
+The Python request model exposes that result as
+[`ClientToolCallbackResult`](../api/chatkit/requests.md#chatkit.requests.ClientToolCallbackResult).
+The server uses the authenticated request context, the thread ID, and the
+item ID to find the pending invocation. It commits the claim and output before
+calling `respond` again. On that turn, `turn.input` is a `ClientToolTurn`.
+Read the browser result from `turn.input.tool_call.output` and the native
+model state from `turn.input.invocation.model_continuation`.
+
+| Identifier | Purpose |
+| --- | --- |
+| Browser `item_id` | Identifies the exact transcript item the browser is answering. |
+| Turnspan `turn.id` | Identifies the server execution that owns writes for the thread. |
+| Provider `invocation.call_id` | Associates a function output with its model tool call. |
+
+The browser item carries its name, arguments, status, and output. The
+invocation is a separate record with the private provider data. The
+Agents adapter yields a server-only `ClientToolRequest`. For a custom
+responder, yield `ClientToolRequest(item=display_item, call_id=provider_call_id)`
+and supply `model_continuation` if you use the continuation helper.
+Turnspan saves both records before publishing the display item.
+
+### Build the next model request
+
+Use `client_tool_continuation_input(turn.input)` to build the
+next input for the exact completed call. It uses the original model
+`call_id` for each tool result and preserves sibling server tool outputs.
+
+| Strategy | Input returned by the helper | How to invoke the runner |
+| --- | --- | --- |
+| `local` | Native input and output items through the stopped run, with the browser result replacing its placeholder. | Pass the list as the next run's input. |
+| `responses` | Function outputs the provider still needs, including the browser result. | Pass the list and the invocation's saved `model_continuation.response_id` as `previous_response_id`. If your app uses a provider-managed conversation, use its same trusted `conversation_id` instead. |
+
+For `responses`, configure the originating run so the provider retains the
+predecessor. For example, use `ModelSettings(store=True)` for response ID
+chaining when your application's provider retention policy allows it. Use
+exactly one provider context identifier. Resolve a conversation ID from your
+authorized application state. Keep captured continuation data in server-side
+storage with the same access and retention rules as your model history.
+[OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling#handling-function-calls) ·
+[OpenAI conversation state](https://developers.openai.com/api/docs/guides/conversation-state)
+
+For example, a responder that uses saved response IDs can build the callback
+run as follows:
+
+```python
+from agents import Runner
+
+from chatkit.agent_input import client_tool_continuation_input
+from chatkit.turns import ClientToolTurn
+
+
+if isinstance(turn.input, ClientToolTurn):
+    continuation = turn.input.invocation.model_continuation
+    input_items = client_tool_continuation_input(turn.input)
+    previous_response_id = (
+        continuation.response_id
+        if continuation is not None and continuation.type == "responses"
+        else None
+    )
+    result = Runner.run_streamed(
+        assistant,
+        input_items,
+        context=agent_context,
+        previous_response_id=previous_response_id,
+    )
+```
+
+Custom responders that generate their own provider input can use
+`ClientToolTurn` to receive the claimed result. The continuation helper
+requires a saved native model continuation.
+
+Prepare UI progress separately. Pass `resume_from=None` to start a fresh
+display workflow or load an explicitly linked
+[saved workflow](respond-to-user-message.md#prepare-workflow-progress)
+from trusted storage before starting the next run.
+
+### Know when a callback can complete
+
+Each thread can have one pending client tool call. A completed handoff leaves
+that exact call pending so a callback can arrive later, even after the server
+restarts with a durable store. New messages and retries cancel the pending
+call. Deleting the call cancels it, and deleting the thread invalidates every
+callback for that thread. Closing or failing a stream before it finishes the
+handoff cancels the exact call the stream opened if it is still pending.
+A result that already won the atomic claim stays completed.
+
+A callback for a missing, already completed, cancelled, or inaccessible
+invocation cannot resume the turn. The server matches the saved ID even when
+other items were written to the transcript after the tool request. See
+[implement the client tool lifecycle](respond-to-user-message.md#implement-the-client-tool-lifecycle)
+for storage requirements.
+
+Turn ownership also covers the first registration. Once a newer request
+owns the thread, an older responder cannot register a tool or persist a
+reply. A callback claim starts a new turn atomically. Its saved display
+status means the server accepted the result. Use its turn state to find
+out whether the responder started or finished. Inspect the turn identified
+by the private invocation's `continuation_turn_id`.
+
+| What happened | What persisted |
+| --- | --- |
+| A newer message arrived before the older responder requested a tool. | The old turn is `SUPERSEDED`. Its first tool registration is rejected. |
+| ChatKit saved the callback and the response closed before the server started processing its stream. | The display item is `completed` and the continuation turn is `ABANDONED`. A second callback conflicts. |
+| The server processed the callback and saved the final reply. | The display item is `completed` and the continuation turn is `COMPLETED`. |
+
+### Verify the browser tool
+
+1. Send a message that requests the browser tool. Complete its callback
+   after reopening the server with the same durable store.
+2. Check that the browser receives its handler input and the next model run
+   receives the tool results with the original `call_id` values. Use your
+   application's selected continuation strategy.
+3. Repeat the callback, then try a callback from a turn superseded by a
+   new message. Check that both are rejected.
+4. With the real ChatKit browser client, trigger the same tool twice in one
+   thread. Check that it receives two different item IDs, submits each
+   corresponding callback, and displays the final reply. Inspect SSE and
+   reloaded history JSON for the display arguments and output. Use a
+   distinct synthetic value in private model input and confirm it is
+   absent from both browser payloads.
 
 

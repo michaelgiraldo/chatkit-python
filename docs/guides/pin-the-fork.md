@@ -73,9 +73,5 @@ PY
    move. The resolved artifact and its installed metadata establish what is
    serving traffic.
 
-To roll back, switch traffic to the previous verified artifact if your
-platform supports it. For a rebuild, restore the previous manifest and
-lockfile. Verify the serving revision again after switching traffic.
-
 [uv URL dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/#url) ·
 [Python direct URL metadata](https://packaging.python.org/en/latest/specifications/direct-url-data-structure/)

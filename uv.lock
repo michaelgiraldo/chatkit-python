@@ -760,7 +760,7 @@ wheels = [
 
 [[package]]
 name = "openai-chatkit"
-version = "1.6.5+turnspan.3"
+version = "1.6.5+turnspan.6"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

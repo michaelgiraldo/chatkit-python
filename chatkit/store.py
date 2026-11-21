@@ -2,6 +2,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Literal, TypedDict
 
+from .errors import UnsupportedOperationError
 from .models import (
     Attachment,
     ClientToolCallItem,
@@ -13,6 +14,7 @@ from .models import (
     UserMessageItem,
 )
 from .requests import AttachmentCreateParams
+from .turns import ClientToolInvocation, TurnOutcome, TurnState
 
 StoreItemType = Literal[
     "thread",
@@ -52,7 +54,12 @@ class ConflictError(Exception):
     """The stored state no longer permits the requested operation."""
 
 
+class TurnSupersededError(ConflictError):
+    """Another turn owns the thread, or the thread no longer exists."""
+
+
 type PendingTurnItem = ClientToolCallItem | StructuredInputItem
+type ClientToolCallbackStatus = Literal["pending", "completed", "cancelled"]
 
 
 class ThreadPatch(TypedDict, total=False):
@@ -85,8 +92,6 @@ def validate_pending_claim(
     current: ThreadItem,
     expected: PendingTurnItem,
     replacement: PendingTurnItem,
-    *,
-    latest_item_id: str | None = None,
 ) -> None:
     """Validate a claim against the current state inside a store transaction."""
     if (
@@ -101,8 +106,33 @@ def validate_pending_claim(
         raise ConflictError(
             "The thread item is no longer pending in the expected state"
         )
-    if isinstance(expected, ClientToolCallItem) and expected.id != latest_item_id:
-        raise ConflictError("The client tool call is no longer the latest thread item")
+    if isinstance(expected, ClientToolCallItem) and (
+        not isinstance(replacement, ClientToolCallItem)
+        or replacement.status != "completed"
+        or replacement.name != expected.name
+        or replacement.arguments != expected.arguments
+    ):
+        raise ValueError("A client tool claim may only complete the item with output")
+
+
+def validate_client_tool_registration(
+    thread_id: str, item: ClientToolCallItem, invocation: ClientToolInvocation
+) -> None:
+    """Validate correspondence before saving a public item and private invocation."""
+    if (
+        item.thread_id != thread_id
+        or invocation.thread_id != thread_id
+        or invocation.item_id != item.id
+    ):
+        raise ValueError(
+            "The client tool item and invocation must identify the same thread item"
+        )
+    if (
+        item.status != "pending"
+        or item.output is not None
+        or invocation.continuation_turn_id is not None
+    ):
+        raise ValueError("A new client tool call must be pending")
 
 
 class AttachmentStore[TContext = Any](ABC):
@@ -153,13 +183,67 @@ class ThreadStore[TContext = Any](ABC):
         pass
 
     @abstractmethod
+    async def begin_turn(
+        self,
+        thread_id: str,
+        turn_id: str,
+        context: TContext,
+        *,
+        message: UserMessageItem | None = None,
+        create_thread: ThreadMetadata | None = None,
+    ) -> None:
+        """Atomically accept a new current turn and cancel pending callbacks.
+
+        Save the optional new thread and user message in the same transaction.
+        Preserve the previous turn's disposition and reject reused turn IDs.
+        """
+        pass
+
+    @abstractmethod
+    async def start_turn(self, thread_id: str, turn_id: str, context: TContext) -> None:
+        """Atomically move the current accepted turn to running, once."""
+        pass
+
+    @abstractmethod
+    async def require_current_turn(
+        self, thread_id: str, turn_id: str, context: TContext
+    ) -> None:
+        """Raise `ConflictError` when this turn no longer owns the thread."""
+        pass
+
+    @abstractmethod
+    async def load_turn_state(
+        self, thread_id: str, turn_id: str, context: TContext
+    ) -> TurnState:
+        """Read a scoped turn's state, including after ownership changes."""
+        pass
+
+    @abstractmethod
+    async def finish_turn(
+        self, thread_id: str, turn_id: str, outcome: TurnOutcome, context: TContext
+    ) -> TurnState:
+        """Finish the current running turn and return its recorded disposition.
+
+        Cancellation before start records abandonment. Previously finalized and
+        superseded turns keep their state even when their producers finish later.
+        A current turn that stops without waiting cancels its pending callback.
+        """
+        pass
+
+    @abstractmethod
     async def patch_thread(
-        self, thread_id: str, patch: ThreadPatch, context: TContext
+        self,
+        thread_id: str,
+        patch: ThreadPatch,
+        context: TContext,
+        *,
+        turn_id: str | None = None,
     ) -> ThreadMetadata:
         """Atomically apply a patch to the latest stored thread and return the result.
 
         Omitted display fields are left alone. Delete metadata keys before applying
         `metadata_set`. Raise `NotFoundError` for an unavailable thread.
+        When `turn_id` is given, verify ownership within the write transaction.
         """
         pass
 
@@ -179,8 +263,10 @@ class ThreadStore[TContext = Any](ABC):
         Use a stable order for items with the same timestamp. Accept `"asc"`
         for oldest first and `"desc"` for newest first. If more items exist,
         set `has_more=True` and return a cursor in `Page.after` for the next page.
-        When `include_hidden=False`, exclude `HIDDEN_ITEM_TYPES` before applying
-        the cursor and limit. Derive pagination metadata from the visible rows.
+        When `include_hidden=False`, exclude `HIDDEN_ITEM_TYPES` and pending
+        client tool items whose callback is no longer pending or was never
+        registered before applying the cursor and limit. Derive pagination
+        metadata from the visible rows.
         """
         pass
 
@@ -202,17 +288,95 @@ class ThreadStore[TContext = Any](ABC):
 
     @abstractmethod
     async def add_thread_item(
-        self, thread_id: str, item: ThreadItem, context: TContext
+        self,
+        thread_id: str,
+        item: ThreadItem,
+        context: TContext,
+        *,
+        turn_id: str | None = None,
     ) -> None:
-        """Persist a newly created thread item."""
+        """Persist a newly created thread item.
+
+        Use `register_client_tool_call` to persist client tool items. Reject
+        reused callback IDs, including IDs whose items were removed, with
+        `ConflictError`. A new user message atomically cancels a pending callback.
+        Verify `turn_id` ownership within the insertion transaction.
+        """
         pass
 
     @abstractmethod
     async def save_item(
-        self, thread_id: str, item: ThreadItem, context: TContext
+        self,
+        thread_id: str,
+        item: ThreadItem,
+        context: TContext,
+        *,
+        turn_id: str | None = None,
     ) -> None:
-        """Upsert a thread item by id."""
+        """Upsert a thread item by id.
+
+        For client tools, use `register_client_tool_call` for registration and
+        `claim_pending_item` for completion. Reject direct writes to those
+        items and their reserved IDs. A first insertion of a user message
+        has the same cancellation semantics as `add_thread_item`.
+        When `turn_id` is given, verify ownership within the write transaction.
+        """
         pass
+
+    async def register_client_tool_call(
+        self,
+        thread_id: str,
+        item: ClientToolCallItem,
+        invocation: ClientToolInvocation,
+        context: TContext,
+    ) -> None:
+        """Atomically save a browser item and its matching private invocation.
+
+        Require the invocation's turn to be current and running. The thread can
+        have one pending callback. Reserved callback IDs remain reserved after
+        completion, cancellation, and display item deletion.
+        """
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
+
+    async def load_client_tool_invocation(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> ClientToolInvocation:
+        """Read a scoped private invocation and its continuation turn, if claimed.
+
+        Raise `NotFoundError` for an unavailable or unregistered callback.
+        """
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
+
+    async def load_client_tool_status(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> ClientToolCallbackStatus:
+        """Read a scoped callback's lifecycle, including after item deletion.
+
+        Raise `NotFoundError` for an unavailable or unregistered callback.
+        """
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
+
+    async def cancel_client_tool_call(
+        self,
+        thread_id: str,
+        item_id: str,
+        context: TContext,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        """Atomically cancel one pending callback. Closed or unknown IDs have no effect.
+
+        When `turn_id` is given, verify ownership within the write transaction.
+        """
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
 
     @abstractmethod
     async def claim_pending_item(
@@ -221,26 +385,39 @@ class ThreadStore[TContext = Any](ABC):
         expected: PendingTurnItem,
         replacement: PendingTurnItem,
         context: TContext,
-    ) -> None:
+        *,
+        next_turn_id: str | None = None,
+    ) -> ClientToolInvocation | None:
         """Atomically replace a pending item if its stored value matches `expected`.
 
-        The replacement must complete the same thread item. A client tool call must
-        still be the last item in the thread's stable order. Raise `ConflictError`
-        on stale or completed state and `NotFoundError` for an unavailable item or
-        thread. Commit the claim before starting inference.
+        The replacement must complete the same thread item. A client tool claim
+        requires `next_turn_id` and a registered pending callback with a current
+        owner. Save its result and the accepted continuation turn in the same
+        transaction and return the private invocation linked to that turn.
+        Structured input claims return `None`.
+
+        Raise `ConflictError` on stale or closed state and `NotFoundError` for
+        an unavailable item or thread. Commit the claim before starting inference.
         """
         pass
 
     @abstractmethod
     async def truncate_after(
-        self, thread_id: str, item_id: str, context: TContext
+        self,
+        thread_id: str,
+        item_id: str,
+        context: TContext,
+        *,
+        next_turn_id: str | None = None,
     ) -> UserMessageItem:
         """Atomically truncate the active history after a stored user message.
 
         Use the stable order of `load_thread_items` and return the retained
         user message. Later items must disappear from pagination and direct
-        reads before returning. A store can commit a visibility boundary and
-        reclaim the inactive records separately.
+        reads before returning. Atomically cancel any pending client tool
+        callback and retain its status. A store can commit a visibility
+        boundary and reclaim the inactive records separately.
+        When `next_turn_id` is provided, accept that turn in the same transaction.
 
         Raise `NotFoundError` for an unavailable target and `ConflictError`
         when the target is not a user message.
@@ -256,14 +433,22 @@ class ThreadStore[TContext = Any](ABC):
 
     @abstractmethod
     async def delete_thread(self, thread_id: str, context: TContext) -> None:
-        """Delete a thread and its items."""
+        """Delete a thread and its associated item, callback, and turn records."""
         pass
 
     @abstractmethod
     async def delete_thread_item(
-        self, thread_id: str, item_id: str, context: TContext
+        self,
+        thread_id: str,
+        item_id: str,
+        context: TContext,
+        *,
+        turn_id: str | None = None,
     ) -> None:
-        """Delete a thread item by id."""
+        """Delete an item and atomically cancel its pending callback.
+
+        When `turn_id` is given, verify ownership within the write transaction.
+        """
         pass
 
 

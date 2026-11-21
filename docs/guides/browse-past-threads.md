@@ -33,7 +33,7 @@ Threads start untitled. Give them short, descriptive titles so the history list 
 
 ### Set a title directly
 
-Call `update_thread` in your responder and yield the returned event.
+Call `update_thread` with the active turn ID and yield the returned event.
 
 ```python
 from chatkit.server import ChatKitServer
@@ -45,7 +45,10 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
         ...
         if not turn.thread.title:
             yield await self.update_thread(
-                turn.thread.id, {"title": "Order #1234"}, turn.context
+                turn.thread.id,
+                {"title": "Order #1234"},
+                turn.context,
+                turn_id=turn.id,
             )
 ```
 
@@ -77,7 +80,7 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
             )
             title = await generate_short_title(list(reversed(items.data)))
             yield await self.update_thread(
-                turn.thread.id, {"title": title}, turn.context
+                turn.thread.id, {"title": title}, turn.context, turn_id=turn.id
             )
 ```
 
@@ -117,9 +120,10 @@ await store.patch_thread(
 await store.patch_thread(thread.id, {"status": ActiveStatus()}, context)
 ```
 
-To update the connected client from `respond` or `action`, yield the event
-returned by `await self.update_thread(thread.id, {"status": status}, context)`.
-Calling the store directly only saves the status.
+To update the connected client, yield the event returned by
+`await self.update_thread(thread.id, {"status": status}, context, turn_id=turn_id)`.
+Use `turn.id` in `respond` or the supplied `turn_id` in a streaming
+`action`. Calling the store directly only saves the status.
 
 You can also update the thread status from a custom client-facing endpoint that updates the store directly (outside of the ChatKit server request flow). If the user is currently viewing the thread, have the client call `chatkit.fetchUpdates()` after the status is persisted so the UI picks up the latest thread state.
 

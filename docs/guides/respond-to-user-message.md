@@ -26,13 +26,12 @@ from dataclasses import dataclass
 @dataclass
 class MyRequestContext:
     user_id: str
-    staged_response_id: str | None = None
 ```
 
 ### Implement your `ChatKitServer`
 
 Subclass `ChatKitServer` and implement `respond(turn)`. The turn includes
-`turn.thread`, `turn.context`, and a typed trigger in `turn.input`.
+`turn.id`, `turn.thread`, `turn.context`, and a typed trigger in `turn.input`.
 Yield the events that make up the response.
 
 ```python
@@ -79,7 +78,7 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
 | Input | Payload |
 | --- | --- |
 | `UserMessageTurn` | The saved user `.message` on a new or existing thread. |
-| `ClientToolTurn` | The saved `.tool_call` with the client's result. |
+| `ClientToolTurn` | The saved display item in `.tool_call` and its private `.invocation`. |
 | `StructuredInputTurn` | The answered or skipped structured input `.item`. |
 | `RetryTurn` | The existing user `.message` that starts the retry. |
 
@@ -102,7 +101,7 @@ reports no turn outcome.
 
 Use `on_turn_finished(turn, outcome)` for app work that depends on the
 result. Once a turn starts, ChatKit calls the hook after server persistence
-or cancellation cleanup. The outcome reports one of four states.
+or cancellation cleanup.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -110,18 +109,24 @@ or cancellation cleanup. The outcome reports one of four states.
 | `WAITING` | The response left a pending client tool call or structured input. |
 | `CANCELLED` | The response was interrupted. |
 | `FAILED` | An error stopped the response or was sent in the stream. |
+| `SUPERSEDED` | A newer request took ownership of the thread before this response finished. |
 
 Stage app data in the request context and commit it on the outcome your app
 expects. See the examples for [response IDs](#using-previous_response_id-openai-responses-api-only)
 and [structured results](#save-structured-tool-results-after-a-turn).
 [Turn types](../api/chatkit/turns.md)
 
-An HTTP request can end before the turn starts. Attach request-scoped
-resources, such as a lease, to the response lifetime and release them when
-the response closes. Track delivery to the browser separately from turn
-completion. ChatKit logs exceptions from `on_turn_finished`. If a write
-failure needs to reach the browser, make that write in `respond` before
-completing the turn.
+Use `store.load_turn_state(thread_id, turn_id, context)` to inspect the
+persisted milestones. A saved trigger or callback first records `ACCEPTED`.
+The server records `RUNNING` when it starts processing the stream. Closing
+it before that transition records `ABANDONED`, and the hook runs only for
+started turns. The browser can disconnect after a message or callback is
+saved, so delivery to the browser has its own evidence. Use a fresh user
+turn to recover an abandoned callback. A crash can leave the last saved
+milestone in storage. Your app owns any recovery of external side effects.
+
+Attach request-scoped resources to the response lifetime and release them
+when it closes. ChatKit logs exceptions from `on_turn_finished`.
 
 ### Wire ChatKit to your web framework
 
@@ -158,6 +163,8 @@ For custom buffering or send deadlines, pass
 the typed request before calling the factory with a `StreamingResult`,
 including committing any pending-item claim or retry truncation.
 Immediate results and HTTP errors use the adapter's regular responses.
+For logging, read `result.thread_id` and `result.turn_id`. Both are
+available before the first event of an accepted turn.
 
 Use `ChatKitStreamingResponse(result)` for the SDK's framing and disconnect
 handling. If you supply your own streaming response, it owns the result.
@@ -183,13 +190,21 @@ result = await server.process(parse_request(await request.body()), context)
 Build authorization fields in the context from your authenticated application
 session. Treat metadata in the request body as client input.
 With FastAPI, pass the server, the HTTP request, and your context to
-`chatkit.fastapi.process_request`. For other transports, use the
-[protocol helpers](../api/chatkit/protocol.md) to parse requests and encode the
-response or stream.
+`chatkit.fastapi.process_request`. For custom transports, use `parse_request`
+on inbound JSON and `encode_message` or `encode_sse` for outbound JSON or
+SSE. The encoders wrap pending browser tool arguments as `{item_id, input}`.
+Application events, models, and storage keep the browser arguments and
+output unwrapped. A custom encoder must preserve the wire format in both streamed
+events and saved items loaded by the browser. The inbound operation supplies
+the browser's `{item_id, output}` inside `params.result`.
+`ClientToolCallItem` and `ThreadStreamEvent` contain browser data only.
+`ClientToolRequest` and `ClientToolInvocation` are server-side types.
+[Protocol helpers](../api/chatkit/protocol.md) ·
+[Browser callback contract](update-client-during-response.md#register-the-client-tool-in-chatkitjs)
 
 ## Implement your ChatKit data store
 
-Implement `ThreadStore` to persist threads, messages, tool calls, and widgets.
+Implement `ThreadStore` to persist threads, turn state, and transcript items.
 The [in-memory example](../examples/in_memory_thread_store.py) implements all
 thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `truncate_after` as short atomic operations in your database. Use
@@ -197,6 +212,20 @@ thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `ChatKitServer.update_thread` when a connected client should see an edit.
 For `load_thread_items(..., include_hidden=False)`, filter the model-only items
 before computing the page and its cursor.
+
+Keep one current turn ID per authenticated thread. `begin_turn` saves the
+trigger, supersedes the current turn, and cancels any pending callback in
+one transaction. A retry and a successful pending-item claim establish
+their new owner in the same transaction as the history change. Validate
+current ownership inside each responder write transaction. A read before
+the write is insufficient because another request can take ownership
+between the two operations. Keep network and model calls outside these
+transactions. Yield responder events through `ChatKitServer` for fenced
+SDK writes, and pass `turn.id` to any app-managed store writes that belong
+to that response. While forwarding transient updates, the server checks
+ownership at most once per 250 ms of emitted updates, with fresh checks
+at durable event boundaries. A transient frame already in flight can
+still reach the browser when a newer turn takes ownership.
 
 For a retry, `truncate_after` returns the retained `UserMessageItem`. Before
 returning, atomically make later items disappear from pagination and direct
@@ -209,10 +238,55 @@ To support uploads, supply an
 `AttachmentMetadataStore` for records and an `AttachmentStore` for file
 operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-strategy)
 
+### Implement the client tool lifecycle
+
+Keep the browser's `ClientToolCallItem` in the transcript and the
+`ClientToolInvocation` in private storage, keyed by the same authenticated
+owner, thread, and item ID. The private record holds the original turn ID,
+provider call ID, and any native model data. Apply your application's
+model-history access and retention rules to that record.
+
+- In `register_client_tool_call`, verify the originating turn is current
+  and running, then insert both records and the pending status in one
+  transaction. Reject another pending call in the same thread, reuse of
+  a callback ID, and attempts to write a tool item through ordinary
+  transcript methods.
+- In `claim_pending_item`, compare the exact saved item and pending status,
+  and verify the originating turn still owns the thread. In that single
+  transaction save the completed display item and lifecycle status,
+  accept the next turn, and link it as `continuation_turn_id`. Return the
+  claimed invocation to the server. A structured-input claim returns
+  `None`. Use `validate_pending_claim` for the display-item comparison.
+- Expose `load_client_tool_status` and `load_client_tool_invocation` only
+  through the authorized store. From the invocation, use its
+  `continuation_turn_id` with `load_turn_state` to tell whether the
+  accepted callback's responder ran.
+- In `truncate_after`, cancel the pending call as part of the retry.
+  In `delete_thread_item`, cancel the pending call if its item is deleted.
+  Keep lifecycle records after retry or item deletion so
+  `load_client_tool_status` can still report their state. In
+  `delete_thread`, remove those records with the rest of the thread.
+- In browser-visible pagination (`include_hidden=False`), exclude pending
+  tool items with cancelled or unregistered callbacks before calculating
+  the page and cursor.
+- Make `cancel_client_tool_call` safe to repeat. It cancels only the
+  specified pending ID. If the call is already completed or cancelled, or a
+  different ID is pending, keep that state unchanged. ChatKit uses this
+  during cleanup when a stream fails to finish its browser-tool handoff.
+  Finishing a current turn without a handoff also closes its pending
+  callback.
+
+Store implementations can use the [in-memory](../examples/in_memory_thread_store.py)
+and [SQLite](../examples/sqlite_thread_store.py) examples as references.
+Test concurrent claims and verify that cancellation and completion remain
+effective after reopening durable storage. Treat the returned tool output
+as client input before using it in any application decision.
+
 ### Use the file-backed SQLite example
 
-The [SQLite example](../examples/sqlite_thread_store.py) implements all 12
-`ThreadStore` methods. Save it with your app or import it from this checkout.
+The [SQLite example](../examples/sqlite_thread_store.py) implements
+`ThreadStore` with the client tool lifecycle. Save it with your app or import
+it from this checkout.
 It scopes thread and item queries by `context.user_id`, so supply this value
 from your authenticated application session. The database survives restarts.
 Use a new SQLite file for the example.
@@ -262,10 +336,11 @@ pages and retries that cross the boundary between legacy and newer items.
 
 ### Check your app's store
 
-Run `check_thread_store` in your app's test suite with a disposable database
-and contexts for two distinct test users. The check writes and deletes a
-synthetic thread. It verifies scoped reads, tied-timestamp pagination,
-concurrent patches, form and tool claims, and retry truncation.
+Run `check_thread_store` against a store that supports browser tools using
+a disposable database and contexts for two distinct test users. The check
+writes and deletes a synthetic thread. It verifies scoped reads,
+tied-timestamp pagination, concurrent patches, form claims, callback
+completion and cancellation, and retry truncation.
 
 ```python
 import pytest
@@ -306,7 +381,12 @@ Before you call your model, decide what conversation context you want the model 
 
 #### Load thread history (recommended default)
 
-Fetch recent items so the model sees the conversation state before you build the next turn:
+Fetch recent items to give the model descriptive context from the thread.
+The default converter omits client tool items. Native Responses replay
+requires the provider's original items, including reasoning and assistant
+phase when supplied. For an accepted browser result, use the saved
+[client tool continuation](update-client-during-response.md#build-the-next-model-request).
+[OpenAI reasoning guidance](https://developers.openai.com/api/docs/guides/reasoning#keeping-reasoning-items-in-context)
 
 ```python
 items_page = await self.store.load_thread_items(
@@ -337,6 +417,7 @@ agent_context = AgentContext(
     thread=turn.thread,
     store=self.store,
     request_context=turn.context,
+    resume_from=None,
 )
 ```
 
@@ -348,13 +429,17 @@ models and tools your app offers.
 
 The OpenAI Responses API can retrieve model-visible history from a stored
 response. If your app permits provider-side storage, pass a saved response ID
-as `previous_response_id` to `Runner.run_streamed()` on the next turn. For
-locally managed history or ChatKit-only items such as widgets, use the
-[thread history approach above](#load-thread-history-recommended-default).
+as `previous_response_id` to `Runner.run_streamed()` on the next turn. You
+can build descriptive context for ChatKit-only items such as widgets using
+the [thread history approach above](#load-thread-history-recommended-default).
+For local native replay, preserve the original model input and output items
+in order. [OpenAI conversation state](https://developers.openai.com/api/docs/guides/conversation-state)
 
-This responder enables provider-side storage for the run. ChatKit saves the
-incoming user message before calling `respond`, so the history fallback already
-includes it.
+This responder handles user messages and retries. It enables provider-side
+storage for the run. ChatKit saves the incoming user message before calling
+`respond`, so the descriptive history fallback already includes it. If your
+app also uses browser tools, handle `ClientToolTurn` with the saved
+[client tool continuation](update-client-during-response.md#build-the-next-model-request).
 
 ```python
 from contextlib import aclosing
@@ -363,18 +448,22 @@ from agents import ModelSettings, RunConfig, Runner
 
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
-from chatkit.turns import Turn, TurnOutcome, UserMessageTurn
+from chatkit.turns import ResponderEvent, Turn, UserMessageTurn
 
 
 class MyChatKitServer(ChatKitServer[MyRequestContext]):
     async def respond(
         self, turn: Turn[MyRequestContext]
-    ) -> AsyncIterator[ThreadStreamEvent]:
-        thread, context = turn.thread, turn.context
+    ) -> AsyncIterator[ResponderEvent]:
+        context = turn.context
+        thread = await self.store.load_thread(turn.thread.id, context)
         saved_id = thread.metadata.get("last_response_id")
         if saved_id is not None:
             await self.store.patch_thread(
-                thread.id, {"metadata_delete": ("last_response_id",)}, context
+                thread.id,
+                {"metadata_delete": ("last_response_id",)},
+                context,
+                turn_id=turn.id,
             )
 
         previous_response_id = None
@@ -392,7 +481,7 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
             input_items = await simple_to_agent_input(list(reversed(items_page.data)))
 
         agent_context = AgentContext(
-            thread=thread, store=self.store, request_context=context
+            thread=thread, store=self.store, request_context=context, resume_from=None
         )
         result = Runner.run_streamed(
             assistant_agent,
@@ -405,28 +494,76 @@ class MyChatKitServer(ChatKitServer[MyRequestContext]):
         async with aclosing(stream_agent_response(agent_context, result)) as events:
             async for event in events:
                 yield event
-        context.staged_response_id = result.last_response_id
-
-    async def on_turn_finished(
-        self, turn: Turn[MyRequestContext], outcome: TurnOutcome
-    ) -> None:
-        if outcome is TurnOutcome.COMPLETED and turn.context.staged_response_id:
+        if result.is_complete and not result.interruptions and result.last_response_id:
             await self.store.patch_thread(
-                turn.thread.id,
-                {"metadata_set": {"last_response_id": turn.context.staged_response_id}},
-                turn.context,
+                thread.id,
+                {"metadata_set": {"last_response_id": result.last_response_id}},
+                context,
+                turn_id=turn.id,
             )
 ```
 
 `result.last_response_id` becomes available as the runner receives model
-responses. Save it only after the stream finishes successfully. If the provider
-reports that the saved response is no longer retrievable, a fresh attempt can
-rebuild its input from thread history. Only retry automatically if nothing has
-been sent to the client and no tools have taken action.
+responses. Save it after the model stream finishes, while your responder
+still owns the turn. The fenced patch prevents an older responder from
+overwriting a newer turn's checkpoint. If the provider
+reports that the saved response is no longer retrievable, a fresh user-message
+run can use descriptive thread context or the original input and output
+history available to your app. Resuming a browser tool requires its matching
+continuation. Only retry automatically if nothing has been sent to the client
+and no tools have taken action.
+
+### Prepare workflow progress
+
+Choose the workflow state before `Runner.run_streamed` schedules the agent
+run. For a fresh run, pass `resume_from=None` when building the context, as
+in the examples above. Tools can still start, update, and finish progress
+during that run. The stream helper does no history lookup for workflow
+discovery.
+
+To continue saved progress, use your server's continuation state to verify
+that the operation can still resume and obtain its exact workflow item ID.
+The following example assumes your application already authorized and
+verified that association. It loads the item through the thread store
+before starting the agent.
+
+```python
+from agents import Runner
+
+from chatkit.agents import AgentContext
+from chatkit.errors import InvalidOperationError
+from chatkit.models import WorkflowItem
+
+saved_workflow = await self.store.load_item(
+    turn.thread.id, workflow_item_id, context=turn.context
+)
+if not isinstance(saved_workflow, WorkflowItem):
+    raise InvalidOperationError("The saved item is not a workflow.")
+
+agent_context = AgentContext(
+    thread=turn.thread,
+    store=self.store,
+    request_context=turn.context,
+    resume_from=saved_workflow,
+)
+result = Runner.run_streamed(assistant_agent, input_items, context=agent_context)
+```
+
+You can also pass a verified `WorkflowItem` your server has already loaded.
+Keep the association in durable application storage if it needs to survive a
+restart. Handle missing or stale continuations before starting the agent.
+When the run updates the resumed workflow, the client receives changes under
+the original item ID.
+
+This choice controls displayed workflow progress. Prepare model input
+independently using the history or provider continuation approach you chose.
 
 ### Run inference and stream events
 
-Run your agent and stream events back to the client. `stream_agent_response` converts an Agents run into ChatKit events; you can also yield events manually.
+Run your agent and yield its `ResponderEvent` stream to ChatKitServer.
+`stream_agent_response` yields both browser events and persistence requests
+for open workflow progress. The server saves progress under the current
+turn ID.
 
 ```python
 from contextlib import aclosing
@@ -537,20 +674,20 @@ from contextlib import aclosing
 
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import stream_agent_response
-from chatkit.turns import RetryTurn, Turn, TurnOutcome, UserMessageTurn
+from chatkit.turns import ResponderEvent, RetryTurn, Turn, TurnOutcome, UserMessageTurn
 
 
 class FeedbackChatKitServer(ChatKitServer[FeedbackRequestContext]):
     async def respond(
         self, turn: Turn[FeedbackRequestContext]
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    ) -> AsyncIterator[ResponderEvent]:
         thread, context = turn.thread, turn.context
         items_page = await self.store.load_thread_items(
             thread.id, after=None, limit=20, order="desc", context=context
         )
         input_items = await simple_to_agent_input(list(reversed(items_page.data)))
         agent_context = FeedbackContext(
-            thread=thread, store=self.store, request_context=context
+            thread=thread, store=self.store, request_context=context, resume_from=None
         )
         result = Runner.run_streamed(feedback_agent, input_items, context=agent_context)
 

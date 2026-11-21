@@ -1,7 +1,8 @@
 # Quick start
 
-Run the self-hosted ChatKit demo from this checkout. It uses sample replies and
-widgets and runs without an API key.
+Run the self-hosted ChatKit demo from a checkout of this fork. It uses sample
+replies and widgets and runs without a model API key. To add the SDK to an
+application, follow [Install Turnspan in an app](index.md#install-turnspan-in-an-app).
 
 ## Run your ChatKit server
 
@@ -41,7 +42,7 @@ a `Turn` with the thread, trigger, and request context. The endpoint calls
 `chatkit.fastapi.process_request(server, request, context={})`. The adapter
 closes streams on disconnect and returns JSON errors for invalid requests,
 missing resources, and conflicting thread state.
-[FastAPI adapter reference](api/chatkit/fastapi.md)
+[Server integration guide](guides/respond-to-user-message.md)
 
 ## Store chat data
 
@@ -93,9 +94,8 @@ from agents import Agent, Runner
 
 from chatkit.agent_input import simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
-from chatkit.events import ThreadStreamEvent
 from chatkit.server import ChatKitServer
-from chatkit.turns import Turn
+from chatkit.turns import ResponderEvent, Turn
 
 assistant = Agent(
     name="assistant",
@@ -107,7 +107,7 @@ assistant = Agent(
 class MyChatKitServer(ChatKitServer[dict[str, object]]):
     async def respond(
         self, turn: Turn[dict[str, object]]
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    ) -> AsyncIterator[ResponderEvent]:
         # Read the newest page and pass it to the model in chronological order.
         items_page = await self.store.load_thread_items(
             turn.thread.id,
@@ -119,7 +119,10 @@ class MyChatKitServer(ChatKitServer[dict[str, object]]):
         input_items = await simple_to_agent_input(list(reversed(items_page.data)))
 
         agent_context = AgentContext(
-            thread=turn.thread, store=self.store, request_context=turn.context
+            thread=turn.thread,
+            store=self.store,
+            request_context=turn.context,
+            resume_from=None,
         )
         result = Runner.run_streamed(assistant, input_items, context=agent_context)
         async with aclosing(stream_agent_response(agent_context, result)) as events:

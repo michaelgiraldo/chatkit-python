@@ -196,7 +196,9 @@ Example widget definition with a client action handler:
 
 ### Handle actions on the server
 
-Implement `ChatKitServer.action` to process incoming actions. The `sender` argument is the widget item that triggered the action (if available).
+Implement `ChatKitServer.action` to process incoming actions. The `sender`
+argument is the triggering widget, when available. Use the supplied
+`turn_id` for direct store writes from the action.
 
 ```python
 from contextlib import aclosing
@@ -209,7 +211,7 @@ from chatkit.models import HiddenContextItem
 
 
 class MyChatKitServer(ChatKitServer[RequestContext]):
-    async def action(self, thread, action, sender, context):
+    async def action(self, thread, action, sender, context, *, turn_id):
         if action.type == "send_message":
             payload = action.payload
             if not isinstance(payload, dict) or not isinstance(
@@ -225,9 +227,9 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
                 created_at=datetime.now(),
                 content=f"User sent message: {text}",
             )
-            # HiddenContextItems need to be manually saved because ChatKitServer
-            # only auto-saves streamed items, and HiddenContextItem should never be streamed to the client.
-            await self.store.add_thread_item(thread.id, hidden, context)
+            await self.store.add_thread_item(
+                thread.id, hidden, context, turn_id=turn_id
+            )
 
             # Stream an updated widget back to the client.
             updated_widget = build_message_widget(user_name="Support", message=text)
@@ -353,6 +355,8 @@ class MyChatKitServer(ChatKitServer[RequestContext]):
         action: Action[str, Any],
         sender: WidgetItem | None,
         context: RequestContext,
+        *,
+        turn_id: str,
     ) -> AsyncIterator[ThreadStreamEvent]:
         if action.type != "update_todo":
             return

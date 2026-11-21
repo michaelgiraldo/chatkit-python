@@ -1,0 +1,85 @@
+name: Verify Turnspan release
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA to verify
+        required: true
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    name: Verify the release commit
+    if: github.repository == 'michaelgiraldo/chatkit-python' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Verify main ancestry and CI
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Use the full lowercase 40-character Git commit SHA.' >&2
+            exit 1
+          fi
+
+          merge_base="$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...main" \
+            --jq '.merge_base_commit.sha')"
+          if [[ "$merge_base" != "$RELEASE_SHA" ]]; then
+            echo 'The release commit must be reachable from main.' >&2
+            exit 1
+          fi
+
+          ci_url="$(
+            gh api --paginate --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f branch=main -f head_sha="$RELEASE_SHA" -F per_page=100 \
+              --jq '.workflow_runs[]' |
+              jq -rs --arg sha "$RELEASE_SHA" '
+                map(select(
+                  .head_sha == $sha and .head_branch == "main" and
+                  (.event == "push" or .event == "workflow_dispatch")
+                ))
+                | max_by([.created_at, .id])
+                | select(.status == "completed" and .conclusion == "success")
+                | .html_url
+              '
+          )"
+          if [[ -z "$ci_url" ]]; then
+            echo 'The latest eligible CI run on main must have passed for this exact commit.' >&2
+            exit 1
+          fi
+          printf 'sha=%s\nci_url=%s\n' "$RELEASE_SHA" "$ci_url" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the verified commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.ci.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Check consumer install and build release notes
+        env:
+          RELEASE_SHA: ${{ steps.ci.outputs.sha }}
+          CI_URL: ${{ steps.ci.outputs.ci_url }}
+        run: |
+          notes="$RUNNER_TEMP/turnspan-release-notes.md"
+          uv run --no-project --python 3.14 python scripts/check-release.py \
+            --sha "$RELEASE_SHA" --github-archive --ci-url "$CI_URL" > "$notes"
+          {
+            printf '## Release notes\n\n%s\n' '````markdown'
+            cat "$notes"
+            printf '%s\n' '````'
+          } >> "$GITHUB_STEP_SUMMARY"

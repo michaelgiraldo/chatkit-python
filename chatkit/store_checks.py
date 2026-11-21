@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from .models import (
     ClientToolCallItem,
@@ -16,6 +17,7 @@ from .models import (
     UserMessageTextContent,
 )
 from .store import ConflictError, NotFoundError, PendingTurnItem, ThreadStore
+from .turns import ClientToolInvocation, TurnOutcome, TurnState
 
 
 def _require(condition: bool, message: str) -> None:
@@ -55,7 +57,7 @@ async def check_thread_store[TContext](
     other_context: TContext,
     peer: ThreadStore[TContext] | None = None,
 ) -> None:
-    """Check scoped reads, pagination, patches, claims, and retry truncation.
+    """Check scoped reads, pagination, turn ownership, claims, and retries.
 
     Run against a disposable database with contexts for two distinct users.
     Supply an independent store instance sharing that database to check
@@ -96,6 +98,31 @@ async def check_thread_store[TContext](
             "Concurrent field patches must preserve unrelated state",
         )
 
+        older_turn, newer_turn = str(uuid4()), str(uuid4())
+        await store.begin_turn(thread.id, older_turn, context)
+        await store.start_turn(thread.id, older_turn, context)
+        await peer.begin_turn(thread.id, newer_turn, context)
+        try:
+            await store.patch_thread(
+                thread.id, {"title": "Stale title"}, context, turn_id=older_turn
+            )
+        except ConflictError:
+            pass
+        else:
+            raise AssertionError("A superseded turn can still patch the thread")
+        _require(
+            await peer.load_turn_state(thread.id, older_turn, context)
+            == TurnState.SUPERSEDED,
+            "The older turn must retain its superseded state",
+        )
+        _require(
+            await store.finish_turn(
+                thread.id, newer_turn, TurnOutcome.CANCELLED, context
+            )
+            == TurnState.ABANDONED,
+            "Closing an accepted turn must record that it never started",
+        )
+
         item_ids = set()
         for text in ("First message", "Second message", "Third message"):
             message = UserMessageItem(
@@ -126,10 +153,23 @@ async def check_thread_store[TContext](
             id=store.generate_item_id("tool_call", thread, context),
             thread_id=thread.id,
             created_at=created_at + timedelta(seconds=2),
-            call_id="call_store_check",
             name="store_check",
             arguments={},
         )
+
+        async def register_tool(item: ClientToolCallItem) -> ClientToolInvocation:
+            owner = str(uuid4())
+            await store.begin_turn(thread.id, owner, context)
+            await store.start_turn(thread.id, owner, context)
+            invocation = ClientToolInvocation(
+                item_id=item.id,
+                thread_id=thread.id,
+                turn_id=owner,
+                call_id="call_store_check",
+            )
+            await store.register_client_tool_call(thread.id, item, invocation, context)
+            return invocation
+
         claims: tuple[tuple[PendingTurnItem, PendingTurnItem, PendingTurnItem], ...] = (
             (
                 form,
@@ -142,23 +182,79 @@ async def check_thread_store[TContext](
                 tool.model_copy(update={"status": "completed", "output": "two"}),
             ),
         )
+        hidden = SDKHiddenContextItem(
+            id=store.generate_item_id("sdk_hidden_context", thread, context),
+            thread_id=thread.id,
+            created_at=created_at + timedelta(seconds=3),
+            content="Internal store check",
+        )
         for pending, first, second in claims:
-            await store.add_thread_item(thread.id, pending, context)
+            invocation = None
+            if isinstance(pending, ClientToolCallItem):
+                invocation = await register_tool(pending)
+                _require(
+                    await peer.load_client_tool_status(thread.id, pending.id, context)
+                    == "pending",
+                    "A registered callback must be pending across store instances",
+                )
+                _require(
+                    await peer.load_client_tool_invocation(
+                        thread.id, pending.id, context
+                    )
+                    == invocation,
+                    "The separate invocation must be readable across store instances",
+                )
+                await peer.add_thread_item(thread.id, hidden, context)
+            else:
+                await store.add_thread_item(thread.id, pending, context)
+            claim_ids = str(uuid4()), str(uuid4())
             outcomes = await asyncio.gather(
-                store.claim_pending_item(thread.id, pending, first, context),
-                peer.claim_pending_item(thread.id, pending, second, context),
+                store.claim_pending_item(
+                    thread.id, pending, first, context, next_turn_id=claim_ids[0]
+                ),
+                peer.claim_pending_item(
+                    thread.id, pending, second, context, next_turn_id=claim_ids[1]
+                ),
                 return_exceptions=True,
             )
+            winners = [
+                index
+                for index, outcome in enumerate(outcomes)
+                if not isinstance(outcome, BaseException)
+            ]
             _require(
-                outcomes.count(None) == 1
+                len(winners) == 1
                 and sum(isinstance(outcome, ConflictError) for outcome in outcomes)
                 == 1,
                 f"A pending {pending.type} must have exactly one claimant and one conflict",
             )
-            winner = (first, second)[outcomes.index(None)]
+            index = winners[0]
+            winner = (first, second)[index]
             saved = await peer.load_item(thread.id, pending.id, context)
             _require(saved == winner, f"The winning {pending.type} claim must be saved")
+            if isinstance(pending, ClientToolCallItem):
+                assert invocation is not None
+                claimed = invocation.model_copy(
+                    update={"continuation_turn_id": claim_ids[index]}
+                )
+                _require(
+                    outcomes[index] == claimed
+                    and await peer.load_client_tool_invocation(
+                        thread.id, pending.id, context
+                    )
+                    == claimed,
+                    "The winning callback must bind the same private invocation and turn",
+                )
+                _require(
+                    await peer.load_client_tool_status(thread.id, pending.id, context)
+                    == "completed",
+                    "The callback lifecycle must complete with the winning claim",
+                )
 
+        cancelled = tool.model_copy(
+            update={"id": store.generate_item_id("tool_call", thread, context)}
+        )
+        await register_tool(cancelled)
         target = await store.truncate_after(thread.id, ascending_ids[0], context)
         remaining = await load_page(None, 10, "asc")
         _require(
@@ -168,7 +264,7 @@ async def check_thread_store[TContext](
             and remaining.after is None,
             "Retry must remove every later item from paginated history",
         )
-        for later_id in [*ascending_ids[1:], form.id, tool.id]:
+        for later_id in [*ascending_ids[1:], form.id, tool.id, hidden.id, cancelled.id]:
             try:
                 await peer.load_item(thread.id, later_id, context)
             except NotFoundError:
@@ -177,13 +273,18 @@ async def check_thread_store[TContext](
                 "Retry must hide each truncated item from direct reads"
             )
 
-        hidden = SDKHiddenContextItem(
-            id=store.generate_item_id("sdk_hidden_context", thread, context),
-            thread_id=thread.id,
-            created_at=created_at + timedelta(seconds=3),
-            content="Internal store check",
+        _require(
+            await peer.load_client_tool_status(thread.id, cancelled.id, context)
+            == "cancelled",
+            "Retry must close active callbacks and retain their lifecycle",
         )
+
         await store.add_thread_item(thread.id, hidden, context)
+        explicitly_cancelled = cancelled.model_copy(
+            update={"id": store.generate_item_id("tool_call", thread, context)}
+        )
+        await register_tool(explicitly_cancelled)
+        await peer.cancel_client_tool_call(thread.id, explicitly_cancelled.id, context)
         visible = await peer.load_thread_items(
             thread.id, None, 1, "desc", context, include_hidden=False
         )
@@ -191,7 +292,7 @@ async def check_thread_store[TContext](
             [item.id for item in visible.data] == [target.id]
             and not visible.has_more
             and visible.after is None,
-            "Visible history must exclude hidden items before applying the page limit",
+            "Visible history must exclude hidden and cancelled items before applying the page limit",
         )
     finally:
         await store.delete_thread(thread.id, context)

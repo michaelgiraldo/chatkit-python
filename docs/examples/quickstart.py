@@ -121,6 +121,8 @@ class MyChatKitServer(ChatKitServer[Context]):
         action: Action[str, Any],
         sender: WidgetItem | None,
         context: Context,
+        *,
+        turn_id: str,
     ) -> AsyncIterator[ThreadStreamEvent]:
         if action.type == _SAVE_WIDGET and sender is not None:
             yield ThreadItemReplacedEvent(

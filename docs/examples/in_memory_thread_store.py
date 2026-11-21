@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from chatkit.models import (
@@ -10,16 +11,26 @@ from chatkit.models import (
 )
 from chatkit.store import (
     HIDDEN_ITEM_TYPES,
+    ClientToolCallbackStatus,
     ConflictError,
     NotFoundError,
     PendingTurnItem,
     ThreadPatch,
     ThreadStore,
+    TurnSupersededError,
     apply_thread_patch,
+    validate_client_tool_registration,
     validate_pending_claim,
 )
+from chatkit.turns import ClientToolInvocation, TurnOutcome, TurnState
 
 type Context = dict[str, object]
+
+
+@dataclass
+class _ClientToolCallback:
+    invocation: ClientToolInvocation
+    status: ClientToolCallbackStatus = "pending"
 
 
 class InMemoryThreadStore(ThreadStore[Context]):
@@ -31,6 +42,9 @@ class InMemoryThreadStore(ThreadStore[Context]):
     def __init__(self):
         self.threads: dict[str, ThreadMetadata] = {}
         self.items: dict[str, dict[str, ThreadItem]] = {}
+        self._callbacks: dict[str, dict[str, _ClientToolCallback]] = {}
+        self._turns: dict[str, dict[str, TurnState]] = {}
+        self._current_turns: dict[str, str] = {}
 
     async def load_thread(self, thread_id: str, context: Context) -> ThreadMetadata:
         if thread_id not in self.threads:
@@ -40,9 +54,110 @@ class InMemoryThreadStore(ThreadStore[Context]):
     async def save_thread(self, thread: ThreadMetadata, context: Context) -> None:
         self.threads[thread.id] = thread.model_copy(deep=True)
 
+    async def begin_turn(
+        self,
+        thread_id: str,
+        turn_id: str,
+        context: Context,
+        *,
+        message: UserMessageItem | None = None,
+        create_thread: ThreadMetadata | None = None,
+    ) -> None:
+        self._require_new_turn(thread_id, turn_id)
+        if create_thread is None:
+            self._require_thread(thread_id)
+        else:
+            if create_thread.id != thread_id:
+                raise ValueError("New thread must use the requested thread ID")
+            if thread_id in self.threads:
+                raise ConflictError("The thread already exists")
+            create_thread = create_thread.model_copy(deep=True)
+        if message is not None:
+            if message.thread_id != thread_id:
+                raise ValueError("Item must belong to the requested thread")
+            self._insert_item(thread_id, message)
+        if create_thread is not None:
+            self.threads[thread_id] = create_thread
+        self._replace_current_turn(thread_id, turn_id)
+
+    def _require_new_turn(self, thread_id: str, turn_id: str) -> None:
+        if turn_id in self._turns.get(thread_id, {}):
+            raise ConflictError("The turn ID is already reserved")
+
+    def _replace_current_turn(
+        self, thread_id: str, turn_id: str, *, continuing: bool = False
+    ) -> None:
+        turns = self._turns.setdefault(thread_id, {})
+        previous = self._current_turns.get(thread_id)
+        if previous is not None and turns[previous] in (
+            TurnState.ACCEPTED,
+            TurnState.RUNNING,
+            TurnState.WAITING,
+        ):
+            turns[previous] = TurnState.WAITING if continuing else TurnState.SUPERSEDED
+        self._cancel_pending_callbacks(thread_id)
+        turns[turn_id] = TurnState.ACCEPTED
+        self._current_turns[thread_id] = turn_id
+
+    def _require_current_turn(self, thread_id: str, turn_id: str) -> TurnState:
+        if self._current_turns.get(thread_id) != turn_id:
+            raise TurnSupersededError("The turn no longer owns this thread")
+        return self._turns[thread_id][turn_id]
+
+    def _require_running_turn(self, thread_id: str, turn_id: str | None) -> None:
+        if (
+            turn_id is not None
+            and self._require_current_turn(thread_id, turn_id) != TurnState.RUNNING
+        ):
+            raise ConflictError("Only a running turn can change the thread")
+
+    async def start_turn(self, thread_id: str, turn_id: str, context: Context) -> None:
+        if self._require_current_turn(thread_id, turn_id) != TurnState.ACCEPTED:
+            raise ConflictError("Only an accepted turn can start")
+        self._turns[thread_id][turn_id] = TurnState.RUNNING
+
+    async def require_current_turn(
+        self, thread_id: str, turn_id: str, context: Context
+    ) -> None:
+        self._require_current_turn(thread_id, turn_id)
+
+    async def load_turn_state(
+        self, thread_id: str, turn_id: str, context: Context
+    ) -> TurnState:
+        state = self._turns.get(thread_id, {}).get(turn_id)
+        if state is None:
+            raise NotFoundError("Turn not found")
+        return state
+
+    async def finish_turn(
+        self, thread_id: str, turn_id: str, outcome: TurnOutcome, context: Context
+    ) -> TurnState:
+        turns = self._turns.get(thread_id, {})
+        state = turns.get(turn_id)
+        if state is None:
+            raise NotFoundError("Turn not found")
+        if self._current_turns[thread_id] != turn_id:
+            return state
+        if state == TurnState.RUNNING:
+            state = TurnState(outcome.value)
+        elif state == TurnState.ACCEPTED and outcome == TurnOutcome.CANCELLED:
+            state = TurnState.ABANDONED
+        else:
+            return state
+        if state != TurnState.WAITING:
+            self._cancel_pending_callbacks(thread_id, turn_id=turn_id)
+        turns[turn_id] = state
+        return state
+
     async def patch_thread(
-        self, thread_id: str, patch: ThreadPatch, context: Context
+        self,
+        thread_id: str,
+        patch: ThreadPatch,
+        context: Context,
+        *,
+        turn_id: str | None = None,
     ) -> ThreadMetadata:
+        self._require_running_turn(thread_id, turn_id)
         current = self.threads.get(thread_id)
         if current is None:
             raise NotFoundError(f"Thread {thread_id} not found")
@@ -66,25 +181,138 @@ class InMemoryThreadStore(ThreadStore[Context]):
         include_hidden: bool = True,
     ) -> Page[ThreadItem]:
         items = self.items.get(thread_id, {}).values()
+        callbacks = self._callbacks.get(thread_id, {})
         rows = (
             items
             if include_hidden
-            else (item for item in items if item.type not in HIDDEN_ITEM_TYPES)
+            else (
+                item
+                for item in items
+                if item.type not in HIDDEN_ITEM_TYPES
+                and (
+                    not isinstance(item, ClientToolCallItem)
+                    or item.status == "completed"
+                    or (item.id in callbacks and callbacks[item.id].status == "pending")
+                )
+            )
         )
         return self._page(rows, after, limit, order)
 
     async def add_thread_item(
-        self, thread_id: str, item: ThreadItem, context: Context
+        self,
+        thread_id: str,
+        item: ThreadItem,
+        context: Context,
+        *,
+        turn_id: str | None = None,
     ) -> None:
+        self._require_item_scope(thread_id, item)
+        self._require_running_turn(thread_id, turn_id)
+        if isinstance(item, ClientToolCallItem):
+            raise ConflictError("Client tool items require registration and completion")
+        self._insert_item(thread_id, item)
+
+    def _insert_item(self, thread_id: str, item: ThreadItem) -> None:
         items = self.items.setdefault(thread_id, {})
+        if item.id in self._callbacks.get(thread_id, {}):
+            raise ConflictError("The client tool callback ID is already reserved")
         if item.id in items:
             raise ValueError(f"Item {item.id} already exists in thread {thread_id}")
-        items[item.id] = item.model_copy(deep=True)
+        stored = item.model_copy(deep=True)
+        if isinstance(stored, UserMessageItem):
+            self._cancel_pending_callbacks(thread_id)
+        items[item.id] = stored
 
     async def save_item(
-        self, thread_id: str, item: ThreadItem, context: Context
+        self,
+        thread_id: str,
+        item: ThreadItem,
+        context: Context,
+        *,
+        turn_id: str | None = None,
     ) -> None:
-        self.items.setdefault(thread_id, {})[item.id] = item.model_copy(deep=True)
+        self._require_item_scope(thread_id, item)
+        self._require_running_turn(thread_id, turn_id)
+        items = self.items.setdefault(thread_id, {})
+        current = items.get(item.id)
+        if (
+            isinstance(item, ClientToolCallItem)
+            or isinstance(current, ClientToolCallItem)
+            or item.id in self._callbacks.get(thread_id, {})
+        ):
+            raise ConflictError("Client tool items require registration and completion")
+        stored = item.model_copy(deep=True)
+        if current is None and isinstance(stored, UserMessageItem):
+            self._cancel_pending_callbacks(thread_id)
+        items[item.id] = stored
+
+    def _require_item_scope(self, thread_id: str, item: ThreadItem) -> None:
+        if item.thread_id != thread_id:
+            raise ValueError("Item must belong to the requested thread")
+        self._require_thread(thread_id)
+
+    def _require_thread(self, thread_id: str) -> None:
+        if thread_id not in self.threads:
+            raise NotFoundError(f"Thread {thread_id} not found")
+
+    async def register_client_tool_call(
+        self,
+        thread_id: str,
+        item: ClientToolCallItem,
+        invocation: ClientToolInvocation,
+        context: Context,
+    ) -> None:
+        validate_client_tool_registration(thread_id, item, invocation)
+        self._require_running_turn(thread_id, invocation.turn_id)
+        callbacks = self._callbacks.setdefault(thread_id, {})
+        if any(callback.status == "pending" for callback in callbacks.values()):
+            raise ConflictError("The thread already has a pending client tool callback")
+        stored = invocation.model_copy(deep=True)
+        self._insert_item(thread_id, item)
+        callbacks[item.id] = _ClientToolCallback(stored)
+
+    def _load_callback(self, thread_id: str, item_id: str) -> _ClientToolCallback:
+        callback = self._callbacks.get(thread_id, {}).get(item_id)
+        if callback is None:
+            raise NotFoundError("Client tool callback not found")
+        return callback
+
+    async def load_client_tool_invocation(
+        self, thread_id: str, item_id: str, context: Context
+    ) -> ClientToolInvocation:
+        return self._load_callback(thread_id, item_id).invocation.model_copy(deep=True)
+
+    async def load_client_tool_status(
+        self, thread_id: str, item_id: str, context: Context
+    ) -> ClientToolCallbackStatus:
+        return self._load_callback(thread_id, item_id).status
+
+    async def cancel_client_tool_call(
+        self,
+        thread_id: str,
+        item_id: str,
+        context: Context,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        self._require_running_turn(thread_id, turn_id)
+        self._cancel_pending_callbacks(thread_id, item_id, turn_id=turn_id)
+
+    def _cancel_pending_callbacks(
+        self,
+        thread_id: str,
+        item_id: str | None = None,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        callbacks = self._callbacks.get(thread_id, {})
+        for callback_id, callback in callbacks.items():
+            if (
+                callback.status == "pending"
+                and (item_id is None or callback_id == item_id)
+                and (turn_id is None or callback.invocation.turn_id == turn_id)
+            ):
+                callback.status = "cancelled"
 
     async def claim_pending_item(
         self,
@@ -92,26 +320,60 @@ class InMemoryThreadStore(ThreadStore[Context]):
         expected: PendingTurnItem,
         replacement: PendingTurnItem,
         context: Context,
-    ) -> None:
-        if thread_id not in self.threads:
-            raise NotFoundError(f"Thread {thread_id} not found")
+        *,
+        next_turn_id: str | None = None,
+    ) -> ClientToolInvocation | None:
+        self._require_thread(thread_id)
+        if next_turn_id is not None:
+            self._require_new_turn(thread_id, next_turn_id)
         items = self.items.get(thread_id, {})
         current = items.get(expected.id)
         if current is None:
             raise NotFoundError(f"Item {expected.id} not found in thread {thread_id}")
-        latest_item_id = None
+        validate_pending_claim(current, expected, replacement)
+        stored = replacement.model_copy(deep=True)
+        claimed = None
         if isinstance(expected, ClientToolCallItem):
-            latest_item_id = max(items.values(), key=self._sort_key).id
-        validate_pending_claim(
-            current, expected, replacement, latest_item_id=latest_item_id
-        )
-        items[expected.id] = replacement.model_copy(deep=True)
+            if next_turn_id is None:
+                raise ValueError("A client tool claim requires a continuation turn ID")
+            callback = self._callbacks.get(thread_id, {}).get(expected.id)
+            if callback is None or callback.status != "pending":
+                raise ConflictError("The client tool callback is no longer pending")
+            if self._require_current_turn(
+                thread_id, callback.invocation.turn_id
+            ) not in (
+                TurnState.RUNNING,
+                TurnState.WAITING,
+            ):
+                raise ConflictError(
+                    "The client tool callback no longer owns this thread"
+                )
+            invocation = callback.invocation.model_copy(
+                update={"continuation_turn_id": next_turn_id}
+            )
+            claimed = invocation.model_copy(deep=True)
+            callback.invocation = invocation
+            callback.status = "completed"
+        items[expected.id] = stored
+        if next_turn_id is not None:
+            self._replace_current_turn(
+                thread_id,
+                next_turn_id,
+                continuing=isinstance(expected, ClientToolCallItem),
+            )
+        return claimed
 
     async def truncate_after(
-        self, thread_id: str, item_id: str, context: Context
+        self,
+        thread_id: str,
+        item_id: str,
+        context: Context,
+        *,
+        next_turn_id: str | None = None,
     ) -> UserMessageItem:
-        if thread_id not in self.threads:
-            raise NotFoundError(f"Thread {thread_id} not found")
+        self._require_thread(thread_id)
+        if next_turn_id is not None:
+            self._require_new_turn(thread_id, next_turn_id)
         items = self.items.get(thread_id, {})
         item = items.get(item_id)
         if item is None:
@@ -120,9 +382,14 @@ class InMemoryThreadStore(ThreadStore[Context]):
             raise ConflictError("A retry must start from a user message")
         target = self._sort_key(item)
         later = [row.id for row in items.values() if self._sort_key(row) > target]
+        retained = item.model_copy(deep=True)
+        if next_turn_id is not None:
+            self._replace_current_turn(thread_id, next_turn_id)
+        else:
+            self._cancel_pending_callbacks(thread_id)
         for later_id in later:
             del items[later_id]
-        return item.model_copy(deep=True)
+        return retained
 
     async def load_item(
         self, thread_id: str, item_id: str, context: Context
@@ -135,10 +402,20 @@ class InMemoryThreadStore(ThreadStore[Context]):
     async def delete_thread(self, thread_id: str, context: Context) -> None:
         self.threads.pop(thread_id, None)
         self.items.pop(thread_id, None)
+        self._callbacks.pop(thread_id, None)
+        self._turns.pop(thread_id, None)
+        self._current_turns.pop(thread_id, None)
 
     async def delete_thread_item(
-        self, thread_id: str, item_id: str, context: Context
+        self,
+        thread_id: str,
+        item_id: str,
+        context: Context,
+        *,
+        turn_id: str | None = None,
     ) -> None:
+        self._require_running_turn(thread_id, turn_id)
+        self._cancel_pending_callbacks(thread_id, item_id)
         self.items.get(thread_id, {}).pop(item_id, None)
 
     @staticmethod

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import (
     Annotated,
     Any,
+    Literal,
 )
 
 from agents import (
@@ -14,8 +15,10 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunResultStreaming,
     StreamEvent,
+    ToolCallOutputItem,
 )
 from agents.tool_context import ToolContext
+from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_message import Content
 from openai.types.responses.response_output_text import (
     Annotation as ResponsesAnnotation,
@@ -25,7 +28,17 @@ from openai.types.responses.response_output_text import (
     AnnotationFileCitation,
     AnnotationURLCitation,
 )
-from pydantic import BaseModel, ConfigDict, PrivateAttr, SkipValidation, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    SkipValidation,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from ._stream import _close_stream
 from ._web_search import _WebSearchProgress
@@ -63,12 +76,21 @@ from .models import (
     WorkflowSummary,
 )
 from .store import StoreItemType, ThreadStore
+from .turns import (
+    ClientToolLocalContinuation,
+    ClientToolModelContinuation,
+    ClientToolRequest,
+    ClientToolResponsesContinuation,
+    PersistWorkflow,
+    ResponderEvent,
+)
 from .widget_stream import stream_widget
 from .widgets import Markdown, Text, WidgetRootInput
 
 _CHAT_COMPLETIONS_PLACEHOLDER_ID = "__fake_id__"
 _CLIENT_TOOL_CONFLICT = "Only one client tool may be requested per turn."
 _ANNOTATION_ADAPTER = TypeAdapter[ResponsesAnnotation](ResponsesAnnotation)
+_CONTINUATION_ITEMS = TypeAdapter(list[dict[str, JsonValue]])
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,23 +99,137 @@ class _ClientToolRequest:
     call_id: str
     name: str
     arguments: dict[str, Any]
+    continuation: Literal["local", "responses"]
+
+
+def _capture_model_continuation(
+    request: _ClientToolRequest, result: RunResultStreaming
+) -> ClientToolModelContinuation:
+    if not result.is_complete or not result.raw_responses or result.interruptions:
+        raise ValueError("The Agents SDK run did not finish on the browser tool call.")
+
+    calls = [
+        item
+        for item in result.raw_responses[-1].output
+        if isinstance(item, ResponseFunctionToolCall)
+    ]
+    call_ids = {item.call_id for item in calls}
+    if request.call_id not in call_ids or len(call_ids) != len(calls):
+        raise ValueError("The browser tool must stop the Agents SDK run at its call.")
+
+    try:
+        if request.continuation == "local":
+            items = _CONTINUATION_ITEMS.validate_python(
+                result.to_input_list(mode="normalized"), strict=True
+            )
+        else:
+            items = _CONTINUATION_ITEMS.validate_python(
+                [
+                    item.to_input_item()
+                    for item in result.new_items
+                    if isinstance(item, ToolCallOutputItem) and item.call_id in call_ids
+                ],
+                strict=True,
+            )
+    except ValidationError:
+        raise ValueError(
+            "The Agents SDK did not provide JSON continuation items."
+        ) from None
+
+    output_positions: dict[str, list[int]] = defaultdict(list)
+    for position, item in enumerate(items):
+        if (
+            item.get("type") == "function_call_output"
+            and isinstance(call_id := item.get("call_id"), str)
+            and call_id in call_ids
+        ):
+            if not isinstance(item.get("output"), (str, list)):
+                raise ValueError("The Agents SDK provided an invalid function output.")
+            output_positions[call_id].append(position)
+    if any(len(output_positions[call_id]) != 1 for call_id in call_ids):
+        raise ValueError(
+            "The Agents SDK did not provide one output for each pending function call."
+        )
+
+    if request.continuation == "local":
+        replayed = [
+            position
+            for position, item in enumerate(items)
+            if item.get("type") == "function_call"
+            and item.get("call_id") == request.call_id
+        ]
+        original = next(item for item in calls if item.call_id == request.call_id)
+        if (
+            len(replayed) != 1
+            or replayed[0] >= output_positions[request.call_id][0]
+            or any(
+                items[replayed[0]].get(key) != value
+                for key, value in {
+                    "name": original.name,
+                    "arguments": original.arguments,
+                    "namespace": original.namespace,
+                }.items()
+            )
+        ):
+            raise ValueError(
+                "The Agents SDK did not preserve the original browser function call."
+            )
+        return ClientToolLocalContinuation(items=items)
+
+    response_id = result.last_response_id
+    if not response_id or response_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+        raise ValueError(
+            "Responses continuation requires a real OpenAI Responses response ID."
+        )
+    if len(items) != len(call_ids):
+        raise ValueError("Responses continuation may contain only function outputs.")
+    return ClientToolResponsesContinuation(response_id=response_id, items=items)
 
 
 class AgentContext[TContext](BaseModel):
-    """State and app events for a single response run."""
+    """State and app events for a single response run.
+
+    Set `resume_from` to a saved, authorized workflow from this thread or to
+    `None` for a fresh run. Construct the context before starting the runner.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     thread: ThreadMetadata
     store: Annotated[ThreadStore[TContext], SkipValidation]
     request_context: TContext
-    workflow_item: WorkflowItem | None = None
+    resume_from: WorkflowItem | None = Field(exclude=True, repr=False)
+    _workflow_item: WorkflowItem | None = None
     _resumed_workflow_id: str | None = None
     _client_tool_request: _ClientToolRequest | None = None
     _client_tool_conflict: bool = False
     _events: asyncio.Queue[ThreadStreamEvent] = PrivateAttr(
         default_factory=asyncio.Queue
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _require_explicit_workflow(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "workflow_item" in data:
+            raise ValueError("Replace workflow_item with resume_from.")
+        return data
+
+    def model_post_init(self, _context: Any, /) -> None:
+        if self.resume_from is None:
+            return
+        if self.resume_from.thread_id != self.thread.id:
+            raise ValueError("The saved workflow must belong to the current thread.")
+        self._workflow_item = self.resume_from.model_copy(deep=True)
+        self._resumed_workflow_id = self._workflow_item.id
+
+    @property
+    def workflow_item(self) -> WorkflowItem | None:
+        """The active workflow for this run."""
+        return self._workflow_item
+
+    @workflow_item.setter
+    def workflow_item(self, item: WorkflowItem | None) -> None:
+        self._workflow_item = item
 
     def generate_id(
         self, type: StoreItemType, thread: ThreadMetadata | None = None
@@ -111,23 +247,28 @@ class AgentContext[TContext](BaseModel):
         *,
         name: str,
         arguments: dict[str, Any],
+        continuation: Literal["local", "responses"],
     ) -> None:
         """Request a browser callback for this invocation of an Agents SDK tool.
 
         Configure the agent to stop at the calling tool. The browser receives one
         pending call when the run finishes and supplies its result on the next turn.
+        Choose local replay or a continuation linked to a stored Responses response.
         """
         if tool.context is not self or not tool.tool_call_id:
             raise ValueError("Pass the ToolContext for the current tool invocation.")
         if self._client_tool_request is not None:
             self._client_tool_conflict = True
             raise ValueError(_CLIENT_TOOL_CONFLICT)
+        if continuation not in ("local", "responses"):
+            raise ValueError("Choose 'local' or 'responses' for model continuation.")
 
         self._client_tool_request = _ClientToolRequest(
             item_id=tool.tool_call.id if tool.tool_call is not None else None,
             call_id=tool.tool_call_id,
             name=name,
             arguments=arguments,
+            continuation=continuation,
         )
 
     async def stream_widget(
@@ -217,7 +358,11 @@ class AgentContext[TContext](BaseModel):
         workflow = item.workflow
         workflow.tasks.append(task)
 
-        if workflow.type != "reasoning" and len(workflow.tasks) == 1:
+        if (
+            item.id != self._resumed_workflow_id
+            and workflow.type != "reasoning"
+            and len(workflow.tasks) == 1
+        ):
             await self.stream(ThreadItemAddedEvent(item=item))
         else:
             await self.stream(
@@ -462,12 +607,13 @@ async def stream_agent_response(
     result: RunResultStreaming,
     *,
     converter: ResponseStreamConverter = _DEFAULT_RESPONSE_STREAM_CONVERTER,
-) -> AsyncGenerator[ThreadStreamEvent]:
+) -> AsyncGenerator[ResponderEvent]:
     """
     Convert a streamed Agents SDK run into ChatKit thread stream events.
 
     This function consumes a streaming run result and yields `ThreadStreamEvent`
-    objects as the run progresses. Closing the stream early cancels an active run.
+    objects and server-only persistence events as the run progresses.
+    Closing the stream early cancels an active run.
 
     Args:
         context: The AgentContext to use for the stream.
@@ -510,6 +656,21 @@ async def stream_agent_response(
         raise
     else:
         await _close_stream(model_events)
+        if (request := context._client_tool_request) is not None:
+            item_id = request.item_id
+            if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+                item_id = context.generate_id("tool_call")
+            yield ClientToolRequest(
+                item=ClientToolCallItem(
+                    id=item_id,
+                    thread_id=context.thread.id,
+                    name=request.name,
+                    arguments=request.arguments,
+                    created_at=datetime.now(UTC),
+                ),
+                call_id=request.call_id,
+                model_continuation=_capture_model_continuation(request, result),
+            )
 
 
 async def _stream_agent_response(
@@ -517,7 +678,7 @@ async def _stream_agent_response(
     events: AsyncIterator[StreamEvent | _EventWrapper],
     queue_iterator: _AsyncQueueIterator,
     converter: ResponseStreamConverter,
-) -> AsyncGenerator[ThreadStreamEvent]:
+) -> AsyncGenerator[ResponderEvent]:
     ctx = context
     thread = context.thread
     produced_items = set()
@@ -528,19 +689,6 @@ async def _stream_agent_response(
     item_annotation_count: defaultdict[str, defaultdict[int, int]] = defaultdict(
         lambda: defaultdict(int)
     )
-
-    # A workflow immediately before a client tool call can continue on resume.
-    items = await context.store.load_thread_items(
-        thread.id, None, 2, "desc", context.request_context
-    )
-    match items.data:
-        case [WorkflowItem() as saved, *_] | [
-            ClientToolCallItem(),
-            WorkflowItem() as saved,
-        ]:
-            ctx._resumed_workflow_id = saved.id
-            if ctx.workflow_item is None:
-                ctx.workflow_item = saved
 
     def message_id(item_id: str, output_index: int) -> str:
         # Agents reuses this placeholder in its Responses-shaped Chat Completions
@@ -845,25 +993,8 @@ async def _stream_agent_response(
     if finished_search_workflow is not None:
         yield finished_search_workflow
     elif workflow := ctx.workflow_item:
-        # Other workflows can continue in the next turn.
-        if workflow.id == ctx._resumed_workflow_id:
-            await ctx.store.save_item(thread.id, workflow, ctx.request_context)
-        else:
-            await ctx.store.add_thread_item(thread.id, workflow, ctx.request_context)
-
-    if (request := context._client_tool_request) is not None:
-        item_id = request.item_id
-        if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
-            item_id = context.generate_id("tool_call")
-        yield ThreadItemDoneEvent(
-            item=ClientToolCallItem(
-                id=item_id,
-                thread_id=thread.id,
-                name=request.name,
-                arguments=request.arguments,
-                created_at=datetime.now(UTC),
-                call_id=request.call_id,
-            ),
+        yield PersistWorkflow(
+            item=workflow, replace=workflow.id == ctx._resumed_workflow_id
         )
 
 

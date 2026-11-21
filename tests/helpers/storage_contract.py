@@ -29,6 +29,7 @@ from chatkit.store import (
     PendingTurnItem,
     ThreadStore,
 )
+from chatkit.turns import ClientToolInvocation, TurnState
 from chatkit.widgets import Card, Col, Text
 from tests._types import RequestContext
 
@@ -101,6 +102,15 @@ def make_thread_items(thread_id: str) -> list[ThreadItem]:
 
 DEFAULT_CONTEXT = RequestContext(user_id="test_user")
 ALTERNATIVE_CONTEXT = RequestContext(user_id="alternative_user")
+
+
+def tool_invocation(item: ClientToolCallItem, turn_id: str) -> ClientToolInvocation:
+    return ClientToolInvocation(
+        item_id=item.id,
+        thread_id=item.thread_id,
+        turn_id=turn_id,
+        call_id=f"call_{item.id}",
+    )
 
 
 async def assert_tied_timestamp_pagination[T: ThreadMetadata | ThreadItem](
@@ -178,19 +188,27 @@ class ThreadStoreContract(ABC):
     @pytest.mark.parametrize("tool", [False, True])
     async def test_pending_item_can_only_be_claimed_once(self, tool: bool):
         thread = make_thread()
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
+        await self.store.begin_turn(
+            thread.id, "original", DEFAULT_CONTEXT, create_thread=thread
+        )
+        await self.store.start_turn(thread.id, "original", DEFAULT_CONTEXT)
         pending: PendingTurnItem
         if tool:
             pending = ClientToolCallItem(
                 id="pending",
                 thread_id=thread.id,
                 created_at=thread.created_at,
-                call_id="call_example",
                 name="example",
                 arguments={},
             )
             first = pending.model_copy(update={"status": "completed", "output": 1})
             second = pending.model_copy(update={"status": "completed", "output": 2})
+            await self.store.register_client_tool_call(
+                thread.id,
+                pending,
+                tool_invocation(pending, "original"),
+                DEFAULT_CONTEXT,
+            )
         else:
             pending = StructuredInputItem(
                 id="pending",
@@ -200,52 +218,210 @@ class ThreadStoreContract(ABC):
             )
             first = pending.model_copy(update={"status": "answered"})
             second = pending.model_copy(update={"status": "skipped"})
-        await self.store.add_thread_item(thread.id, pending, DEFAULT_CONTEXT)
+            await self.store.add_thread_item(
+                thread.id, pending, DEFAULT_CONTEXT, turn_id="original"
+            )
         with pytest.raises(NotFoundError):
             await self.store.claim_pending_item(
-                thread.id, pending, first, ALTERNATIVE_CONTEXT
+                thread.id,
+                pending,
+                first,
+                ALTERNATIVE_CONTEXT,
+                next_turn_id="unauthorized",
             )
         results = await asyncio.gather(
-            self.store.claim_pending_item(thread.id, pending, first, DEFAULT_CONTEXT),
-            self.store.claim_pending_item(thread.id, pending, second, DEFAULT_CONTEXT),
+            self.store.claim_pending_item(
+                thread.id, pending, first, DEFAULT_CONTEXT, next_turn_id="first"
+            ),
+            self.store.claim_pending_item(
+                thread.id, pending, second, DEFAULT_CONTEXT, next_turn_id="second"
+            ),
             return_exceptions=True,
         )
-        assert results.count(None) == 1
         assert sum(isinstance(result, ConflictError) for result in results) == 1
-        winner = (first, second)[results.index(None)]
+        index = next(
+            index
+            for index, result in enumerate(results)
+            if not isinstance(result, BaseException)
+        )
+        winner = (first, second)[index]
+        winning_turn = ("first", "second")[index]
+        if tool:
+            claim = results[index]
+            assert isinstance(claim, ClientToolInvocation)
+            assert claim.continuation_turn_id == winning_turn
+        else:
+            assert results[index] is None
+        assert (
+            await self.store.load_turn_state(thread.id, winning_turn, DEFAULT_CONTEXT)
+            is TurnState.ACCEPTED
+        )
         assert (
             await self.store.load_item(thread.id, pending.id, DEFAULT_CONTEXT) == winner
         )
 
     @pytest.mark.asyncio
-    async def test_client_tool_claim_checks_latest_item_in_stable_order(self):
+    async def test_client_tool_claim_ignores_unrelated_transcript_items(self):
         thread = make_thread()
-        await self.store.save_thread(thread, DEFAULT_CONTEXT)
+        await self.store.begin_turn(
+            thread.id, "original", DEFAULT_CONTEXT, create_thread=thread
+        )
+        await self.store.start_turn(thread.id, "original", DEFAULT_CONTEXT)
         pending = ClientToolCallItem(
             id="a",
             thread_id=thread.id,
             created_at=thread.created_at,
-            call_id="call_example",
             name="example",
             arguments={},
         )
-        await self.store.add_thread_item(thread.id, pending, DEFAULT_CONTEXT)
+        await self.store.register_client_tool_call(
+            thread.id, pending, tool_invocation(pending, "original"), DEFAULT_CONTEXT
+        )
         await self.store.add_thread_item(
             thread.id,
             AssistantMessageItem(
                 id="b", thread_id=thread.id, created_at=thread.created_at, content=[]
             ),
             DEFAULT_CONTEXT,
+            turn_id="original",
         )
         completed = pending.model_copy(update={"status": "completed", "output": "ok"})
-        with pytest.raises(ConflictError):
-            await self.store.claim_pending_item(
-                thread.id, pending, completed, DEFAULT_CONTEXT
+        await self.store.claim_pending_item(
+            thread.id, pending, completed, DEFAULT_CONTEXT, next_turn_id="next"
+        )
+        await self.store.cancel_client_tool_call(thread.id, pending.id, DEFAULT_CONTEXT)
+        assert (
+            await self.store.load_client_tool_status(
+                thread.id, pending.id, DEFAULT_CONTEXT
             )
+            == "completed"
+        )
         assert (
             await self.store.load_item(thread.id, pending.id, DEFAULT_CONTEXT)
-            == pending
+            == completed
         )
+
+    @pytest.mark.asyncio
+    async def test_client_tool_lifecycle_cancels_only_the_exact_pending_call(self):
+        store = self.store
+        context = DEFAULT_CONTEXT
+        thread = make_thread()
+        await store.begin_turn(thread.id, "original", context, create_thread=thread)
+        await store.start_turn(thread.id, "original", context)
+        original = ClientToolCallItem(
+            id="original",
+            thread_id=thread.id,
+            created_at=thread.created_at,
+            name="example",
+            arguments={},
+        )
+        next_tool = original.model_copy(
+            update={
+                "id": "next",
+                "created_at": thread.created_at + timedelta(seconds=2),
+            }
+        )
+        await store.register_client_tool_call(
+            thread.id, original, tool_invocation(original, "original"), context
+        )
+        with pytest.raises(ConflictError):
+            await store.register_client_tool_call(
+                thread.id, next_tool, tool_invocation(next_tool, "original"), context
+            )
+        with pytest.raises(NotFoundError):
+            await store.load_item(thread.id, next_tool.id, context)
+        with pytest.raises(NotFoundError):
+            await store.load_client_tool_status(
+                thread.id, original.id, ALTERNATIVE_CONTEXT
+            )
+        await store.cancel_client_tool_call(thread.id, original.id, ALTERNATIVE_CONTEXT)
+        assert (
+            await store.load_client_tool_status(thread.id, original.id, context)
+            == "pending"
+        )
+
+        new_message = UserMessageItem(
+            id="user",
+            thread_id=thread.id,
+            created_at=thread.created_at + timedelta(seconds=1),
+            content=[],
+            inference_options=InferenceOptions(),
+        )
+        await store.begin_turn(thread.id, "second", context, message=new_message)
+        await store.start_turn(thread.id, "second", context)
+        await store.register_client_tool_call(
+            thread.id, next_tool, tool_invocation(next_tool, "second"), context
+        )
+        with pytest.raises(ConflictError):
+            await store.claim_pending_item(
+                thread.id,
+                original,
+                original.model_copy(update={"status": "completed", "output": "late"}),
+                context,
+                next_turn_id="late",
+            )
+        await store.cancel_client_tool_call(thread.id, original.id, context)
+        assert (
+            await store.load_client_tool_status(thread.id, original.id, context)
+            == "cancelled"
+        )
+        assert (
+            await store.load_client_tool_status(thread.id, next_tool.id, context)
+            == "pending"
+        )
+
+        visible = await store.load_thread_items(
+            thread.id, None, 2, "asc", context, include_hidden=False
+        )
+        assert [item.id for item in visible.data] == [new_message.id, next_tool.id]
+        assert not visible.has_more
+        assert await store.load_item(thread.id, original.id, context) == original
+
+        with pytest.raises(ConflictError):
+            await store.save_item(
+                thread.id, next_tool.model_copy(update={"status": "completed"}), context
+            )
+        with pytest.raises(ConflictError):
+            await store.save_item(
+                thread.id,
+                AssistantMessageItem(
+                    id=next_tool.id,
+                    thread_id=thread.id,
+                    created_at=thread.created_at,
+                    content=[],
+                ),
+                context,
+            )
+
+        await store.truncate_after(
+            thread.id, new_message.id, context, next_turn_id="retry"
+        )
+        await store.start_turn(thread.id, "retry", context)
+        assert (
+            await store.load_client_tool_status(thread.id, next_tool.id, context)
+            == "cancelled"
+        )
+        with pytest.raises(NotFoundError):
+            await store.load_item(thread.id, next_tool.id, context)
+        with pytest.raises(ConflictError):
+            await store.register_client_tool_call(
+                thread.id, next_tool, tool_invocation(next_tool, "retry"), context
+            )
+
+        third = next_tool.model_copy(update={"id": "third"})
+        await store.register_client_tool_call(
+            thread.id, third, tool_invocation(third, "retry"), context
+        )
+        await store.delete_thread_item(thread.id, third.id, context)
+        assert (
+            await store.load_client_tool_status(thread.id, third.id, context)
+            == "cancelled"
+        )
+        with pytest.raises(NotFoundError):
+            await store.load_item(thread.id, third.id, context)
+        await store.delete_thread(thread.id, context)
+        with pytest.raises(NotFoundError):
+            await store.load_client_tool_status(thread.id, third.id, context)
 
     @pytest.mark.asyncio
     async def test_truncate_after_retries_from_user_message_in_stable_order(self):

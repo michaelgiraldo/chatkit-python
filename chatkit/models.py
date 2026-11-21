@@ -3,7 +3,13 @@
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AnyUrl, BaseModel, Field, SerializationInfo, model_serializer
+from pydantic import (
+    AnyUrl,
+    BaseModel,
+    Field,
+    SerializationInfo,
+    model_serializer,
+)
 
 from . import icons, widget_models
 
@@ -113,14 +119,20 @@ class AssistantMessageItem(ThreadItemBase):
 
 
 class ClientToolCallItem(ThreadItemBase):
-    """Thread item capturing a client tool call."""
+    """Browser-visible display and callback data for a client tool."""
 
     type: Literal["client_tool_call"] = "client_tool_call"
     status: Literal["pending", "completed"] = "pending"
-    call_id: str
     name: str
     arguments: dict[str, Any]
     output: Any | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, serializer, info: SerializationInfo):
+        data = serializer(self)
+        if self.status == "pending" and (info.context or {}).get("browser_wire"):
+            data["arguments"] = {"item_id": self.id, "input": data["arguments"]}
+        return data
 
 
 class WidgetItem(ThreadItemBase):

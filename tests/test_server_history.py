@@ -103,7 +103,7 @@ async def test_creates_thread():
 async def test_saves_thread_title():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         yield await server.update_thread(
-            turn.thread.id, {"title": "Updated title"}, turn.context
+            turn.thread.id, {"title": "Updated title"}, turn.context, turn_id=turn.id
         )
 
     with make_server(responder) as server:
@@ -133,7 +133,10 @@ async def test_saves_thread_title():
 async def test_saves_thread_metadata():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         yield await server.update_thread(
-            turn.thread.id, {"metadata_set": {"test_key": "test_value"}}, turn.context
+            turn.thread.id,
+            {"metadata_set": {"test_key": "test_value"}},
+            turn.context,
+            turn_id=turn.id,
         )
 
     with make_server(responder) as server:
@@ -160,7 +163,10 @@ async def test_saves_thread_metadata():
 async def test_saves_thread_locked_fields():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         yield await server.update_thread(
-            turn.thread.id, {"status": LockedStatus(reason="Because")}, turn.context
+            turn.thread.id,
+            {"status": LockedStatus(reason="Because")},
+            turn.context,
+            turn_id=turn.id,
         )
 
     with make_server(responder) as server:
@@ -192,6 +198,7 @@ async def test_saves_allowed_image_domains_and_streams_thread_updated():
             turn.thread.id,
             {"allowed_image_domains": ["example.com", "images.example.com"]},
             turn.context,
+            turn_id=turn.id,
         )
 
     with make_server(responder) as server:
@@ -221,7 +228,7 @@ async def test_saves_allowed_image_domains_and_streams_thread_updated():
 async def test_omits_unset_allowed_image_domains_in_created_and_updated_json_events():
     async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         yield await server.update_thread(
-            turn.thread.id, {"title": "Updated title"}, turn.context
+            turn.thread.id, {"title": "Updated title"}, turn.context, turn_id=turn.id
         )
 
     with make_server(responder) as server:
@@ -279,7 +286,7 @@ async def test_emits_thread_updated_mid_stream_and_persists():
         )
 
         yield await server.update_thread(
-            thread.id, {"title": "Mid-stream title"}, turn.context
+            thread.id, {"title": "Mid-stream title"}, turn.context, turn_id=turn.id
         )
 
         # Continue streaming after the update event
