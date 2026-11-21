@@ -18,7 +18,6 @@ nav = [
   ] },
   { "Guides" = [
     { "Pin an app to the fork" = "guides/pin-the-fork.md" },
-    { "Upgrade from Turnspan 3 to 6" = "guides/upgrade-turnspan-3-to-6.md" },
     { "Respond to a user message" = "guides/respond-to-user-message.md" },
     { "Let users browse past threads" = "guides/browse-past-threads.md" },
     { "Accept rich user input" = "guides/accept-rich-user-input.md" },

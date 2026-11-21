@@ -1,7 +1,6 @@
 """Check the package a Turnspan consumer would install and prepare release notes."""
 
 import argparse
-import base64
 import json
 import os
 import posixpath
@@ -120,6 +119,7 @@ def check_consumer(
         check=True,
         cwd=consumer,
         env=env,
+        stdout=sys.stderr,
     )
     return json.loads((consumer / "consumer-versions.json").read_text(encoding="utf-8"))
 
@@ -129,7 +129,6 @@ def main() -> None:
     parser.add_argument("--sha", required=True, help="Full candidate commit SHA")
     parser.add_argument("--github-archive", action="store_true")
     parser.add_argument("--ci-url", help="Successful CI run verified by the workflow")
-    parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
         parser.error("--sha must be a full lowercase commit SHA")
@@ -137,8 +136,6 @@ def main() -> None:
         rf"{re.escape(GITHUB_REPO)}/actions/runs/[0-9]+", args.ci_url
     ):
         parser.error("--ci-url must name a Turnspan Actions run")
-    if args.github_output and not (args.github_archive and args.ci_url):
-        parser.error("Draft output requires the GitHub archive and a verified CI URL")
     if sys.version_info[:2] != (3, 14):
         parser.error("Run the check with Python 3.14")
     sha = args.sha
@@ -188,7 +185,7 @@ def main() -> None:
     verification = (
         f"[Passing CI run]({args.ci_url})"
         if args.ci_url
-        else "GitHub CI is checked during draft preparation."
+        else "GitHub CI is checked by the release workflow."
     )
     notes = f"""Package `openai-chatkit {version}` · Python 3.14 · Tag `{tag}`
 
@@ -211,10 +208,6 @@ python -m pip install 'openai-chatkit[agents,fastapi] @ {public_archive}'
 - The consumer smoke ran on Python `{resolved["python"]}` with OpenAI Python `{resolved["openai"]}` and Agents SDK `{resolved["openai-agents"]}`. It exercised the quickstart, FastAPI, and mocked model HTTP from an isolated source install.
 """
     print(notes)
-    if args.github_output:
-        notes_b64 = base64.b64encode(notes.encode("utf-8")).decode("ascii")
-        with args.github_output.open("a", encoding="utf-8") as output:
-            output.write(f"version={version}\ntag={tag}\nnotes_b64={notes_b64}\n")
 
 
 if __name__ == "__main__":

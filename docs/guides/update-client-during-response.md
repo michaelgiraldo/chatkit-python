@@ -286,11 +286,9 @@ if isinstance(turn.input, ClientToolTurn):
     )
 ```
 
-Legacy calls and calls emitted by custom responders can have no
-`model_continuation`. They can appear in the transcript, and only calls with
-native continuation records can use this helper. Custom responders that
-generate their own provider input can use `ClientToolTurn` to receive the
-claimed result.
+Custom responders that generate their own provider input can use
+`ClientToolTurn` to receive the claimed result. The continuation helper
+requires a saved native model continuation.
 
 Prepare UI progress separately. Pass `resume_from=None` to start a fresh
 display workflow or load an explicitly linked
@@ -318,35 +316,14 @@ that allow overlapping responses in one thread own turn scheduling and
 must prevent a superseded responder from opening its first tool call after
 a newer turn starts.
 
-### Upgrade from older Turnspan versions
+### Verify the browser tool
 
-If you are starting from Turnspan 3, follow the [application migration and
-rollback guide](upgrade-turnspan-3-to-6.md).
-
-1. Update the browser handler to read `params.input` and return the matching
-   `item_id` with `output`. Deploy it with the matching Turnspan server.
-   If you wrote a custom transport, update its tool-call serialization to
-   match the [protocol helpers](respond-to-user-message.md#how-request-context-flows-into-chatkit).
-2. Select `local` or `responses` when you request the tool. In your
-   `ClientToolTurn` branch, build model input with
-   `client_tool_continuation_input`. With `responses`, configure provider
-   retention when the original run starts and supply the matching provider
-   context when continuing.
-3. Update your store to track the new lifecycle and preserve the native
-   continuation. Let in-flight callbacks finish on the old release before
-   switching traffic, or have users reload and restart affected interactions.
-   Preserve completed history and let the new server issue fresh tool IDs.
-4. Verify a fresh reply and a browser callback completing its own tool
-   call after reopening a durable store. Use different payloads for the
-   model call and browser handler. Check that the new model run receives the
-   browser result and any server tool results with the original `call_id`
-   values. Run the check with your chosen continuation strategy. Confirm
-   that duplicate callbacks and callbacks for a superseded turn are rejected.
-
-For a rollback, switch the browser handler, Python artifact, and store
-implementation together. Keep the previous compatible storage schema or a
-rollback plan for its migrations. Finish or restart in-flight tool calls on
-the matching release, and reload clients still carrying the previous browser
-bundle.
+1. Send a message that requests the browser tool. Complete its callback
+   after reopening the server with the same durable store.
+2. Check that the browser receives its handler input and the next model run
+   receives the tool results with the original `call_id` values. Use your
+   application's selected continuation strategy.
+3. Repeat the callback, then try a callback from a turn superseded by a
+   new message. Check that both are rejected.
 
 

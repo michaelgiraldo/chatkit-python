@@ -1,7 +1,8 @@
 # Quick start
 
-Run the self-hosted ChatKit demo from this checkout. It uses sample replies and
-widgets and runs without an API key.
+Run the self-hosted ChatKit demo from a checkout of this fork. It uses sample
+replies and widgets and runs without a model API key. To add the SDK to an
+application, follow [Install Turnspan in an app](index.md#install-turnspan-in-an-app).
 
 ## Run your ChatKit server
 
@@ -41,7 +42,7 @@ a `Turn` with the thread, trigger, and request context. The endpoint calls
 `chatkit.fastapi.process_request(server, request, context={})`. The adapter
 closes streams on disconnect and returns JSON errors for invalid requests,
 missing resources, and conflicting thread state.
-[FastAPI adapter reference](api/chatkit/fastapi.md)
+[Server integration guide](guides/respond-to-user-message.md)
 
 ## Store chat data
 

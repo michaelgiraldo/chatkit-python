@@ -1,4 +1,4 @@
-name: Prepare Turnspan release
+name: Verify Turnspan release
 
 on:
   workflow_dispatch:
@@ -7,10 +7,6 @@ on:
         description: Full commit SHA to verify
         required: true
         type: string
-      create_draft:
-        description: Create an unpublished GitHub release draft after verification
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -26,11 +22,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-    outputs:
-      sha: ${{ steps.ci.outputs.sha }}
-      version: ${{ steps.check.outputs.version }}
-      tag: ${{ steps.check.outputs.tag }}
-      notes_b64: ${{ steps.check.outputs.notes_b64 }}
     steps:
       - name: Verify main ancestry and CI
         id: ci
@@ -80,85 +71,15 @@ jobs:
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Check consumer install and build release notes
-        id: check
         env:
           RELEASE_SHA: ${{ steps.ci.outputs.sha }}
           CI_URL: ${{ steps.ci.outputs.ci_url }}
         run: |
+          notes="$RUNNER_TEMP/turnspan-release-notes.md"
           uv run --no-project --python 3.14 python scripts/check-release.py \
-            --sha "$RELEASE_SHA" --github-archive --ci-url "$CI_URL" \
-            --github-output "$GITHUB_OUTPUT"
-
-  draft:
-    name: Prepare the GitHub release draft
-    needs: verify
-    if: inputs.create_draft
-    runs-on: ubuntu-latest
-    concurrency:
-      group: turnspan-release-drafts
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    steps:
-      - name: Create or find the matching unpublished draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ needs.verify.outputs.sha }}
-          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
-          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
-          RELEASE_NOTES_BASE64: ${{ needs.verify.outputs.notes_b64 }}
-        run: |
-          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ||
-                ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+turnspan\.[0-9]+$ ||
-                "$RELEASE_TAG" != "v$RELEASE_VERSION" || -z "$RELEASE_NOTES_BASE64" ]]; then
-            echo 'Missing or invalid verified release metadata.' >&2
-            exit 1
-          fi
-
-          tag_ref="refs/tags/$RELEASE_TAG"
-          refs="$(git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY.git" \
-            "$tag_ref" "$tag_ref^{}")"
-          tag_sha="$(awk -v ref="$tag_ref" '
-            $2 == ref { object = $1 }
-            $2 == ref "^{}" { commit = $1 }
-            END { print (commit == "" ? object : commit) }
-          ' <<< "$refs")"
-          if [[ -n "$tag_sha" && "$tag_sha" != "$RELEASE_SHA" ]]; then
-            echo 'The release tag already points to a different commit.' >&2
-            exit 1
-          fi
-
-          releases="$(
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]' |
-              jq -cs --arg tag "$RELEASE_TAG" '[.[] | select(.tag_name == $tag)]'
-          )"
-          case "$(jq length <<< "$releases")" in
-            0)
-              notes="$RUNNER_TEMP/turnspan-release-notes.md"
-              printf '%s' "$RELEASE_NOTES_BASE64" | base64 --decode > "$notes"
-              test -s "$notes"
-              turnspan_number="${RELEASE_VERSION##*.}"
-              draft_url="$(gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-                --target "$RELEASE_SHA" --draft --latest=false \
-                --title "Turnspan $turnspan_number" --notes-file "$notes")"
-              ;;
-            1)
-              if ! jq -e '.[0] | .draft and (.immutable != true)' <<< "$releases" > /dev/null; then
-                echo 'This version already has a published or immutable GitHub release.' >&2
-                exit 1
-              fi
-              draft_target="$(jq -r '.[0].target_commitish' <<< "$releases")"
-              if [[ -z "$tag_sha" && "$draft_target" != "$RELEASE_SHA" ]]; then
-                echo 'The existing draft targets a different commit.' >&2
-                exit 1
-              fi
-              draft_url="$(jq -er '.[0].html_url' <<< "$releases")"
-              ;;
-            *)
-              echo 'More than one GitHub release has this tag. Review the releases before continuing.' >&2
-              exit 1
-              ;;
-          esac
-
-          printf 'Draft for `%s` at `%s`: %s\n' \
-            "$RELEASE_TAG" "$RELEASE_SHA" "$draft_url" >> "$GITHUB_STEP_SUMMARY"
+            --sha "$RELEASE_SHA" --github-archive --ci-url "$CI_URL" > "$notes"
+          {
+            printf '## Release notes\n\n%s\n' '````markdown'
+            cat "$notes"
+            printf '%s\n' '````'
+          } >> "$GITHUB_STEP_SUMMARY"

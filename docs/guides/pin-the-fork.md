@@ -73,12 +73,5 @@ PY
    move. The resolved artifact and its installed metadata establish what is
    serving traffic.
 
-To roll back, switch traffic to the previous verified artifact if your
-platform supports it. For a rebuild, restore the previous manifest and
-lockfile. Verify the serving revision again after switching traffic. If
-you are rolling back the Turnspan 6 browser callback change, restore the
-browser bundle, server, and matching store data together.
-[Turnspan 3 to 6 rollback guide](upgrade-turnspan-3-to-6.md#roll-back-together)
-
 [uv URL dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/#url) ·
 [Python direct URL metadata](https://packaging.python.org/en/latest/specifications/direct-url-data-structure/)
