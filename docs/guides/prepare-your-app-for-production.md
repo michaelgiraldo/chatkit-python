@@ -224,6 +224,37 @@ Implement `resolve_locale` using the preferences and fallback described above.
 Enforce per-user or per-tenant access in your thread store, attachment stores,
 and tools. Check the authenticated request context before returning or changing data.
 
+### Check thread history with a signed visitor session
+
+After deploying, list threads through the same HTTPS endpoint the browser uses.
+A health check or successful sign-in can pass while the app's chat server or
+store still fails to initialize. Turnspan handles `threads.list` by calling
+`store.load_threads` with the authenticated request context. This reads history
+without creating a thread or invoking the responder.
+
+Use your app's normal session flow to obtain a short-lived credential for a
+fresh test visitor whose history is empty. Session issuance and the credential
+format belong to your app. For a bearer-token deployment, supply the session
+token in `CHATKIT_SESSION_TOKEN` and the deployed ChatKit URL in `CHATKIT_URL`.
+For cookie-based authentication, send the visitor's session cookie instead.
+
+```bash
+set -o pipefail
+curl --silent --show-error --fail --max-time 15 \
+  --header 'Content-Type: application/json' --header @- \
+  --data '{"type":"threads.list","params":{}}' "${CHATKIT_URL:?}" <<EOF | \
+  jq --exit-status '.data == [] and .has_more == false and .after == null'
+Authorization: Bearer ${CHATKIT_SESSION_TOKEN:?}
+EOF
+```
+
+Expect HTTP 200 and an empty JSON page, typically
+`{"data":[],"has_more":false}`. The command prints only whether the page matches.
+If the route denies the request, check the session and the URL. If it returns
+HTTP 500, check the app's server construction, store configuration and database
+read permissions. Repeat without the credential and confirm the protected route
+rejects the request according to your app's authentication policy.
+
 ### Handle PII and data retention
 
 Because ChatKit threads and items can contain user text, attachments, and tool output:
