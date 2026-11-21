@@ -48,6 +48,8 @@ install command, tested dependency versions, and links to docs at that commit.
   Turnspan reports `WAITING` after the save. A failed save reports `FAILED`.
 - Transcript replay uses assistant input text and preserves a recorded
   Responses message phase for the next model request.
+- A private context item from the app or SDK leaves an active progress
+  display open while the agent continues working.
 - **Custom stores** must reject an older form while a different turn is
   starting or running. Implement the ownership check in the claim transaction.
 - A custom store must filter server-only items before paginating browser

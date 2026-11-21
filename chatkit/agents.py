@@ -68,7 +68,7 @@ from .models import (
     WorkflowItem,
     WorkflowSummary,
 )
-from .store import StoreItemType, ThreadStore
+from .store import HIDDEN_ITEM_TYPES, StoreItemType, ThreadStore
 from .turns import (
     ApprovalRequired,
     ClientToolLocalContinuation,
@@ -748,7 +748,8 @@ async def _stream_agent_response(
             if (
                 context.workflow_item
                 and context.workflow_item.id != item.id
-                and item.type not in {"client_tool_call", "hidden_context_item"}
+                and item.type != "client_tool_call"
+                and item.type not in HIDDEN_ITEM_TYPES
             ):
                 yield finish_workflow(context.workflow_item)
 

@@ -67,7 +67,9 @@ from chatkit.models import (
     CustomSummary,
     CustomTask,
     DurationSummary,
+    HiddenContextItem,
     Page,
+    SDKHiddenContextItem,
     SearchTask,
     ThoughtTask,
     URLSource,
@@ -1064,6 +1066,37 @@ async def test_resumed_workflow_updates_existing_record(
         assert item.workflow.expanded is (finish == "explicit")
         assert context.workflow_item is None
     store.save_item.assert_not_awaited()
+
+
+@pytest.mark.parametrize("item_type", [HiddenContextItem, SDKHiddenContextItem])
+async def test_server_only_context_leaves_the_display_workflow_open(item_type):
+    context = AgentContext(
+        thread=thread, store=mock_store, request_context=None, resume_from=None
+    )
+    await context.start_workflow(
+        Workflow(type="custom", tasks=[CustomTask(title="Checking availability")])
+    )
+    workflow = context.workflow_item
+    assert workflow is not None
+    hidden = ThreadItemDoneEvent(
+        item=item_type(
+            id="private",
+            thread_id=thread.id,
+            created_at=datetime.now(UTC),
+            content="note",
+        )
+    )
+    await context.stream(hidden)
+    result = RunResult()
+    result.done()
+
+    events = await all_events(stream_agent_response(context, result))
+    assert events == [
+        ThreadItemAddedEvent(item=workflow),
+        hidden,
+        PersistWorkflow(item=workflow, replace=False),
+    ]
+    assert context.workflow_item is workflow
 
 
 async def test_prequeued_workflow_completion_does_not_reopen_workflow():
