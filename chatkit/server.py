@@ -401,7 +401,9 @@ class ChatKitServer[TContext = Any](ABC):
     ) -> ImmediateResult:
         match request:
             case ThreadsGetByIdReq():
-                return await self._load_full_thread(request.params.thread_id, context)
+                return await self._load_thread_with_first_page(
+                    request.params.thread_id, context
+                )
             case ThreadsListReq():
                 params = request.params
                 threads = await self.store.load_threads(
@@ -1071,7 +1073,9 @@ class ChatKitServer[TContext = Any](ABC):
             raise ValueError("prepare_user_message must preserve message identity")
         return prepared
 
-    async def _load_full_thread(self, thread_id: str, context: TContext) -> Thread:
+    async def _load_thread_with_first_page(
+        self, thread_id: str, context: TContext
+    ) -> Thread:
         thread_meta = await self.store.load_thread(thread_id, context=context)
         thread_items = await self.store.load_thread_items(
             thread_id,

@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import timedelta
 
 import pytest
 from fastapi import FastAPI, Request, Response
@@ -12,6 +13,8 @@ from chatkit.events import (
 )
 from chatkit.fastapi import ChatKitStreamingResponse, process_request
 from chatkit.models import (
+    AssistantMessageContent,
+    AssistantMessageItem,
     HiddenContextItem,
     Page,
     SDKHiddenContextItem,
@@ -292,6 +295,66 @@ def test_process_request_reports_missing_thread(client: TestClient):
     assert response.status_code == 404
     assert response.json()["detail"]
     assert "example-missing" not in response.text
+
+
+async def test_browser_reopens_thread_and_continues_from_first_page_cursor():
+    thread = make_thread()
+    visible_ids = [f"message-{i:02}" for i in range(1, 26)]
+    with make_server() as server, make_client(server) as client:
+        await server.store.save_thread(thread, DEFAULT_CONTEXT)
+        for index, item_id in enumerate(visible_ids, start=1):
+            message = AssistantMessageItem(
+                id=item_id,
+                thread_id=thread.id,
+                created_at=thread.created_at + timedelta(seconds=index),
+                content=[AssistantMessageContent(text=f"Reply {index}")],
+            )
+            await server.store.add_thread_item(thread.id, message, DEFAULT_CONTEXT)
+        for second, note_type in (
+            (19.5, HiddenContextItem),
+            (20.5, SDKHiddenContextItem),
+        ):
+            note = note_type(
+                id=f"private-{second}",
+                thread_id=thread.id,
+                created_at=thread.created_at + timedelta(seconds=second),
+                content="Private note",
+            )
+            await server.store.add_thread_item(thread.id, note, DEFAULT_CONTEXT)
+
+        opened = client.post(
+            "/chatkit",
+            json={"type": "threads.get_by_id", "params": {"thread_id": thread.id}},
+        )
+        assert opened.status_code == 200
+        loaded = opened.json()
+        assert loaded["id"] == thread.id
+        assert loaded["title"] == thread.title
+        first = loaded["items"]
+        assert [item["id"] for item in first["data"]] == visible_ids[:20]
+        assert first["has_more"] is True
+        assert first["after"]
+
+        continued = client.post(
+            "/chatkit",
+            json={
+                "type": "items.list",
+                "params": {
+                    "thread_id": thread.id,
+                    "after": first["after"],
+                    "order": "asc",
+                    "limit": 9999,
+                },
+            },
+        )
+        assert continued.status_code == 200
+        last = continued.json()
+        assert [item["id"] for item in last["data"]] == visible_ids[20:]
+        assert last["has_more"] is False
+        assert "after" not in last
+        for response in (opened, continued):
+            assert "private-" not in response.text
+            assert "Private note" not in response.text
 
 
 @pytest.mark.parametrize("operation", ["items.list", "threads.get_by_id"])
