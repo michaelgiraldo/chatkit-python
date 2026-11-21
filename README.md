@@ -16,6 +16,8 @@ Use the [quickstart](docs/quickstart.md) to run a server or the
 commit. Browse the [published docs](https://michaelgiraldo.github.io/chatkit-python/)
 for the guides and generated API reference.
 The [changelog](docs/release.md) covers branch changes and past releases.
+The [project scope](docs/index.md#project-scope) explains what belongs in the
+shared server SDK and what each application owns.
 The [upstream status page](docs/upstream-status.md) records review decisions.
 
 ## Develop Turnspan
