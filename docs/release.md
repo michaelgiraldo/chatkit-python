@@ -30,6 +30,12 @@ The `openai-chatkit` package on PyPI is published by the
 The workflow only verifies and produces notes. The notes include the commit,
 install command, tested dependency versions, and links to docs at that commit.
 
+## Unreleased
+
+- The server keeps its own copies of streamed content, citations, and workflow
+  tasks. A responder can assemble its final message without duplicating text,
+  and edits it hasn't emitted stay out of a partial reply saved on disconnect.
+
 ## Turnspan 6 (`1.6.5+turnspan.6`)
 
 - **Breaking store contract.** Every streaming response has a durable turn
