@@ -1,11 +1,13 @@
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
+from typing import Literal
 
 import httpx2
 import pytest
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
     ModelSettings,
     OpenAIResponsesModel,
     RunConfig,
@@ -13,6 +15,7 @@ from agents import (
     Runner,
     RunState,
     function_tool,
+    output_guardrail,
 )
 
 from chatkit.agents import AgentContext, stream_agent_response
@@ -28,11 +31,20 @@ from tests.helpers.server import DEFAULT_CONTEXT
 from tests.helpers.turn_server import RecordingServer, create_thread
 
 
+@pytest.mark.parametrize("delivery", ["streaming", "reviewed_text"])
 async def test_approval_pause_saves_private_state_and_resumes_after_review(
-    tmp_path: Path,
+    tmp_path: Path, delivery: Literal["streaming", "reviewed_text"]
 ):
     calls: list[str] = []
     saved: dict[tuple[str, str, str], str] = {}
+    reviewed: list[str] = []
+
+    @output_guardrail
+    async def check_answer(
+        _context: RunContextWrapper[AgentContext], _agent: Agent, output: str
+    ) -> GuardrailFunctionOutput:
+        reviewed.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
 
     @function_tool(needs_approval=True)
     async def client_read(source: str) -> str:
@@ -74,6 +86,7 @@ async def test_approval_pause_saves_private_state_and_resumes_after_review(
             model=OpenAIResponsesModel("gpt-6-luna", client),
             model_settings=ModelSettings(store=False),
             tools=[client_read, server_lookup],
+            output_guardrails=[check_answer],
         )
         run_config = RunConfig(tracing_disabled=True)
 
@@ -87,7 +100,9 @@ async def test_approval_pause_saves_private_state_and_resumes_after_review(
             result = Runner.run_streamed(
                 agent, "Hello", context=context, run_config=run_config
             )
-            async with aclosing(stream_agent_response(context, result)) as events:
+            async with aclosing(
+                stream_agent_response(context, result, delivery=delivery)
+            ) as events:
                 async for event in events:
                     yield event
 
@@ -100,6 +115,7 @@ async def test_approval_pause_saves_private_state_and_resumes_after_review(
             is TurnState.WAITING
         )
         assert calls == []
+        assert reviewed == []
         checkpoint = saved[turn.context.user_id, turn.thread.id, turn.id]
         assert "synthetic-opaque-reasoning" in checkpoint
         thread = await server.process(
@@ -111,6 +127,11 @@ async def test_approval_pause_saves_private_state_and_resumes_after_review(
             b"synthetic-opaque-reasoning" not in encode_message(item)
             for item in [*events, thread]
         )
+        if delivery == "reviewed_text":
+            assert all(
+                b"check the selection" not in encode_message(item)
+                for item in [*events, thread]
+            )
 
         context = AgentContext(
             thread=turn.thread,
@@ -126,7 +147,9 @@ async def test_approval_pause_saves_private_state_and_resumes_after_review(
         state.approve(first)
         state.reject(second)
         resumed = Runner.run_streamed(agent, state, run_config=run_config)
-        async with aclosing(stream_agent_response(context, resumed)) as events:
+        async with aclosing(
+            stream_agent_response(context, resumed, delivery=delivery)
+        ) as events:
             replies = [
                 part.text
                 async for event in events
@@ -136,6 +159,7 @@ async def test_approval_pause_saves_private_state_and_resumes_after_review(
             ]
         assert replies == ["Example reply"]
         assert calls == ["client_read"]
+        assert reviewed == ["Example reply"]
         assert resumed.interruptions == []
         assert resumed.final_output == "Example reply"
 

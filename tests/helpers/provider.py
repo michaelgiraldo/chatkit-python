@@ -124,7 +124,12 @@ def chat_completions_stream(turn: int, choices: list[dict]) -> str:
 
 
 def client_tool_stream(
-    api: Literal["responses", "chat_completions"], turn: int, model_arguments: str
+    api: Literal["responses", "chat_completions"],
+    turn: int,
+    model_arguments: str,
+    *,
+    message_text: str = "I’ll check the selection.",
+    message_phase: Literal["commentary", "final_answer"] = "commentary",
 ) -> str:
     names = ("client_read", "server_lookup")
     if api == "chat_completions":
@@ -154,7 +159,7 @@ def client_tool_stream(
 
     commentary_content = {
         "type": "output_text",
-        "text": "I’ll check the selection.",
+        "text": message_text,
         "annotations": [],
     }
     items = [
@@ -169,7 +174,7 @@ def client_tool_stream(
             "id": f"msg_commentary_{turn}",
             "type": "message",
             "role": "assistant",
-            "phase": "commentary",
+            "phase": message_phase,
             "content": [commentary_content],
             "status": "completed",
         },

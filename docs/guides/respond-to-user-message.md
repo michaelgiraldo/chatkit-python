@@ -656,6 +656,33 @@ async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
 
 `stream_agent_response` forwards these events alongside assistant text and tool updates. To call a browser callback from an agent tool, use [`request_client_tool`](update-client-during-response.md#define-a-client-tool-in-your-agent).
 
+### Deliver reviewed text
+
+For a chat that promises to check an answer before a visitor can see or reload
+it, configure an Agents SDK output guardrail on the agent that produces the
+final answer or on its `RunConfig`. Select reviewed delivery when forwarding
+that run.
+
+```python
+async with aclosing(
+    stream_agent_response(agent_context, result, delivery="reviewed_text")
+) as events:
+    async for event in events:
+        yield event
+```
+
+The visitor receives one completed assistant item containing the exact string
+that passed review. A successful empty answer leaves the transcript unchanged.
+If a check rejects, raises an error, or is cancelled, the candidate stays out
+of the ChatKit response and transcript. The adapter requires a successful
+output guardrail result for the final text. A run without one fails.
+
+Output guardrails inspect the final answer. Reviewed delivery discards
+intermediate commentary, progress, citations, widgets, and other app events.
+Use ordinary streaming for interactive browser tool handoffs. Model calls,
+server tool side effects, and application-owned storage follow the app's
+normal policies.
+
 ### Save structured tool results after a turn
 
 Use the same `AgentContext` for the run and the ChatKit stream. Inside a tool,

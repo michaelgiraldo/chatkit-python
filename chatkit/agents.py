@@ -12,7 +12,9 @@ from typing import (
 
 from agents import (
     InputGuardrailTripwireTriggered,
+    MessageOutputItem,
     OutputGuardrailTripwireTriggered,
+    RawResponsesStreamEvent,
     RunResultStreaming,
     StreamEvent,
     ToolCallOutputItem,
@@ -42,6 +44,7 @@ from pydantic import (
 
 from ._stream import _close_stream
 from ._web_search import _WebSearchProgress
+from .errors import BaseStreamError, ErrorCode, StreamError
 from .events import (
     AssistantMessageContentPartAdded,
     AssistantMessageContentPartAnnotationAdded,
@@ -604,11 +607,80 @@ async def _convert_annotation(
     return None
 
 
+def _record_reviewed_phase(
+    phases: dict[str, AssistantMessagePhase], event: StreamEvent | _EventWrapper
+) -> None:
+    if not isinstance(event, RawResponsesStreamEvent):
+        return
+    data = event.data
+    if data.type == "response.created":
+        phases.clear()
+    elif (
+        data.type == "response.output_item.added"
+        or data.type == "response.output_item.done"
+    ):
+        item = data.item
+        if (
+            item.type == "message"
+            and item.phase
+            and item.id != _CHAT_COMPLETIONS_PLACEHOLDER_ID
+        ):
+            phases[item.id] = item.phase
+
+
+def _reviewed_text_message(
+    context: AgentContext,
+    result: RunResultStreaming,
+    streamed_phases: dict[str, AssistantMessagePhase],
+) -> AssistantMessageItem | None:
+    text = result.final_output
+    if not result.is_complete or not isinstance(text, str):
+        raise ValueError("Reviewed text delivery requires a completed string output.")
+    checks = result.output_guardrail_results
+    if not checks or not all(
+        check.agent is result.last_agent
+        and check.agent_output == text
+        and not check.output.tripwire_triggered
+        for check in checks
+    ):
+        raise ValueError(
+            "Reviewed text delivery requires a passed output guardrail for the final text."
+        )
+
+    if not text:
+        return None
+
+    # A tool can produce the final output, or the provider can omit a real ID.
+    # Reuse a provider ID only when its message actually contains the reviewed text.
+    item_id = None
+    phase = None
+    if result.new_items and isinstance(result.new_items[-1], MessageOutputItem):
+        item = result.new_items[-1].raw_item
+        message_phase = item.phase or streamed_phases.get(item.id)
+        if (
+            message_phase != "commentary"
+            and len(item.content) == 1
+            and item.content[0].type == "output_text"
+            and item.content[0].text == text
+        ):
+            phase = message_phase
+            if item.id != _CHAT_COMPLETIONS_PLACEHOLDER_ID:
+                item_id = item.id
+    return AssistantMessageItem(
+        id=item_id or context.generate_id("message"),
+        thread_id=context.thread.id,
+        phase=phase,
+        created_at=datetime.now(UTC),
+        content=[AssistantMessageContent(text=text)],
+    )
+
+
 async def stream_agent_response(
     context: AgentContext,
     result: RunResultStreaming,
     *,
     converter: ResponseStreamConverter = _DEFAULT_RESPONSE_STREAM_CONVERTER,
+    delivery: Literal["streaming", "reviewed_text"] = "streaming",
 ) -> AsyncGenerator[ResponderEvent]:
     """
     Convert a streamed Agents SDK run into ChatKit thread stream events.
@@ -622,6 +694,9 @@ async def stream_agent_response(
         result: The RunResultStreaming to convert.
         converter: Defines overridable methods for adapting streamed data (such as image
             generation results and partial updates) into the forms expected by ChatKit.
+        delivery: Stream events immediately, or publish only the final string after its
+            Agents SDK output guardrails pass. Reviewed text excludes intermediate events,
+            annotations, app UI events and browser tool handoffs.
 
     Returns:
         An async iterator that yields thread stream events representing the run result.
@@ -641,22 +716,25 @@ async def stream_agent_response(
             logger.exception("Failed to cancel the Agents SDK run")
 
     merged_events = _merge_generators(model_events, queue_iterator, on_abort=cancel_run)
+    reviewed_phases: dict[str, AssistantMessagePhase] = {}
     try:
-        async with aclosing(
-            _stream_agent_response(context, merged_events, queue_iterator, converter)
-        ) as events:
-            async for event in events:
-                yield event
-    except BaseException:
-        cancel_run()
-        context._events.shutdown(immediate=True)
-        for stream in (merged_events, model_events):
-            try:
-                await _close_stream(stream)
-            except Exception, asyncio.CancelledError:
-                logger.exception("Failed to close an agent event stream")
-        raise
-    else:
+        if delivery == "reviewed_text":
+            # SDK guardrails check the final output, not every event emitted on the way.
+            # Consume both sources without exposing or retaining their candidate events.
+            async with aclosing(merged_events):
+                async for event in merged_events:
+                    _record_reviewed_phase(reviewed_phases, event)
+            context._events.shutdown(immediate=True)
+        elif delivery == "streaming":
+            async with aclosing(
+                _stream_agent_response(
+                    context, merged_events, queue_iterator, converter
+                )
+            ) as events:
+                async for event in events:
+                    yield event
+        else:
+            raise ValueError("Unknown Agents response delivery mode.")
         await _close_stream(model_events)
         if result.interruptions:
             if context._client_tool_request is not None:
@@ -665,6 +743,15 @@ async def stream_agent_response(
             # The app restores these from the authorized thread when resuming.
             checkpoint = result.to_state().to_string(context_serializer=lambda _: {})
             yield ApprovalRequired(checkpoint)
+            return
+        if delivery == "reviewed_text":
+            if context._client_tool_request is not None:
+                raise ValueError(
+                    "Reviewed text delivery cannot issue a browser tool request."
+                )
+            message = _reviewed_text_message(context, result, reviewed_phases)
+            if message is not None:
+                yield ThreadItemDoneEvent(item=message)
             return
         if (request := context._client_tool_request) is not None:
             item_id = request.item_id
@@ -681,6 +768,20 @@ async def stream_agent_response(
                 call_id=request.call_id,
                 model_continuation=_capture_model_continuation(request, result),
             )
+    except BaseException as error:
+        cancel_run()
+        context._events.shutdown(immediate=True)
+        for stream in (merged_events, model_events):
+            try:
+                await _close_stream(stream)
+            except Exception, asyncio.CancelledError:
+                logger.exception("Failed to close an agent event stream")
+        if delivery == "reviewed_text" and isinstance(error, BaseStreamError):
+            # Error messages from checks and provider callbacks can contain the candidate.
+            raise StreamError(
+                ErrorCode.STREAM_ERROR, allow_retry=error.allow_retry
+            ) from None
+        raise
 
 
 async def _stream_agent_response(
