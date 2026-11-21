@@ -167,6 +167,69 @@ async def test_app_store_checks_work_with_independent_instances(tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("check", [check_thread_store, check_client_tool_store])
+@pytest.mark.parametrize(
+    "independent_peer", [False, True], ids=["single-store", "peer-store"]
+)
+async def test_store_checks_isolate_requests_from_the_same_visitor(
+    tmp_path: Path, check, independent_peer: bool
+):
+    class Context(RequestContext):
+        turn_id: str | None = None
+
+    visitor = Context(user_id="visitor")
+    other = Context(user_id="another-visitor")
+    factory_visitors: set[str] = set()
+    claims: list[Context] = []
+
+    def new_request(template: Context) -> Context:
+        factory_visitors.add(template.user_id)
+        return Context(user_id=template.user_id)
+
+    class RequestAwareStore(SQLiteThreadStore[Context]):
+        async def start_turn(self, thread_id, turn_id, context):
+            await super().start_turn(thread_id, turn_id, context)
+            context.turn_id = turn_id
+
+        async def register_client_tool_call(self, thread_id, item, invocation, context):
+            assert context.turn_id == invocation.turn_id, (
+                "Tool registration lost its turn"
+            )
+            await super().register_client_tool_call(
+                thread_id, item, invocation, context
+            )
+
+        async def claim_pending_item(
+            self, thread_id, expected, replacement, context, *, next_turn_id=None
+        ):
+            assert context.turn_id is None, (
+                "Submission inherited another request's turn"
+            )
+            claims.append(context)
+            context.turn_id = next_turn_id
+            await asyncio.sleep(0)  # Let the competing request bind its own turn.
+            assert context.turn_id == next_turn_id
+            return await super().claim_pending_item(
+                thread_id, expected, replacement, context, next_turn_id=next_turn_id
+            )
+
+    path = tmp_path / "requests.sqlite3"
+    await check(
+        RequestAwareStore(path),
+        visitor,
+        other_context=other,
+        peer=RequestAwareStore(path) if independent_peer else None,
+        context_factory=new_request,
+    )
+
+    first, second = claims[-2:]
+    assert first is not second
+    assert first.user_id == second.user_id == visitor.user_id
+    assert first.turn_id != second.turn_id
+    assert visitor.turn_id is None
+    assert factory_visitors == {visitor.user_id, other.user_id}
+
+
 async def test_core_store_check_works_without_browser_tools(tmp_path: Path):
     class TextOnlyStore(SQLiteThreadStore[RequestContext]):
         register_client_tool_call = ThreadStore.register_client_tool_call

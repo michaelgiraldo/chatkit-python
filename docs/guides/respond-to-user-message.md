@@ -388,10 +388,20 @@ browser tools, run `check_client_tool_store` to verify private invocations,
 exact callback claims, cancellation, and visible history. Each check creates
 and deletes its own synthetic thread in a disposable database.
 
+If your request context holds mutable state, pass a `context_factory` to each
+check. It receives the visitor's template and returns a new context with the
+same user and tenant identity. Two submissions from one visitor then have
+separate request state. Operations within a single simulated turn share their
+context. Omitting the factory reuses the supplied contexts.
+
 ```python
 import pytest
 
 from chatkit.store_checks import check_client_tool_store, check_thread_store
+
+
+def new_request(template: RequestContext) -> RequestContext:
+    return RequestContext(user_id=template.user_id)
 
 
 @pytest.mark.asyncio
@@ -401,9 +411,13 @@ async def test_app_store(tmp_path):
     peer = SQLiteThreadStore[RequestContext](path)
     user = RequestContext(user_id="example-user")
     other = RequestContext(user_id="other-example-user")
-    await check_thread_store(store, user, other_context=other, peer=peer)
+    await check_thread_store(
+        store, user, other_context=other, peer=peer, context_factory=new_request
+    )
     # Include this check for stores that support browser tools.
-    await check_client_tool_store(store, user, other_context=other, peer=peer)
+    await check_client_tool_store(
+        store, user, other_context=other, peer=peer, context_factory=new_request
+    )
 ```
 
 For async adapters, supply independent store instances sharing the test database
