@@ -242,7 +242,10 @@ thread and item methods. Implement `claim_pending_item`, `patch_thread`, and
 `patch_thread` to edit saved fields, and yield the result of
 `ChatKitServer.update_thread` when a connected client should see an edit.
 For `load_thread_items(..., include_hidden=False)`, filter the model-only items
-before computing the page and its cursor.
+before computing the page and its cursor. Turnspan rejects a store result
+that contains either hidden item type. When a responder supplies its own
+paginated thread snapshot, apply the same filter before calculating its
+cursor. Turnspan can filter a complete, unpaginated snapshot directly.
 
 Keep one current turn ID per authenticated thread. `begin_turn` saves the
 trigger, supersedes the current turn, and cancels any pending callback in

@@ -15,16 +15,26 @@ from .models import Page, Thread, ThreadItem, ThreadMetadata
 from .store import HIDDEN_ITEM_TYPES
 
 
+def require_visible_page(page: Page[ThreadItem]) -> Page[ThreadItem]:
+    """A page containing hidden records cannot supply reliable public cursors."""
+    if any(item.type in HIDDEN_ITEM_TYPES for item in page.data):
+        raise RuntimeError("A browser history page contains a server-only item")
+    return page
+
+
 def browser_thread(
     thread: ThreadMetadata,
     *,
-    items: Page[ThreadItem] | None = None,
+    stored_page: Page[ThreadItem] | None = None,
     hidden_item_ids: set[str] | None = None,
 ) -> Thread:
     """Copy public thread fields and retain the store's pagination cursor."""
-    if items is None and isinstance(thread, Thread):
-        items = thread.items
-    if items is not None:
+    items = stored_page
+    if items is None:
+        items = thread.items if isinstance(thread, Thread) else Page[ThreadItem]()
+    if stored_page is not None or items.has_more or items.after is not None:
+        require_visible_page(items)
+    elif items.data:
         visible = []
         for item in items.data:
             if item.type not in HIDDEN_ITEM_TYPES:
@@ -36,7 +46,7 @@ def browser_thread(
         id=thread.id,
         title=thread.title,
         created_at=thread.created_at,
-        items=items if items is not None else Page(),
+        items=items,
         status=thread.status,
         allowed_image_domains=thread.allowed_image_domains,
     )

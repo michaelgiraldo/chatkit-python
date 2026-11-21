@@ -20,7 +20,12 @@ from chatkit.errors import (
     UnsupportedOperationError,
 )
 
-from ._browser_output import browser_event, browser_thread, browser_widget_response
+from ._browser_output import (
+    browser_event,
+    browser_thread,
+    browser_widget_response,
+    require_visible_page,
+)
 from ._stream import _close_stream, _closing_stream
 from .actions import Action
 from .events import (
@@ -460,7 +465,7 @@ class ChatKitServer[TContext = Any](ABC):
                 )
             case ItemsListReq():
                 items_list_params = request.params
-                return await self.store.load_thread_items(
+                items = await self.store.load_thread_items(
                     items_list_params.thread_id,
                     limit=items_list_params.limit or DEFAULT_PAGE_SIZE,
                     order=items_list_params.order,
@@ -468,6 +473,7 @@ class ChatKitServer[TContext = Any](ABC):
                     context=context,
                     include_hidden=False,
                 )
+                return require_visible_page(items)
             case ThreadsUpdateReq():
                 updated = await self.store.patch_thread(
                     request.params.thread_id, {"title": request.params.title}, context
@@ -1151,4 +1157,4 @@ class ChatKitServer[TContext = Any](ABC):
             context=context,
             include_hidden=False,
         )
-        return browser_thread(thread_meta, items=thread_items)
+        return browser_thread(thread_meta, stored_page=thread_items)
