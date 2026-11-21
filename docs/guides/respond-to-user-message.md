@@ -227,6 +227,14 @@ ownership at most once per 250 ms of emitted updates, with fresh checks
 at durable event boundaries. A transient frame already in flight can
 still reach the browser when a newer turn takes ownership.
 
+If a visitor submits an older form from a second tab while a newer reply is
+starting or running, the FastAPI adapter returns HTTP 409. The newer reply
+continues and the form stays pending. To implement this behavior, save the
+issuing turn ID with the form. Compare it with the active turn inside the
+transaction that claims the form. A form issued by the active turn can be
+answered immediately. Once the newer reply finishes, an older pending form
+can be submitted again.
+
 For a retry, `truncate_after` returns the retained `UserMessageItem`. Before
 returning, atomically make later items disappear from pagination and direct
 `load_item` reads using the same stable order as `load_thread_items`. For

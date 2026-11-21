@@ -164,6 +164,82 @@ async def test_app_store_checks_work_with_independent_instances(tmp_path: Path):
     )
 
 
+@pytest.fixture(params=["memory", "sqlite"])
+def form_store(request, tmp_path: Path):
+    if request.param == "memory":
+        memory = InMemoryThreadStore()
+        return lambda: memory, {}
+    path = tmp_path / "forms.sqlite3"
+    return lambda: SQLiteThreadStore[RequestContext](path), DEFAULT_CONTEXT
+
+
+@pytest.mark.parametrize("write", ["add", "upsert_new", "upsert_existing"])
+async def test_active_turn_accepts_only_its_own_form(form_store, write):
+    open_store, context = form_store
+    store = open_store()
+    thread = make_thread()
+    older = StructuredInputItem(
+        id="older", thread_id=thread.id, created_at=thread.created_at, inputs=[]
+    )
+    current = older.model_copy(update={"id": "current"})
+    await store.begin_turn(thread.id, "first", context, create_thread=thread)
+    await store.start_turn(thread.id, "first", context)
+    await store.add_thread_item(thread.id, older, context, turn_id="first")
+    if write == "upsert_existing":
+        await store.add_thread_item(thread.id, current, context, turn_id="first")
+
+    await store.begin_turn(thread.id, "second", context)
+    await store.start_turn(thread.id, "second", context)
+    issue_form = store.add_thread_item if write == "add" else store.save_item
+    await issue_form(thread.id, current, context, turn_id="second")
+
+    reader = open_store()
+    with pytest.raises(ConflictError):
+        await reader.claim_pending_item(
+            thread.id,
+            older,
+            older.model_copy(update={"status": "answered"}),
+            context,
+            next_turn_id="reply",
+        )
+    assert await reader.load_item(thread.id, older.id, context) == older
+    assert (
+        await reader.load_turn_state(thread.id, "second", context) == TurnState.RUNNING
+    )
+    answer = current.model_copy(update={"status": "answered"})
+    assert (
+        await reader.claim_pending_item(
+            thread.id, current, answer, context, next_turn_id="reply"
+        )
+        is None
+    )
+    assert await reader.load_item(thread.id, current.id, context) == answer
+    assert (
+        await reader.load_turn_state(thread.id, "reply", context) == TurnState.ACCEPTED
+    )
+
+
+async def test_reopening_an_answered_form_requires_an_explicit_owner(form_store):
+    open_store, context = form_store
+    store = open_store()
+    thread = make_thread()
+    pending = StructuredInputItem(
+        id="form", thread_id=thread.id, created_at=thread.created_at, inputs=[]
+    )
+    answered = pending.model_copy(update={"status": "answered"})
+    await store.begin_turn(thread.id, "owner", context, create_thread=thread)
+    await store.start_turn(thread.id, "owner", context)
+    await store.add_thread_item(thread.id, pending, context, turn_id="owner")
+    await store.claim_pending_item(thread.id, pending, answered, context)
+
+    await store.save_item(thread.id, pending, context)
+    with pytest.raises(ConflictError):
+        await store.claim_pending_item(thread.id, pending, answered, context)
+    await store.save_item(thread.id, pending, context, turn_id="owner")
+    await store.claim_pending_item(thread.id, pending, answered, context)
+    assert await store.load_item(thread.id, pending.id, context) == answered
+
+
 @pytest.mark.asyncio
 async def test_file_backed_example_reopens_with_stable_timestamp_order(tmp_path: Path):
     path = tmp_path / "turns.sqlite3"
