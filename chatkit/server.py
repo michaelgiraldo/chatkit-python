@@ -20,13 +20,16 @@ from chatkit.errors import (
     UnsupportedOperationError,
 )
 
+from ._browser_output import (
+    browser_event,
+    browser_thread,
+    browser_widget_response,
+    require_visible_page,
+)
+from ._pending_items import track_pending_item
 from ._stream import _close_stream, _closing_stream
 from .actions import Action
 from .events import (
-    AssistantMessageContentPartAdded,
-    AssistantMessageContentPartAnnotationAdded,
-    AssistantMessageContentPartDone,
-    AssistantMessageContentPartTextDelta,
     ErrorEvent,
     StreamOptions,
     StreamOptionsEvent,
@@ -39,12 +42,9 @@ from .events import (
     ThreadItemUpdatedEvent,
     ThreadStreamEvent,
     ThreadUpdatedEvent,
-    WorkflowTaskAdded,
-    WorkflowTaskUpdated,
 )
 from .logger import logger
 from .models import (
-    AssistantMessageContent,
     AssistantMessageItem,
     Attachment,
     AudioInput,
@@ -62,7 +62,6 @@ from .models import (
     UserMessageInput,
     UserMessageItem,
     WidgetItem,
-    WorkflowItem,
 )
 from .requests import (
     AttachmentsCreateReq,
@@ -88,7 +87,6 @@ from .requests import (
     is_streaming_req,
 )
 from .store import (
-    HIDDEN_ITEM_TYPES,
     AttachmentMetadataStore,
     AttachmentStore,
     ConflictError,
@@ -266,7 +264,7 @@ class ChatKitServer[TContext = Any](ABC):
         updated = await self.store.patch_thread(
             thread_id, patch, context, turn_id=turn_id
         )
-        return ThreadUpdatedEvent(thread=self._to_thread_response(updated))
+        return ThreadUpdatedEvent(thread=browser_thread(updated))
 
     async def add_feedback(  # noqa: B027
         self,
@@ -403,10 +401,9 @@ class ChatKitServer[TContext = Any](ABC):
     ) -> ImmediateResult:
         match request:
             case ThreadsGetByIdReq():
-                thread = await self._load_full_thread(
-                    request.params.thread_id, context=context
+                return await self._load_thread_with_first_page(
+                    request.params.thread_id, context
                 )
-                return self._to_thread_response(thread)
             case ThreadsListReq():
                 params = request.params
                 threads = await self.store.load_threads(
@@ -418,7 +415,7 @@ class ChatKitServer[TContext = Any](ABC):
                 return Page(
                     has_more=threads.has_more,
                     after=threads.after,
-                    data=[self._to_thread_response(thread) for thread in threads.data],
+                    data=[browser_thread(thread) for thread in threads.data],
                 )
             case ItemsFeedbackReq():
                 await self.add_feedback(
@@ -463,7 +460,7 @@ class ChatKitServer[TContext = Any](ABC):
                 )
             case ItemsListReq():
                 items_list_params = request.params
-                return await self.store.load_thread_items(
+                items = await self.store.load_thread_items(
                     items_list_params.thread_id,
                     limit=items_list_params.limit or DEFAULT_PAGE_SIZE,
                     order=items_list_params.order,
@@ -471,11 +468,12 @@ class ChatKitServer[TContext = Any](ABC):
                     context=context,
                     include_hidden=False,
                 )
+                return require_visible_page(items)
             case ThreadsUpdateReq():
                 updated = await self.store.patch_thread(
                     request.params.thread_id, {"title": request.params.title}, context
                 )
-                return self._to_thread_response(updated)
+                return browser_thread(updated)
             case ThreadsDeleteReq():
                 await self.store.delete_thread(
                     request.params.thread_id, context=context
@@ -669,12 +667,7 @@ class ChatKitServer[TContext = Any](ABC):
             item,
             context,
         )
-        if (
-            response.updated_item is not None
-            and response.updated_item.type in HIDDEN_ITEM_TYPES
-        ):
-            return SyncCustomActionResponse()
-        return response
+        return browser_widget_response(response)
 
     def _apply_structured_input_submission(
         self,
@@ -738,7 +731,7 @@ class ChatKitServer[TContext = Any](ABC):
         initial_events: list[ThreadStreamEvent] = []
         if create_thread:
             initial_events.append(
-                ThreadCreatedEvent(thread=self._to_thread_response(turn.thread))
+                ThreadCreatedEvent(thread=browser_thread(turn.thread))
             )
         initial_events.append(ThreadItemDoneEvent(item=item))
         return self._respond_to_turn(turn, initial_events=initial_events)
@@ -925,11 +918,6 @@ class ChatKitServer[TContext = Any](ABC):
             next_check = loop.time() + _TRANSIENT_OWNERSHIP_CHECK_INTERVAL
             async with _closing_stream(aiter(stream())) as events:
                 while (event := await anext(events, None)) is not None:
-                    if isinstance(event, ThreadItemAddedEvent):
-                        # Stash an isolated copy in case we need to persist unfinished items
-                        # on cancellation; downstream handlers keep using the original event.item.
-                        pending_items[event.item.id] = event.item.model_copy(deep=True)
-
                     match event:
                         case (
                             ThreadItemAddedEvent(item=ClientToolCallItem())
@@ -1007,11 +995,8 @@ class ChatKitServer[TContext = Any](ABC):
                                 thread.id, item, context=context, turn_id=turn_id
                             )
                             continue
-                        case ThreadItemUpdatedEvent():
-                            # Keep pending assistant message and workflow items up to date
-                            # so that we have a reference to the latest version of these pending items
-                            # when the stream is cancelled.
-                            self._update_pending_items(pending_items, event)
+                        case ThreadItemAddedEvent() | ThreadItemUpdatedEvent():
+                            track_pending_item(pending_items, event)
                         case ErrorEvent():
                             stream_failed = True
                             await cancel_issued_tools()
@@ -1034,34 +1019,9 @@ class ChatKitServer[TContext = Any](ABC):
                             thread.id, turn_id, context
                         )
                         next_check = loop.time() + _TRANSIENT_OWNERSHIP_CHECK_INTERVAL
-                    if isinstance(event, (ThreadCreatedEvent, ThreadUpdatedEvent)):
-                        hidden_item_ids.update(
-                            item.id
-                            for item in event.thread.items.data
-                            if item.type in HIDDEN_ITEM_TYPES
-                        )
-                        yield event.model_copy(
-                            update={"thread": self._to_thread_response(event.thread)}
-                        )
-                    elif (
-                        isinstance(
-                            event,
-                            (
-                                ThreadItemAddedEvent,
-                                ThreadItemDoneEvent,
-                                ThreadItemReplacedEvent,
-                            ),
-                        )
-                        and event.item.type in HIDDEN_ITEM_TYPES
-                    ):
-                        hidden_item_ids.add(event.item.id)
-                    elif not (
-                        isinstance(
-                            event, (ThreadItemUpdatedEvent, ThreadItemRemovedEvent)
-                        )
-                        and event.item_id in hidden_item_ids
-                    ):
-                        yield event
+                    visible = browser_event(event, hidden_item_ids)
+                    if visible is not None:
+                        yield visible
 
         except asyncio.CancelledError, GeneratorExit:
             with suppress(TurnSupersededError):
@@ -1088,70 +1048,6 @@ class ChatKitServer[TContext = Any](ABC):
             )
             logger.exception(e)
 
-    def _apply_assistant_message_update(
-        self,
-        item: AssistantMessageItem,
-        update: AssistantMessageContentPartAdded
-        | AssistantMessageContentPartTextDelta
-        | AssistantMessageContentPartAnnotationAdded
-        | AssistantMessageContentPartDone,
-    ) -> AssistantMessageItem:
-        # Pad the content list so the requested content_index exists before we write into it.
-        # (Streaming updates can arrive for an index that hasn’t been created yet)
-        while len(item.content) <= update.content_index:
-            item.content.append(AssistantMessageContent(text="", annotations=[]))
-
-        match update:
-            case AssistantMessageContentPartAdded() | AssistantMessageContentPartDone():
-                item.content[update.content_index] = update.content.model_copy(
-                    deep=True
-                )
-            case AssistantMessageContentPartTextDelta():
-                item.content[update.content_index].text += update.delta
-            case AssistantMessageContentPartAnnotationAdded():
-                annotations = item.content[update.content_index].annotations
-                annotations.insert(
-                    update.annotation_index, update.annotation.model_copy(deep=True)
-                )
-        return item
-
-    def _update_pending_items(
-        self,
-        pending_items: dict[str, ThreadItem],
-        event: ThreadItemUpdatedEvent,
-    ):
-        updated_item = pending_items.get(event.item_id)
-        update = event.update
-        match updated_item:
-            case AssistantMessageItem():
-                if isinstance(
-                    update,
-                    (
-                        AssistantMessageContentPartAdded,
-                        AssistantMessageContentPartTextDelta,
-                        AssistantMessageContentPartAnnotationAdded,
-                        AssistantMessageContentPartDone,
-                    ),
-                ):
-                    pending_items[updated_item.id] = (
-                        self._apply_assistant_message_update(updated_item, update)
-                    )
-            case WorkflowItem():
-                if isinstance(update, (WorkflowTaskUpdated, WorkflowTaskAdded)):
-                    match update:
-                        case WorkflowTaskUpdated():
-                            updated_item.workflow.tasks[update.task_index] = (
-                                update.task.model_copy(deep=True)
-                            )
-                        case WorkflowTaskAdded():
-                            updated_item.workflow.tasks.append(
-                                update.task.model_copy(deep=True)
-                            )
-
-                    pending_items[updated_item.id] = updated_item
-            case _:
-                pass
-
     async def _build_user_message_item(
         self, input: UserMessageInput, thread: ThreadMetadata, context: TContext
     ) -> UserMessageItem:
@@ -1177,7 +1073,9 @@ class ChatKitServer[TContext = Any](ABC):
             raise ValueError("prepare_user_message must preserve message identity")
         return prepared
 
-    async def _load_full_thread(self, thread_id: str, context: TContext) -> Thread:
+    async def _load_thread_with_first_page(
+        self, thread_id: str, context: TContext
+    ) -> Thread:
         thread_meta = await self.store.load_thread(thread_id, context=context)
         thread_items = await self.store.load_thread_items(
             thread_id,
@@ -1187,28 +1085,4 @@ class ChatKitServer[TContext = Any](ABC):
             context=context,
             include_hidden=False,
         )
-        return Thread(**thread_meta.model_dump(), items=thread_items)
-
-    def _to_thread_response(self, thread: ThreadMetadata | Thread) -> Thread:
-        items = (
-            thread.items.model_copy(
-                update={
-                    "data": [
-                        item
-                        for item in thread.items.data
-                        if item.type not in HIDDEN_ITEM_TYPES
-                    ]
-                }
-            )
-            if isinstance(thread, Thread)
-            else Page()
-        )
-
-        return Thread(
-            id=thread.id,
-            title=thread.title,
-            created_at=thread.created_at,
-            items=items,
-            status=thread.status,
-            allowed_image_domains=thread.allowed_image_domains,
-        )
+        return browser_thread(thread_meta, stored_page=thread_items)

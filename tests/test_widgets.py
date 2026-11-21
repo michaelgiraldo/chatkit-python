@@ -22,9 +22,39 @@ from chatkit.requests import (
 from chatkit.templates import WidgetTemplate
 from chatkit.turns import Turn
 from chatkit.widget_models import WidgetRoot
-from chatkit.widgets import Card, ListView, ListViewItem, Text
+from chatkit.widgets import (
+    AreaSeries,
+    BarSeries,
+    Card,
+    Chart,
+    LineSeries,
+    ListView,
+    ListViewItem,
+    Text,
+)
 from tests._types import RequestContext
 from tests.helpers.server import make_server
+
+
+def test_chart_series_round_trip_through_a_card():
+    series = [
+        {"type": "bar", "label": "Bars", "dataKey": "value", "stack": "group"},
+        {"type": "area", "label": "Area", "dataKey": "value", "curveType": "linear"},
+        {
+            "type": "line",
+            "label": "Line",
+            "dataKey": "value",
+            "color": {"light": "blue", "dark": "purple"},
+        },
+    ]
+    chart = Chart.model_validate({
+        "data": [{"value": 2}],
+        "xAxis": "value",
+        "series": series,
+    })
+    assert [type(item) for item in chart.series] == [BarSeries, AreaSeries, LineSeries]
+    (node,) = Card(children=[chart]).build().model_dump(mode="json")["children"]
+    assert node["series"] == series
 
 
 def test_typed_builders_keep_nested_list_view_and_click_actions():

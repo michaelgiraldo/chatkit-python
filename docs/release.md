@@ -32,6 +32,12 @@ install command, tested dependency versions, and links to docs at that commit.
 
 ## Unreleased
 
+- **Breaking Python constructor change.** `AgentContext` raises a validation
+  error for each unknown keyword. Pass request-scoped values in `request_context`
+  or declare run-specific fields on an `AgentContext` subclass. Use
+  `resume_from` to supply a saved workflow. [App context guide](guides/pass-extra-app-context-to-your-model.md#send-app-context-with-each-request)
+- Removed the unused `chatkit.widgets.MinMax` typing helper. The chart
+  builders share their common fields and retain their existing JSON schemas.
 - Widget actions omit server-only context from browser replies. The FastAPI
   adapter notices when a visitor leaves during a silent stream. Ordinary
   streaming saves the partial reply for reload.
@@ -42,11 +48,16 @@ install command, tested dependency versions, and links to docs at that commit.
   Turnspan reports `WAITING` after the save. A failed save reports `FAILED`.
 - Transcript replay uses assistant input text and preserves a recorded
   Responses message phase for the next model request.
+- A private context item from the app or SDK leaves an active progress
+  display open while the agent continues working.
 - The server keeps its own copies of streamed content, citations, and workflow
   tasks. A responder can assemble its final message without duplicating text,
   and edits it hasn't emitted stay out of a partial reply saved on disconnect.
 - **Custom stores** must reject an older form while a different turn is
   starting or running. Implement the ownership check in the claim transaction.
+- A custom store must filter server-only items before paginating browser
+  history. If a page includes a hidden item, Turnspan rejects the result
+  before sending its contents or cursor to the browser.
 - **Store tests** can run `check_thread_store` for core operations. Suites
   that previously used it to cover browser tools must also run
   `check_client_tool_store`. [Store and responder guide](guides/respond-to-user-message.md)

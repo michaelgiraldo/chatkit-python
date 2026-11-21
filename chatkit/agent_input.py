@@ -23,6 +23,7 @@ from .models import (
     HiddenContextItem,
     SDKHiddenContextItem,
     StructuredInputItem,
+    Task,
     TaskItem,
     ThreadItem,
     UserMessageItem,
@@ -64,6 +65,33 @@ def client_tool_continuation_input(
         )
     matching_outputs[0]["output"] = json.dumps(item.output, allow_nan=False)
     return cast(list[TResponseInputItem], items)
+
+
+def _text_message(text: str) -> Message:
+    return Message(
+        type="message",
+        role="user",
+        content=[ResponseInputTextParam(type="input_text", text=text)],
+    )
+
+
+def _hidden_context_message(content: str) -> Message:
+    return _text_message(
+        "Hidden context for the agent (not shown to the user):\n"
+        f"<HiddenContext>\n{content}\n</HiddenContext>"
+    )
+
+
+def _task_message(task: Task) -> Message | None:
+    if task.type != "custom":
+        return None
+    description = ": ".join(value for value in (task.title, task.content) if value)
+    if not description:
+        return None
+    return _text_message(
+        "A message was displayed to the user that the following task was performed:\n"
+        f"<Task>\n{description}\n</Task>"
+    )
 
 
 class ThreadItemConverter:
@@ -135,20 +163,7 @@ class ThreadItemConverter:
                 "HiddenContextItems with non-string content were present in a user message but a Converter.hidden_context_to_input was not implemented"
             )
 
-        text = (
-            "Hidden context for the agent (not shown to the user):\n"
-            f"<HiddenContext>\n{item.content}\n</HiddenContext>"
-        )
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                )
-            ],
-            role="user",
-        )
+        return _hidden_context_message(item.content)
 
     async def sdk_hidden_context_to_input(
         self, item: SDKHiddenContextItem
@@ -159,20 +174,7 @@ class ThreadItemConverter:
         for internal operations.
         Override if you want to wrap the content in a different format.
         """
-        text = (
-            "Hidden context for the agent (not shown to the user):\n"
-            f"<HiddenContext>\n{item.content}\n</HiddenContext>"
-        )
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                )
-            ],
-            role="user",
-        )
+        return _hidden_context_message(item.content)
 
     async def task_to_input(
         self, item: TaskItem
@@ -180,24 +182,7 @@ class ThreadItemConverter:
         """
         Convert a TaskItem into input item(s) to send to the model.
         """
-        if item.task.type != "custom" or (
-            not item.task.title and not item.task.content
-        ):
-            return None
-        title = f"{item.task.title}" if item.task.title else ""
-        content = f"{item.task.content}" if item.task.content else ""
-        task_text = f"{title}: {content}" if title and content else title or content
-        text = f"A message was displayed to the user that the following task was performed:\n<Task>\n{task_text}\n</Task>"
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                )
-            ],
-            role="user",
-        )
+        return _task_message(item.task)
 
     async def structured_input_to_input(
         self, item: StructuredInputItem
@@ -221,16 +206,7 @@ class ThreadItemConverter:
             + "\n".join(lines)
             + "\n</StructuredInput>"
         )
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=text,
-                ),
-            ],
-            role="user",
-        )
+        return _text_message(text)
 
     async def workflow_to_input(
         self, item: WorkflowItem
@@ -238,27 +214,11 @@ class ThreadItemConverter:
         """
         Describe visible custom workflow tasks as model input.
         """
-        messages = []
+        messages: list[TResponseInputItem] = []
         for task in item.workflow.tasks:
-            if task.type != "custom" or (not task.title and not task.content):
-                continue
-
-            title = f"{task.title}" if task.title else ""
-            content = f"{task.content}" if task.content else ""
-            task_text = f"{title}: {content}" if title and content else title or content
-            text = f"A message was displayed to the user that the following task was performed:\n<Task>\n{task_text}\n</Task>"
-            messages.append(
-                Message(
-                    type="message",
-                    content=[
-                        ResponseInputTextParam(
-                            type="input_text",
-                            text=text,
-                        )
-                    ],
-                    role="user",
-                )
-            )
+            message = _task_message(task)
+            if message is not None:
+                messages.append(message)
         return messages
 
     async def widget_to_input(
@@ -268,18 +228,9 @@ class ThreadItemConverter:
         Convert a WidgetItem into input item(s) to send to the model.
         By default, WidgetItems converted to a text description with a JSON representation of the widget.
         """
-        return Message(
-            type="message",
-            content=[
-                ResponseInputTextParam(
-                    type="input_text",
-                    text=f"The following graphical UI widget (id: {item.id}) was displayed to the user:"
-                    + item.widget.model_dump_json(
-                        exclude_unset=True, exclude_none=True
-                    ),
-                )
-            ],
-            role="user",
+        return _text_message(
+            f"The following graphical UI widget (id: {item.id}) was displayed to the user:"
+            + item.widget.model_dump_json(exclude_unset=True, exclude_none=True)
         )
 
     async def user_message_to_input(
@@ -287,15 +238,15 @@ class ThreadItemConverter:
     ) -> TResponseInputItem | list[TResponseInputItem] | None:
         # Build the user text exactly as typed, rendering tags as @key
         message_text_parts: list[str] = []
-        # Track tags separately to add system context
-        raw_tags: list[UserMessageTagContent] = []
+        # Resolve each displayed tag once, in the order the user mentioned it.
+        tags: dict[str, UserMessageTagContent] = {}
 
         for part in item.content:
             if isinstance(part, UserMessageTextContent):
                 message_text_parts.append(part.text)
             elif isinstance(part, UserMessageTagContent):
                 message_text_parts.append(f"@{part.text}")
-                raw_tags.append(part)
+                tags.setdefault(part.text, part)
             else:
                 assert_never(part)
 
@@ -313,10 +264,18 @@ class ThreadItemConverter:
             ],
         )
 
-        # Build system items (prepend later): quoted text and @-mention context
         context_items: list[TResponseInputItem] = []
-
         if item.quoted_text and is_last_message:
+            context_items.append(
+                _text_message(
+                    f"The user is referring to this in particular: \n{item.quoted_text}"
+                )
+            )
+
+        if tags:
+            tag_content: ResponseInputMessageContentListParam = [
+                await self.tag_to_message_content(tag) for tag in tags.values()
+            ]
             context_items.append(
                 Message(
                     role="user",
@@ -324,44 +283,16 @@ class ThreadItemConverter:
                     content=[
                         ResponseInputTextParam(
                             type="input_text",
-                            text=f"The user is referring to this in particular: \n{item.quoted_text}",
-                        )
+                            text=cleandoc("""
+                                # User-provided context for @-mentions
+                                - When referencing resolved entities, use their canonical names **without** '@'.
+                                - The '@' form appears only in user text and should not be echoed.
+                            """).strip(),
+                        ),
+                        *tag_content,
                     ],
                 )
             )
-
-        # Dedupe tags (preserve order) and resolve to message content
-        if raw_tags:
-            seen, uniq_tags = set(), []
-            for t in raw_tags:
-                if t.text not in seen:
-                    seen.add(t.text)
-                    uniq_tags.append(t)
-
-            tag_content: ResponseInputMessageContentListParam = [
-                # should return summarized text items
-                await self.tag_to_message_content(tag)
-                for tag in uniq_tags
-            ]
-
-            if tag_content:
-                context_items.append(
-                    Message(
-                        role="user",
-                        type="message",
-                        content=[
-                            ResponseInputTextParam(
-                                type="input_text",
-                                text=cleandoc("""
-                                    # User-provided context for @-mentions
-                                    - When referencing resolved entities, use their canonical names **without** '@'.
-                                    - The '@' form appears only in user text and should not be echoed.
-                                """).strip(),
-                            ),
-                            *tag_content,
-                        ],
-                    )
-                )
 
         return [user_text_item, *context_items]
 
@@ -396,56 +327,50 @@ class ThreadItemConverter:
     ) -> list[TResponseInputItem]:
         match item:
             case UserMessageItem():
-                out = await self.user_message_to_input(item, is_last_message) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.user_message_to_input(item, is_last_message)
             case AssistantMessageItem():
-                out = await self.assistant_message_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.assistant_message_to_input(item)
             case ClientToolCallItem():
-                out = await self.client_tool_call_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.client_tool_call_to_input(item)
             case EndOfTurnItem():
-                out = await self.end_of_turn_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.end_of_turn_to_input(item)
             case WidgetItem():
-                out = await self.widget_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.widget_to_input(item)
             case WorkflowItem():
-                out = await self.workflow_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.workflow_to_input(item)
             case TaskItem():
-                out = await self.task_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.task_to_input(item)
             case StructuredInputItem():
-                out = await self.structured_input_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.structured_input_to_input(item)
             case HiddenContextItem():
-                out = await self.hidden_context_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.hidden_context_to_input(item)
             case SDKHiddenContextItem():
-                out = await self.sdk_hidden_context_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.sdk_hidden_context_to_input(item)
             case GeneratedImageItem():
-                out = await self.generated_image_to_input(item) or []
-                return out if isinstance(out, list) else [out]
+                converted = await self.generated_image_to_input(item)
             case _:
                 assert_never(item)
+
+        if converted is None:
+            return []
+        return converted if isinstance(converted, list) else [converted]
 
     async def to_agent_input(
         self,
         thread_items: Sequence[ThreadItem] | ThreadItem,
     ) -> list[TResponseInputItem]:
-        if isinstance(thread_items, Sequence):
-            # shallow copy in case caller mutates the list while we're iterating
-            thread_items = thread_items[:]
-        else:
-            thread_items = [thread_items]
+        # Snapshot the sequence before awaiting application converters.
+        items = (
+            tuple(thread_items)
+            if isinstance(thread_items, Sequence)
+            else (thread_items,)
+        )
+        last_index = len(items) - 1
         output: list[TResponseInputItem] = []
-        for item in thread_items:
+        for index, item in enumerate(items):
             output.extend(
                 await self._thread_item_to_input_item(
-                    item,
-                    is_last_message=item is thread_items[-1],
+                    item, is_last_message=index == last_index
                 )
             )
         return output

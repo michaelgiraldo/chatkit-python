@@ -30,4 +30,4 @@ class WidgetComponent(BaseModel):
 class WidgetRoot(WidgetComponent):
     """The canonical layout used by widget events and saved thread items."""
 
-    type: Literal["Card", "ListView", "Basic"]  # pyright: ignore
+    type: Literal["Card", "ListView", "Basic"]  # pyright: ignore[reportIncompatibleVariableOverride]

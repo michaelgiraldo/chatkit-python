@@ -27,6 +27,12 @@ With `history.enabled: true`, ChatKit.js will:
 Set `history.enabled: false` to hide the history UI. Your store still persists
 the current conversation.
 
+When you reopen a thread, `threads.get_by_id` returns its metadata and the
+first page of up to 20 visible items, oldest first. The browser fetches the
+rest with `items.list`. In a custom client, while `has_more` is true, use the
+returned page’s `after` cursor and set `order` to `"asc"` on each request.
+Omitting `order` makes `items.list` read in descending order.
+
 ## Show readable titles in history
 
 Threads start untitled. Give them short, descriptive titles so the history list is easy to scan.
