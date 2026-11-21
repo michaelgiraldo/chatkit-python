@@ -1,18 +1,17 @@
 """Checks for application implementations of :class:`ThreadStore`."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from .models import (
     ClientToolCallItem,
+    HiddenContextItem,
     InferenceOptions,
-    Page,
     SDKHiddenContextItem,
     StructuredInputItem,
-    ThreadItem,
     ThreadMetadata,
     UserMessageItem,
     UserMessageTextContent,
@@ -26,29 +25,31 @@ def _require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-async def _check_item_pagination(
-    load_page: Callable[[str | None, int, str], Awaitable[Page[ThreadItem]]],
-    item_ids: set[str],
-) -> list[str]:
-    ascending = await load_page(None, len(item_ids), "asc")
-    expected = [item.id for item in ascending.data]
-    _require(
-        set(expected) == item_ids and len(expected) == len(item_ids),
-        "Pagination must return each item with a tied timestamp once",
-    )
+async def _check_item_pagination[TContext](
+    store: ThreadStore[TContext],
+    thread_id: str,
+    context: TContext,
+    stored_ids: list[str],
+    *,
+    exclude_ids: frozenset[str] = frozenset(),
+) -> None:
+    scope = "browser-visible" if exclude_ids else "stored"
+    expected = [item_id for item_id in stored_ids if item_id not in exclude_ids]
     for order, ordered_ids in (("asc", expected), ("desc", expected[::-1])):
         cursor = None
         for index, item_id in enumerate(ordered_ids):
-            page = await load_page(cursor, 1, order)
+            page = await store.load_thread_items(
+                thread_id, cursor, 1, order, context, include_hidden=not exclude_ids
+            )
             more_items = index < len(ordered_ids) - 1
             _require(
                 [item.id for item in page.data] == [item_id]
                 and page.has_more == more_items
-                and (page.after is not None) == more_items,
-                f"Broken {order} item cursor at page {index + 1}",
+                and (page.after is not None) == more_items
+                and page.after not in exclude_ids,
+                f"Unexpected item or cursor in {scope} {order} history at page {index + 1}",
             )
             cursor = page.after
-    return expected
 
 
 @asynccontextmanager
@@ -208,17 +209,17 @@ async def check_thread_store[TContext](
             item_ids.add(message.id)
         _require(len(item_ids) == 3, "Item ID generation returned a duplicate")
 
-        async def load_page(
-            after: str | None, limit: int, order: str
-        ) -> Page[ThreadItem]:
-            return await peer.load_thread_items(thread.id, after, limit, order, context)
-
-        ascending_ids = await _check_item_pagination(load_page, item_ids)
+        ascending = await peer.load_thread_items(thread.id, None, 3, "asc", context)
+        ascending_ids = [item.id for item in ascending.data]
+        _require(
+            len(ascending_ids) == len(item_ids) and set(ascending_ids) == item_ids,
+            "Pagination must return each item with a tied timestamp once",
+        )
 
         form = StructuredInputItem(
             id=store.generate_item_id("task", thread, context),
             thread_id=thread.id,
-            created_at=created_at + timedelta(seconds=1),
+            created_at=created_at + timedelta(seconds=2),
             inputs=[],
         )
         await store.add_thread_item(thread.id, form, context)
@@ -253,21 +254,41 @@ async def check_thread_store[TContext](
         )
         _require(result is None, "A form claim must return no private invocation")
 
-        hidden = SDKHiddenContextItem(
+        app_note = HiddenContextItem(
+            id=str(uuid4()),
+            thread_id=thread.id,
+            created_at=created_at + timedelta(seconds=1),
+            content="App context",
+        )
+        sdk_note = SDKHiddenContextItem(
             id=store.generate_item_id("sdk_hidden_context", thread, context),
             thread_id=thread.id,
-            created_at=created_at + timedelta(seconds=2),
-            content="Internal store check",
+            created_at=created_at + timedelta(seconds=3),
+            content="SDK context",
         )
-        await store.add_thread_item(thread.id, hidden, context)
-        visible = await peer.load_thread_items(
-            thread.id, None, 1, "desc", context, include_hidden=False
+        last_message = UserMessageItem(
+            id=store.generate_item_id("message", thread, context),
+            thread_id=thread.id,
+            created_at=created_at + timedelta(seconds=4),
+            content=[UserMessageTextContent(text="Last message")],
+            inference_options=InferenceOptions(),
         )
-        _require(
-            [item.id for item in visible.data] == [form.id]
-            and visible.has_more
-            and visible.after is not None,
-            "Visible history must exclude hidden items before applying the page limit",
+        for item in (app_note, sdk_note, last_message):
+            await store.add_thread_item(thread.id, item, context)
+        stored_ids = [
+            *ascending_ids,
+            app_note.id,
+            form.id,
+            sdk_note.id,
+            last_message.id,
+        ]
+        await _check_item_pagination(peer, thread.id, context, stored_ids)
+        await _check_item_pagination(
+            peer,
+            thread.id,
+            context,
+            stored_ids,
+            exclude_ids=frozenset({app_note.id, sdk_note.id}),
         )
         await _check_retry(
             store,
@@ -275,7 +296,7 @@ async def check_thread_store[TContext](
             context,
             thread.id,
             ascending_ids[0],
-            [*ascending_ids[1:], form.id, hidden.id],
+            stored_ids[1:],
         )
 
 

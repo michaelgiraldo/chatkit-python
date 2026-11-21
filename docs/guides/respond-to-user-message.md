@@ -379,8 +379,11 @@ pages and retries that cross the boundary between legacy and newer items.
 ### Check your app's store
 
 Run `check_thread_store` for every thread store, including text-only apps. It
-checks user isolation, stable pagination, turn ownership, concurrent patches,
-form claims, hidden items, and retry truncation. If the store also supports
+checks user isolation, turn ownership, concurrent patches, form claims, and
+retry truncation. It follows history cursors in both directions through
+interleaved visible items and app and SDK context notes. Each visible item
+must appear exactly once, and a browser cursor must never expose a private
+item ID. If the store also supports
 browser tools, run `check_client_tool_store` to verify private invocations,
 exact callback claims, cancellation, and visible history. Each check creates
 and deletes its own synthetic thread in a disposable database.
