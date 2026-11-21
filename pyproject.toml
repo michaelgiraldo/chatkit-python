@@ -114,7 +114,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.pyright]
-include = ["chatkit", "docs", "tests"]
+include = ["chatkit", "docs", "scripts", "tests"]
 exclude = ["**/.venv", "**/.pytest_cache"]
 venvPath = "."
 venv = ".venv"

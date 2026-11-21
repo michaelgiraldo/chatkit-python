@@ -8,17 +8,54 @@ Turnspan publishes [GitHub releases](https://github.com/michaelgiraldo/chatkit-p
 The `openai-chatkit` package on PyPI tracks the
 [original OpenAI project](https://github.com/openai/chatkit-python/releases).
 
-## Cut a Turnspan release
+Turnspan 6 is the development candidate in this checkout. Turnspan 4 and 5
+were development milestones in the same upgrade.
 
-1. Set the version in `pyproject.toml`, refresh `uv.lock`, and update the
-   README and changelog.
-2. Run `make check` and `make build` on Python 3.14. Verify that GitHub
-   Actions passes on the exact commit to be released.
-3. Tag that commit with the package version prefixed by `v`. Publish a GitHub
-   release with the changelog, the full commit SHA for installation, and the
-   passing CI run.
+## Prepare and publish a Turnspan release
+
+1. Set the candidate version in `pyproject.toml`, refresh `uv.lock`, and
+   write the matching changelog section. Keep the README's stable install
+   command pointed at the published release while the candidate is in review.
+2. Commit the candidate. Run `make check`, `make build`, and
+   `make release-check` with Python 3.14. The last command installs a Git
+   archive of the committed `HEAD` in an isolated environment and runs the
+   quickstart, FastAPI, and Agents SDK tests against that installed package.
+   It uses synthetic inputs and mocked model endpoints.
+3. Merge the reviewed candidate to `main` and let CI run. Dispatch
+   **Prepare Turnspan release** on `main` with the full candidate SHA.
+   The workflow requires a successful `main` CI run for that exact commit.
+   It repeats the consumer tests using the public GitHub commit archive.
+
+   ```sh
+   gh workflow run turnspan-release.yml --ref main -f sha=COMMIT_SHA
+   ```
+
+4. Review the result. Dispatch again with `create_draft=true` to prepare a
+   GitHub draft at the tested commit. It includes the derived package
+   version and tag, exact install URL, verified CI link, observed consumer
+   dependency versions, and links to docs at the candidate commit.
+
+   ```sh
+   gh workflow run turnspan-release.yml --ref main -f sha=COMMIT_SHA -f create_draft=true
+   ```
+
+5. In the draft, verify the intended tag and full commit, the upgrade
+   instructions, and the install command. Publish manually when ready.
+   Confirm that the published tag resolves to the verified commit. Update
+   the README's stable install section to the published tag and SHA so
+   GitHub and the docs landing page offer the same install. Update the
+   development status in the landing pages and changelog for the next
+   development cycle. The release uses GitHub's commit archive as its
+   installation source.
+
+The workflow leaves an existing matching draft available for review.
+It rejects a conflicting tag or an already published release for the
+candidate. Local checks are read-only and print a preview of the notes.
 
 ## Turnspan 6 (`1.6.5+turnspan.6`)
+
+See [Upgrade from Turnspan 3 to 6](guides/upgrade-turnspan-3-to-6.md)
+for setup-specific checks and rollback.
 
 ### Breaking changes
 
@@ -64,6 +101,8 @@ replay, including differences between model and browser arguments.
 
 ## Turnspan 5 (`1.6.5+turnspan.5`)
 
+**Development milestone.**
+
 ### Breaking changes
 
 - Creating an `AgentContext` now requires `resume_from`, which replaces
@@ -84,6 +123,8 @@ replay, including differences between model and browser arguments.
   and test both paths before upgrading your pin.
 
 ## Turnspan 4 (`1.6.5+turnspan.4`)
+
+**Development milestone.**
 
 - Apps that never resume saved workflows can pass `resume_workflow=False`
   to `stream_agent_response` to skip the thread-history lookup. Workflows
