@@ -390,6 +390,10 @@ Before you call your model, decide what conversation context you want the model 
 #### Load thread history (recommended default)
 
 Fetch recent items to give the model descriptive context from the thread.
+For assistant messages, the default converter sends the displayed text with its
+original `commentary` or `final_answer` phase when the provider supplied one.
+Turnspan stores that phase with the message and omits it from the ChatKit wire
+format. Messages without a recorded phase replay without the field.
 The default converter omits client tool items. Native Responses replay
 requires the provider's original items, including reasoning and assistant
 phase when supplied. For an accepted browser result, use the saved

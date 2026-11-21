@@ -62,6 +62,7 @@ from .models import (
     Annotation,
     AssistantMessageContent,
     AssistantMessageItem,
+    AssistantMessagePhase,
     ClientToolCallItem,
     DurationSummary,
     FileSource,
@@ -683,6 +684,7 @@ async def _stream_agent_response(
     thread = context.thread
     produced_items = set()
     synthetic_message_ids: dict[int, str] = {}
+    pending_message_phases: dict[str, AssistantMessagePhase] = {}
     pending_images: dict[str, GeneratedImageItem] = {}
     streaming_thought: _StreamingThoughtTracker | None = None
     # item_id -> content_index -> annotation count
@@ -821,10 +823,13 @@ async def _stream_agent_response(
                         yield finish_workflow(ctx.workflow_item)
                     item_id = message_id(item.id, event.output_index)
                     produced_items.add(item_id)
+                    if item.phase is not None:
+                        pending_message_phases[item_id] = item.phase
                     yield ThreadItemAddedEvent(
                         item=AssistantMessageItem(
                             id=item_id,
                             thread_id=thread.id,
+                            phase=item.phase,
                             content=[
                                 await _convert_content(c, converter)
                                 for c in item.content
@@ -931,6 +936,7 @@ async def _stream_agent_response(
                 item = event.item
                 if item.type == "message":
                     item_id = message_id(item.id, event.output_index)
+                    initial_phase = pending_message_phases.pop(item_id, None)
                     if item.id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
                         del synthetic_message_ids[event.output_index]
                     produced_items.add(item_id)
@@ -938,6 +944,7 @@ async def _stream_agent_response(
                         item=AssistantMessageItem(
                             id=item_id,
                             thread_id=thread.id,
+                            phase=item.phase or initial_phase,
                             content=[
                                 await _convert_content(c, converter)
                                 for c in item.content

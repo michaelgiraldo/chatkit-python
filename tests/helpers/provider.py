@@ -8,7 +8,12 @@ import httpx2
 from openai import AsyncOpenAI
 
 
-def responses_stream(turn: int) -> str:
+def responses_stream(
+    turn: int,
+    *,
+    initial_phase: Literal["commentary", "final_answer"] | None = None,
+    phase: Literal["commentary", "final_answer"] | None = None,
+) -> str:
     citation = {
         "type": "url_citation",
         "start_index": 0,
@@ -20,6 +25,7 @@ def responses_stream(turn: int) -> str:
         "id": f"msg_{turn}",
         "type": "message",
         "role": "assistant",
+        **({"phase": phase} if phase is not None else {}),
         "status": "completed",
         "content": [
             {"type": "output_text", "text": "Example reply", "annotations": [citation]}
@@ -40,7 +46,12 @@ def responses_stream(turn: int) -> str:
         {
             "type": "response.output_item.added",
             "output_index": 0,
-            "item": {**item, "status": "in_progress", "content": []},
+            "item": {
+                **item,
+                "phase": initial_phase,
+                "status": "in_progress",
+                "content": [],
+            },
         },
         {
             "type": "response.content_part.added",

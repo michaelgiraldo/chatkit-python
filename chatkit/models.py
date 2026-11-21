@@ -111,11 +111,23 @@ class UserMessageItem(ThreadItemBase):
     inference_options: InferenceOptions
 
 
+type AssistantMessagePhase = Literal["commentary", "final_answer"]
+
+
 class AssistantMessageItem(ThreadItemBase):
     """Thread item representing an assistant message."""
 
     type: Literal["assistant_message"] = "assistant_message"
     content: list[AssistantMessageContent]
+    phase: AssistantMessagePhase | None = None
+    """Provider-supplied phase retained for model history and omitted from browser responses."""
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, serializer, info: SerializationInfo):
+        data = serializer(self)
+        if (info.context or {}).get("browser_wire"):
+            data.pop("phase", None)
+        return data
 
 
 class ClientToolCallItem(ThreadItemBase):

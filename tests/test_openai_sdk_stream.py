@@ -17,6 +17,8 @@ from agents import (
     function_tool,
 )
 from agents.tool_context import ToolContext
+from openai.types.responses.response_input_item_param import ResponseInputItemParam
+from pydantic import TypeAdapter
 
 from chatkit.agent_input import client_tool_continuation_input, simple_to_agent_input
 from chatkit.agents import AgentContext, stream_agent_response
@@ -96,8 +98,12 @@ def _completed_reply(events: list[ThreadStreamEvent]) -> AssistantMessageItem:
     return reply
 
 
-async def test_responses_stream_preserves_headers_decodes_citations_and_chains_turns(
+@pytest.mark.parametrize(
+    "replay_transcript", [False, True], ids=["chain", "transcript"]
+)
+async def test_responses_stream_preserves_headers_citations_and_turn_context(
     monkeypatch: pytest.MonkeyPatch,
+    replay_transcript: bool,
 ):
     previous_ids: list[str | None] = []
 
@@ -111,10 +117,24 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
         assert body["stream"] is True
         assert body["store"] is True
         previous_ids.append(body.get("previous_response_id"))
+        turn = len(previous_ids)
+        if replay_transcript and turn == 2:
+            _, reply, _ = body["input"]
+            TypeAdapter(ResponseInputItemParam).validate_python(reply)
+            assert reply == {
+                "role": "assistant",
+                "type": "message",
+                "content": "Example reply",
+                "phase": "commentary",
+            }
         return httpx2.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
-            text=responses_stream(len(previous_ids)),
+            text=responses_stream(
+                turn,
+                initial_phase="commentary" if turn == 1 else None,
+                phase="final_answer" if turn == 2 else None,
+            ),
         )
 
     async with mock_client(handle_request) as client:
@@ -140,12 +160,19 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
                 request_context=turn.context,
                 resume_from=None,
             )
+            if replay_transcript:
+                history = await server.store.load_thread_items(
+                    turn.thread.id, None, 20, "asc", turn.context
+                )
+                inputs = await simple_to_agent_input(history.data)
+            else:
+                inputs = await simple_to_agent_input(turn.input.message)
             result = Runner.run_streamed(
                 agent,
-                await simple_to_agent_input(turn.input.message),
+                inputs,
                 context=context,
                 run_config=RunConfig(tracing_disabled=True),
-                previous_response_id=response_id,
+                previous_response_id=None if replay_transcript else response_id,
             )
             async with aclosing(stream_agent_response(context, result)) as events:
                 async for event in events:
@@ -175,12 +202,14 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
                     )
                 )
             )
-            history.assert_not_awaited()
+            if not replay_transcript:
+                history.assert_not_awaited()
             loaded = await server.process_non_streaming(
                 ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
             )
 
         for turn, events in enumerate((first_turn, second_turn), start=1):
+            assert all(b'"phase"' not in encode_sse(event) for event in events)
             annotations = [
                 event.update
                 for event in events
@@ -194,15 +223,26 @@ async def test_responses_stream_preserves_headers_decodes_citations_and_chains_t
             assert source.url == "https://example.com/source"
             reply = _completed_reply(events)
             assert (reply.id, reply.content[0].text) == (f"msg_{turn}", "Example reply")
+            (started_reply,) = [
+                event.item
+                for event in events
+                if isinstance(event, ThreadItemAddedEvent)
+                and isinstance(event.item, AssistantMessageItem)
+            ]
+            assert started_reply.phase == ("commentary" if turn == 1 else None)
 
-    assert previous_ids == [None, "resp_1"]
+    assert previous_ids == [None, None if replay_transcript else "resp_1"]
     assert completed_ids == ["resp_1", "resp_2"]
     assert isinstance(loaded, Thread)
+    assert b'"phase"' not in encode_message(loaded)
     assert [
-        (item.id, item.content[0].text)
+        (item.id, item.phase, item.content[0].text)
         for item in loaded.items.data
         if isinstance(item, AssistantMessageItem)
-    ] == [("msg_1", "Example reply"), ("msg_2", "Example reply")]
+    ] == [
+        ("msg_1", "commentary", "Example reply"),
+        ("msg_2", "final_answer", "Example reply"),
+    ]
 
 
 async def test_chat_completions_stream_preserves_headers_and_persists_distinct_replies():
@@ -213,9 +253,13 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
         assert request.url.path == "/v1/chat/completions"
         assert request.headers["User-Agent"] == "ExampleApp/1.0"
         assert request.headers["X-Example-Route"] == "example"
-        assert json.loads(request.content)["stream"] is True
+        body = json.loads(request.content)
+        assert body["stream"] is True
         requested_paths.append(request.url.path)
         turn = len(requested_paths)
+        if turn == 2:
+            _, reply, _ = body["messages"]
+            assert reply == {"role": "assistant", "content": "Example reply 1"}
         choices = [
             {
                 "index": 0,
@@ -253,9 +297,12 @@ async def test_chat_completions_stream_preserves_headers_and_persists_distinct_r
                 request_context=turn.context,
                 resume_from=None,
             )
+            history = await server.store.load_thread_items(
+                turn.thread.id, None, 20, "asc", turn.context
+            )
             result = Runner.run_streamed(
                 agent,
-                await simple_to_agent_input(turn.input.message),
+                await simple_to_agent_input(history.data),
                 context=context,
                 run_config=RunConfig(tracing_disabled=True),
             )
