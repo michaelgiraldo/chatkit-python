@@ -124,6 +124,7 @@ class RunResult(RunResultStreaming):
 
     def __init__(self) -> None:
         self.is_complete = False
+        self.interruptions = []
         self._test_events: asyncio.Queue[StreamEvent | Exception | None] = (
             asyncio.Queue()
         )

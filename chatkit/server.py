@@ -98,6 +98,7 @@ from .store import (
     TurnSupersededError,
 )
 from .turns import (
+    ApprovalRequired,
     ClientToolInvocation,
     ClientToolRequest,
     ClientToolTurn,
@@ -234,12 +235,20 @@ class ChatKitServer[TContext = Any](ABC):
         """
         return item
 
+    async def save_approval_checkpoint(
+        self, thread: ThreadMetadata, turn_id: str, checkpoint: str, context: TContext
+    ) -> None:
+        """Save the paused run privately for an authorized reviewer to resume."""
+        raise UnsupportedOperationError(
+            "Override save_approval_checkpoint to handle runs that require approval."
+        )
+
     async def on_turn_finished(  # noqa: B027
         self, turn: Turn[TContext], outcome: TurnOutcome
     ) -> None:
         """Observe a turn's terminal outcome after server persistence or cleanup.
 
-        A waiting turn has emitted a persisted pending tool call or structured input.
+        A waiting turn has a pending browser tool, form, or saved approval checkpoint.
         Completion describes server processing, not delivery to a browser. Exceptions
         raised by this hook are logged.
         """
@@ -820,6 +829,10 @@ class ChatKitServer[TContext = Any](ABC):
             ) as events:
                 async for event in events:
                     match event:
+                        case ApprovalRequired():
+                            if outcome is TurnOutcome.COMPLETED:
+                                outcome = TurnOutcome.WAITING
+                            continue
                         case ErrorEvent():
                             outcome = TurnOutcome.FAILED
                         case (
@@ -868,7 +881,7 @@ class ChatKitServer[TContext = Any](ABC):
         stream: Callable[[], AsyncIterator[ResponderEvent]],
         *,
         form_update: ThreadItemReplacedEvent | None = None,
-    ) -> AsyncIterator[ThreadStreamEvent]:
+    ) -> AsyncIterator[ThreadStreamEvent | ApprovalRequired]:
         # Send initial stream options
         await self.store.require_current_turn(thread.id, turn_id, context)
         yield StreamOptionsEvent(
@@ -926,6 +939,26 @@ class ChatKitServer[TContext = Any](ABC):
                             raise ValueError(
                                 "Publish client tools with ClientToolRequest"
                             )
+                        case ApprovalRequired(checkpoint=checkpoint):
+                            if not stream_failed:
+                                await self.store.require_current_turn(
+                                    thread.id, turn_id, context
+                                )
+                                try:
+                                    await self.save_approval_checkpoint(
+                                        thread, turn_id, checkpoint, context
+                                    )
+                                except TurnSupersededError:
+                                    raise
+                                except Exception as exc:
+                                    # Storage errors may contain private run state.
+                                    logger.error(
+                                        "Could not save approval checkpoint (%s)",
+                                        type(exc).__name__,
+                                    )
+                                    raise StreamError(ErrorCode.STREAM_ERROR) from None
+                                yield event
+                            continue
                         case ClientToolRequest() as request:
                             if stream_failed:
                                 continue

@@ -106,7 +106,7 @@ or cancellation cleanup.
 | Outcome | Meaning |
 | --- | --- |
 | `COMPLETED` | The response finished successfully. |
-| `WAITING` | The response left a pending client tool call or structured input. |
+| `WAITING` | The response left a pending browser tool, a form, or a saved approval checkpoint. |
 | `CANCELLED` | The response was interrupted. |
 | `FAILED` | An error stopped the response or was sent in the stream. |
 | `SUPERSEDED` | A newer request took ownership of the thread before this response finished. |
@@ -127,6 +127,37 @@ milestone in storage. Your app owns any recovery of external side effects.
 
 Attach request-scoped resources to the response lifetime and release them
 when it closes. ChatKit logs exceptions from `on_turn_finished`.
+
+### Pause for tool approval
+
+The Agents SDK can end its event stream while protected tools are waiting for a human decision. When `stream_agent_response` receives pending SDK interruptions, it passes a private, serialized `RunState` to your server. Override this hook on your `ChatKitServer` subclass when an agent uses tool approvals:
+
+```python
+async def save_approval_checkpoint(self, thread, turn_id, checkpoint, context):
+    await self.approvals.save(context.user_id, thread.id, turn_id, checkpoint)
+```
+
+Here `self.approvals` is your application's private checkpoint repository. Scope records by the authenticated owner, thread, and turn. The turn reaches `WAITING` after the save succeeds. A missing hook or failed save produces `FAILED`. The checkpoint stays out of the event stream and thread history.
+
+For a run using `AgentContext`, rebuild its store and request context at review time. Save any additional application data that tools need alongside the checkpoint. Your review handler authorizes each decision, verifies the original turn is still waiting, and claims the saved checkpoint once before resuming. The following helper takes the claimed server-side record and decisions keyed by the original tool call IDs:
+
+```python
+from agents import RunContextWrapper, Runner, RunState
+
+
+async def resume_reviewed_run(agent, agent_context, checkpoint, decisions):
+    state = await RunState.from_string(
+        agent, checkpoint, context_override=RunContextWrapper(context=agent_context)
+    )
+    for action in state.get_interruptions():
+        if decisions[action.call_id]:
+            state.approve(action)
+        else:
+            state.reject(action)
+    return Runner.run_streamed(agent, state)
+```
+
+Forward this result through `stream_agent_response` inside an application-authorized responder to deliver the resumed reply to ChatKit. Another SDK pause produces a new checkpoint. Your application owns the review interface and storage. [OpenAI's approval lifecycle](https://developers.openai.com/api/docs/guides/agents/guardrails-approvals#streaming-and-delayed-review-use-the-same-state-model)
 
 ### Wire ChatKit to your web framework
 

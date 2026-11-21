@@ -78,6 +78,7 @@ from .models import (
 )
 from .store import StoreItemType, ThreadStore
 from .turns import (
+    ApprovalRequired,
     ClientToolLocalContinuation,
     ClientToolModelContinuation,
     ClientToolRequest,
@@ -657,6 +658,14 @@ async def stream_agent_response(
         raise
     else:
         await _close_stream(model_events)
+        if result.interruptions:
+            if context._client_tool_request is not None:
+                raise ValueError("A paused run cannot also hand off a browser tool.")
+            # AgentContext holds a live store and request-scoped resources.
+            # The app restores these from the authorized thread when resuming.
+            checkpoint = result.to_state().to_string(context_serializer=lambda _: {})
+            yield ApprovalRequired(checkpoint)
+            return
         if (request := context._client_tool_request) is not None:
             item_id = request.item_id
             if not item_id or item_id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
