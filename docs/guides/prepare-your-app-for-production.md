@@ -263,6 +263,20 @@ Because ChatKit threads and items can contain user text, attachments, and tool o
 - **Avoid storing unnecessary PII** in thread metadata or tool return values.
 - **Encrypt data at rest** using your database’s built‑in features or application‑level encryption where needed.
 
+#### Test delayed and repeated cleanup
+
+Your application decides when a thread expires. If cleanup runs asynchronously,
+test it with synthetic messages, a clock you can advance, and an expiration
+event you can hold and deliver twice. If you also store messages with a
+provider, record which provider conversation each cleanup call deletes.
+
+| Scenario | What to verify |
+| --- | --- |
+| A thread expires with no further activity. | Deliver the event twice. The expired data is gone from each store your policy covers, the second delivery succeeds, and an unrelated thread still reloads. |
+| A visitor resumes before cleanup runs. | If your policy allows renewal, save a new reply, deliver the old event twice, and reload the thread through the chat endpoint. The new reply and all history still covered by your policy remain readable. |
+| Your app restores a thread after expiration. | If an old event can still delete the original provider conversation, allocate a fresh one. Save a reply there, deliver the old event twice, and verify that only the retired conversation was deleted and the restored reply reloads. If expiration is final, verify that reopening is rejected and a newly created chat survives. |
+| Older and newer messages coexist. | Advance the clock past the older message’s original deadline while the thread is active. Reload and check exactly which messages appear. A policy measured from the thread’s last activity should preserve both messages and any references needed to read them. |
+
 ## Domain keys
 
 For a self-hosted backend, ChatKit uses a [domain key](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/customapiconfig/#domainkey) to verify your registered frontend domain. Your backend still authenticates each request.
