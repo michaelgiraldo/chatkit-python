@@ -21,10 +21,6 @@ from agents import (
 )
 from agents.tool_context import ToolContext
 from openai.types.responses import ResponseFunctionToolCall
-from openai.types.responses.response_output_message import Content
-from openai.types.responses.response_output_text import (
-    Annotation as ResponsesAnnotation,
-)
 from openai.types.responses.response_output_text import (
     AnnotationContainerFileCitation,
     AnnotationFileCitation,
@@ -42,15 +38,11 @@ from pydantic import (
     model_validator,
 )
 
+from ._agent_output import _CHAT_COMPLETIONS_PLACEHOLDER_ID, _StreamedOutput
 from ._stream import _close_stream
 from ._web_search import _WebSearchProgress
 from .errors import BaseStreamError, ErrorCode, StreamError
 from .events import (
-    AssistantMessageContentPartAdded,
-    AssistantMessageContentPartAnnotationAdded,
-    AssistantMessageContentPartDone,
-    AssistantMessageContentPartTextDelta,
-    GeneratedImageUpdated,
     ThreadItemAddedEvent,
     ThreadItemDoneEvent,
     ThreadItemRemovedEvent,
@@ -69,8 +61,6 @@ from .models import (
     ClientToolCallItem,
     DurationSummary,
     FileSource,
-    GeneratedImage,
-    GeneratedImageItem,
     Task,
     ThoughtTask,
     ThreadMetadata,
@@ -92,9 +82,7 @@ from .turns import (
 from .widget_stream import stream_widget
 from .widgets import Markdown, Text, WidgetRootInput
 
-_CHAT_COMPLETIONS_PLACEHOLDER_ID = "__fake_id__"
 _CLIENT_TOOL_CONFLICT = "Only one client tool may be requested per turn."
-_ANNOTATION_ADAPTER = TypeAdapter[ResponsesAnnotation](ResponsesAnnotation)
 _CONTINUATION_ITEMS = TypeAdapter(list[dict[str, JsonValue]])
 
 
@@ -563,50 +551,6 @@ class ResponseStreamConverter:
 _DEFAULT_RESPONSE_STREAM_CONVERTER = ResponseStreamConverter()
 
 
-async def _convert_content(
-    content: Content, converter: ResponseStreamConverter
-) -> AssistantMessageContent:
-    if content.type == "output_text":
-        annotations = [
-            await _convert_annotation(annotation, converter)
-            for annotation in content.annotations
-        ]
-        annotations = [a for a in annotations if a is not None]
-        return AssistantMessageContent(
-            text=content.text,
-            annotations=annotations,
-        )
-    else:
-        return AssistantMessageContent(
-            text=content.refusal,
-            annotations=[],
-        )
-
-
-async def _convert_annotation(
-    raw_annotation: object, converter: ResponseStreamConverter
-) -> Annotation | None:
-    if raw_annotation is None:
-        return None
-
-    # Stream events can use different model classes than completed response content.
-    if isinstance(raw_annotation, BaseModel):
-        raw_annotation = raw_annotation.model_dump()
-
-    annotation = _ANNOTATION_ADAPTER.validate_python(raw_annotation)
-
-    if annotation.type == "file_citation":
-        return await converter.file_citation_to_annotation(annotation)
-
-    if annotation.type == "url_citation":
-        return await converter.url_citation_to_annotation(annotation)
-
-    if annotation.type == "container_file_citation":
-        return await converter.container_file_citation_to_annotation(annotation)
-
-    return None
-
-
 def _record_reviewed_phase(
     phases: dict[str, AssistantMessagePhase], event: StreamEvent | _EventWrapper
 ) -> None:
@@ -790,29 +734,12 @@ async def _stream_agent_response(
     queue_iterator: _AsyncQueueIterator,
     converter: ResponseStreamConverter,
 ) -> AsyncGenerator[ResponderEvent]:
-    ctx = context
-    thread = context.thread
-    produced_items = set()
-    synthetic_message_ids: dict[int, str] = {}
-    pending_message_phases: dict[str, AssistantMessagePhase] = {}
-    pending_images: dict[str, GeneratedImageItem] = {}
+    produced_items: set[str] = set()
+    output = _StreamedOutput(context, converter, produced_items)
     streaming_thought: _StreamingThoughtTracker | None = None
-    # item_id -> content_index -> annotation count
-    item_annotation_count: defaultdict[str, defaultdict[int, int]] = defaultdict(
-        lambda: defaultdict(int)
-    )
-
-    def message_id(item_id: str, output_index: int) -> str:
-        # Agents reuses this placeholder in its Responses-shaped Chat Completions
-        # events. Keep one store ID until the message at this index completes.
-        if item_id != _CHAT_COMPLETIONS_PLACEHOLDER_ID:
-            return item_id
-        if output_index not in synthetic_message_ids:
-            synthetic_message_ids[output_index] = ctx.generate_id("message")
-        return synthetic_message_ids[output_index]
 
     def start_reasoning_workflow() -> WorkflowItem:
-        workflow_item = ctx._open_workflow(Workflow(type="reasoning", tasks=[]))
+        workflow_item = context._open_workflow(Workflow(type="reasoning", tasks=[]))
         produced_items.add(workflow_item.id)
         return workflow_item
 
@@ -820,37 +747,40 @@ async def _stream_agent_response(
 
     def finish_workflow(item: WorkflowItem):
         search_progress.settle(item)
-        return ctx._finish_workflow(item)
+        return context._finish_workflow(item)
 
     def relay_context_event(event: ThreadStreamEvent) -> Iterator[ThreadStreamEvent]:
         if isinstance(event, (ThreadItemAddedEvent, ThreadItemDoneEvent)):
             item = event.item
             # End the active workflow when a different visual item is added.
             if (
-                ctx.workflow_item
-                and ctx.workflow_item.id != item.id
+                context.workflow_item
+                and context.workflow_item.id != item.id
                 and item.type not in {"client_tool_call", "hidden_context_item"}
             ):
-                yield finish_workflow(ctx.workflow_item)
+                yield finish_workflow(context.workflow_item)
 
-            if item.id != ctx._resumed_workflow_id:
+            if item.id != context._resumed_workflow_id:
                 # Guardrails only remove items produced during this run.
                 produced_items.add(item.id)
             if isinstance(event, ThreadItemAddedEvent) and isinstance(
                 item, WorkflowItem
             ):
-                ctx.workflow_item = item
+                context.workflow_item = item
 
         if isinstance(
             event, (ThreadItemDoneEvent, ThreadItemReplacedEvent)
         ) and isinstance(event.item, WorkflowItem):
             item = event.item
-            if ctx.workflow_item is not None and ctx.workflow_item.id == item.id:
-                ctx.workflow_item = None
+            if (
+                context.workflow_item is not None
+                and context.workflow_item.id == item.id
+            ):
+                context.workflow_item = None
             search_progress.settle(item)
             if (
                 isinstance(event, ThreadItemDoneEvent)
-                and item.id == ctx._resumed_workflow_id
+                and item.id == context._resumed_workflow_id
             ):
                 event = ThreadItemReplacedEvent(item=item)
 
@@ -870,131 +800,35 @@ async def _stream_agent_response(
 
             # Handle Responses events
             event = event.data
-            search_events = search_progress.handle(event, ctx.workflow_item)
+            search_events = search_progress.handle(event, context.workflow_item)
             if search_events is not None:
                 for search_event in search_events:
                     yield search_event
                 continue
 
-            if event.type == "response.content_part.added":
-                if event.part.type == "reasoning_text":
-                    continue
-                content = await _convert_content(event.part, converter)
-                yield ThreadItemUpdatedEvent(
-                    item_id=message_id(event.item_id, event.output_index),
-                    update=AssistantMessageContentPartAdded(
-                        content_index=event.content_index,
-                        content=content,
-                    ),
-                )
-            elif event.type == "response.output_text.delta":
-                yield ThreadItemUpdatedEvent(
-                    item_id=message_id(event.item_id, event.output_index),
-                    update=AssistantMessageContentPartTextDelta(
-                        content_index=event.content_index,
-                        delta=event.delta,
-                    ),
-                )
-            elif event.type == "response.output_text.done":
-                yield ThreadItemUpdatedEvent(
-                    item_id=message_id(event.item_id, event.output_index),
-                    update=AssistantMessageContentPartDone(
-                        content_index=event.content_index,
-                        content=AssistantMessageContent(
-                            text=event.text,
-                            annotations=[],
-                        ),
-                    ),
-                )
-            elif event.type == "response.output_text.annotation.added":
-                annotation = await _convert_annotation(event.annotation, converter)
-                if annotation:
-                    item_id = message_id(event.item_id, event.output_index)
-                    # Manually track annotation indices per content part in case we drop an annotation that
-                    # we can't convert to our internal representation (e.g. missing filename).
-                    content_counts = item_annotation_count[item_id]
-                    annotation_index = content_counts[event.content_index]
-                    content_counts[event.content_index] += 1
-                    yield ThreadItemUpdatedEvent(
-                        item_id=item_id,
-                        update=AssistantMessageContentPartAnnotationAdded(
-                            content_index=event.content_index,
-                            annotation_index=annotation_index,
-                            annotation=annotation,
-                        ),
-                    )
-                continue
-            elif event.type == "response.output_item.added":
-                item = event.item
-                if item.type == "reasoning" and not ctx.workflow_item:
+            if event.type == "response.output_item.added":
+                if event.item.type == "reasoning" and not context.workflow_item:
                     yield ThreadItemAddedEvent(item=start_reasoning_workflow())
-                if item.type == "message":
-                    if ctx.workflow_item:
-                        yield finish_workflow(ctx.workflow_item)
-                    item_id = message_id(item.id, event.output_index)
-                    produced_items.add(item_id)
-                    if item.phase is not None:
-                        pending_message_phases[item_id] = item.phase
-                    yield ThreadItemAddedEvent(
-                        item=AssistantMessageItem(
-                            id=item_id,
-                            thread_id=thread.id,
-                            phase=item.phase,
-                            content=[
-                                await _convert_content(c, converter)
-                                for c in item.content
-                            ],
-                            created_at=datetime.now(UTC),
-                        ),
-                    )
-                elif item.type == "image_generation_call":
-                    image_item = GeneratedImageItem(
-                        id=ctx.generate_id("message"),
-                        thread_id=thread.id,
-                        created_at=datetime.now(UTC),
-                        image=None,
-                    )
-                    pending_images[item.id] = image_item
-                    produced_items.add(image_item.id)
-                    yield ThreadItemAddedEvent(item=image_item)
-            elif event.type == "response.image_generation_call.partial_image":
-                image_item = pending_images.get(event.item_id)
-                if image_item is None:
-                    continue
+                elif event.item.type == "message" and context.workflow_item:
+                    yield finish_workflow(context.workflow_item)
 
-                url = await converter.base64_image_to_url(
-                    image_id=event.item_id,
-                    base64_image=event.partial_image_b64,
-                    partial_image_index=event.partial_image_index,
-                )
-                progress = converter.partial_image_index_to_progress(
-                    event.partial_image_index
-                )
-
-                yield ThreadItemUpdatedEvent(
-                    item_id=image_item.id,
-                    update=GeneratedImageUpdated(
-                        image=GeneratedImage(id=event.item_id, url=url),
-                        progress=progress,
-                    ),
-                )
-            elif event.type == "response.reasoning_summary_text.delta":
-                if not ctx.workflow_item:
+            if event.type == "response.reasoning_summary_text.delta":
+                if not context.workflow_item:
                     continue
 
                 # stream the first thought in a new workflow so that we can show it earlier
                 if (
-                    ctx.workflow_item.workflow.type == "reasoning"
-                    and len(ctx.workflow_item.workflow.tasks) == 0
+                    context.workflow_item.workflow.type == "reasoning"
+                    and len(context.workflow_item.workflow.tasks) == 0
                 ):
                     streaming_thought = _StreamingThoughtTracker(
                         item_id=event.item_id,
                         index=event.summary_index,
                         task=ThoughtTask(content=event.delta),
                     )
-                    ctx.workflow_item.workflow.tasks.append(streaming_thought.task)
+                    context.workflow_item.workflow.tasks.append(streaming_thought.task)
                     yield ThreadItemUpdatedEvent(
-                        item_id=ctx.workflow_item.id,
+                        item_id=context.workflow_item.id,
                         update=WorkflowTaskAdded(
                             task=streaming_thought.task,
                             task_index=0,
@@ -1002,25 +836,26 @@ async def _stream_agent_response(
                     )
                 elif (
                     streaming_thought
-                    and streaming_thought.task in ctx.workflow_item.workflow.tasks
+                    and streaming_thought.task in context.workflow_item.workflow.tasks
                     and event.item_id == streaming_thought.item_id
                     and event.summary_index == streaming_thought.index
                 ):
                     streaming_thought.task.content += event.delta
                     yield ThreadItemUpdatedEvent(
-                        item_id=ctx.workflow_item.id,
+                        item_id=context.workflow_item.id,
                         update=WorkflowTaskUpdated(
                             task=streaming_thought.task,
-                            task_index=ctx.workflow_item.workflow.tasks.index(
+                            task_index=context.workflow_item.workflow.tasks.index(
                                 streaming_thought.task
                             ),
                         ),
                     )
             elif event.type == "response.reasoning_summary_text.done":
-                if ctx.workflow_item:
+                if context.workflow_item:
                     if (
                         streaming_thought
-                        and streaming_thought.task in ctx.workflow_item.workflow.tasks
+                        and streaming_thought.task
+                        in context.workflow_item.workflow.tasks
                         and event.item_id == streaming_thought.item_id
                         and event.summary_index == streaming_thought.index
                     ):
@@ -1029,57 +864,25 @@ async def _stream_agent_response(
                         streaming_thought = None
                         update = WorkflowTaskUpdated(
                             task=task,
-                            task_index=ctx.workflow_item.workflow.tasks.index(task),
+                            task_index=context.workflow_item.workflow.tasks.index(task),
                         )
                     else:
                         task = ThoughtTask(content=event.text)
-                        ctx.workflow_item.workflow.tasks.append(task)
+                        context.workflow_item.workflow.tasks.append(task)
                         update = WorkflowTaskAdded(
                             task=task,
-                            task_index=len(ctx.workflow_item.workflow.tasks) - 1,
+                            task_index=len(context.workflow_item.workflow.tasks) - 1,
                         )
                     yield ThreadItemUpdatedEvent(
-                        item_id=ctx.workflow_item.id,
+                        item_id=context.workflow_item.id,
                         update=update,
                     )
-            elif event.type == "response.output_item.done":
-                item = event.item
-                if item.type == "message":
-                    item_id = message_id(item.id, event.output_index)
-                    initial_phase = pending_message_phases.pop(item_id, None)
-                    if item.id == _CHAT_COMPLETIONS_PLACEHOLDER_ID:
-                        del synthetic_message_ids[event.output_index]
-                    produced_items.add(item_id)
-                    yield ThreadItemDoneEvent(
-                        item=AssistantMessageItem(
-                            id=item_id,
-                            thread_id=thread.id,
-                            phase=item.phase or initial_phase,
-                            content=[
-                                await _convert_content(c, converter)
-                                for c in item.content
-                            ],
-                            created_at=datetime.now(UTC),
-                        ),
-                    )
-                elif item.type == "image_generation_call":
-                    image_item = pending_images.pop(item.id, None)
-                    if image_item is None or not item.result:
-                        continue
-
-                    url = await converter.base64_image_to_url(
-                        image_id=item.id,
-                        base64_image=item.result,
-                    )
-                    image = GeneratedImage(id=item.id, url=url)
-
-                    yield ThreadItemDoneEvent(
-                        item=image_item.model_copy(update={"image": image})
-                    )
+            elif (update_event := await output.handle(event)) is not None:
+                yield update_event
 
     except BaseException as error:
-        if ctx.workflow_item and search_progress.has_tasks(ctx.workflow_item):
-            ctx.workflow_item = None
+        if context.workflow_item and search_progress.has_tasks(context.workflow_item):
+            context.workflow_item = None
         if isinstance(
             error, (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered)
         ):
@@ -1099,8 +902,8 @@ async def _stream_agent_response(
     # Settle native search state before yielding queued events. A disconnect
     # during the drain must not leave an active search in the agent context.
     finished_search_workflow = None
-    if ctx.workflow_item and search_progress.has_tasks(ctx.workflow_item):
-        finished_search_workflow = finish_workflow(ctx.workflow_item)
+    if context.workflow_item and search_progress.has_tasks(context.workflow_item):
+        finished_search_workflow = finish_workflow(context.workflow_item)
 
     # Drain remaining events
     async for event in queue_iterator:
@@ -1109,9 +912,9 @@ async def _stream_agent_response(
 
     if finished_search_workflow is not None:
         yield finished_search_workflow
-    elif workflow := ctx.workflow_item:
+    elif workflow := context.workflow_item:
         yield PersistWorkflow(
-            item=workflow, replace=workflow.id == ctx._resumed_workflow_id
+            item=workflow, replace=workflow.id == context._resumed_workflow_id
         )
 
 
