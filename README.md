@@ -69,6 +69,12 @@ Run `make sync` to install the locked development environment and `make check`
 to run formatting, lint, type checks, tests, and the strict docs build. Use
 `make test TESTS='tests/test_fastapi.py -k missing_thread'` for a focused run.
 
+To try an SDK update before changing the lockfile, run
+`make sdk-check OPENAI_VERSION=3.57.0`. Set `AGENTS_VERSION` to test the
+Agents SDK, or supply both versions to try a pair. An omitted SDK uses its
+locked version. The command reports the installed versions and runs the full
+test suite in an isolated environment with synthetic provider traffic.
+
 When changing modules, imports, or optional dependencies, run `make wheel-check`.
 It builds a fresh package and checks the installed core, FastAPI, Agents, and
 template imports in isolated environments. CI runs the same command.
