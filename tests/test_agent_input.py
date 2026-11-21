@@ -5,7 +5,6 @@ from typing import cast
 import pytest
 from openai.types.responses import (
     EasyInputMessageParam,
-    ResponseInputContentParam,
     ResponseInputTextParam,
 )
 from openai.types.responses.response_input_item_param import Message
@@ -19,7 +18,6 @@ from chatkit.agent_input import (
 from chatkit.models import (
     AssistantMessageContent,
     AssistantMessageItem,
-    Attachment,
     ClientToolCallItem,
     CustomTask,
     GeneratedImage,
@@ -69,11 +67,6 @@ async def test_input_item_converter_quotes_last_user_message():
         ),
     ]
 
-    async def throw_exception(
-        _: Attachment,
-    ) -> ResponseInputContentParam:
-        raise Exception("Not implemented")
-
     input_items = await simple_to_agent_input(items)
     assert len(input_items) == 3
     assert input_items[0] == {
@@ -106,6 +99,12 @@ async def test_input_item_converter_quotes_last_user_message():
         "role": "user",
         "type": "message",
     }
+    # History adapters can reuse an object. Only the last position gets quote context.
+    assert await simple_to_agent_input([items[1], items[1]]) == [
+        input_items[1],
+        input_items[1],
+        input_items[2],
+    ]
 
 
 async def test_input_item_converter_to_input_items_mixed():
