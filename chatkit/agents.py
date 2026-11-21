@@ -462,6 +462,7 @@ async def stream_agent_response(
     result: RunResultStreaming,
     *,
     converter: ResponseStreamConverter = _DEFAULT_RESPONSE_STREAM_CONVERTER,
+    resume_workflow: bool = True,
 ) -> AsyncGenerator[ThreadStreamEvent]:
     """
     Convert a streamed Agents SDK run into ChatKit thread stream events.
@@ -474,6 +475,9 @@ async def stream_agent_response(
         result: The RunResultStreaming to convert.
         converter: Defines overridable methods for adapting streamed data (such as image
             generation results and partial updates) into the forms expected by ChatKit.
+        resume_workflow: Look for a saved workflow to continue. Set this to false
+            for stores without saved workflows to skip the history lookup. Workflows
+            created during the current run still stream normally.
 
     Returns:
         An async iterator that yields thread stream events representing the run result.
@@ -495,7 +499,13 @@ async def stream_agent_response(
     merged_events = _merge_generators(model_events, queue_iterator, on_abort=cancel_run)
     try:
         async with aclosing(
-            _stream_agent_response(context, merged_events, queue_iterator, converter)
+            _stream_agent_response(
+                context,
+                merged_events,
+                queue_iterator,
+                converter,
+                resume_workflow=resume_workflow,
+            )
         ) as events:
             async for event in events:
                 yield event
@@ -517,6 +527,8 @@ async def _stream_agent_response(
     events: AsyncIterator[StreamEvent | _EventWrapper],
     queue_iterator: _AsyncQueueIterator,
     converter: ResponseStreamConverter,
+    *,
+    resume_workflow: bool,
 ) -> AsyncGenerator[ThreadStreamEvent]:
     ctx = context
     thread = context.thread
@@ -529,18 +541,19 @@ async def _stream_agent_response(
         lambda: defaultdict(int)
     )
 
-    # A workflow immediately before a client tool call can continue on resume.
-    items = await context.store.load_thread_items(
-        thread.id, None, 2, "desc", context.request_context
-    )
-    match items.data:
-        case [WorkflowItem() as saved, *_] | [
-            ClientToolCallItem(),
-            WorkflowItem() as saved,
-        ]:
-            ctx._resumed_workflow_id = saved.id
-            if ctx.workflow_item is None:
-                ctx.workflow_item = saved
+    if resume_workflow:
+        # A workflow immediately before a client tool call can continue on resume.
+        items = await context.store.load_thread_items(
+            thread.id, None, 2, "desc", context.request_context
+        )
+        match items.data:
+            case [WorkflowItem() as saved, *_] | [
+                ClientToolCallItem(),
+                WorkflowItem() as saved,
+            ]:
+                ctx._resumed_workflow_id = saved.id
+                if ctx.workflow_item is None:
+                    ctx.workflow_item = saved
 
     def message_id(item_id: str, output_index: int) -> str:
         # Agents reuses this placeholder in its Responses-shaped Chat Completions

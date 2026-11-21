@@ -18,6 +18,14 @@ The `openai-chatkit` package on PyPI tracks the
    release with the changelog, the full commit SHA for installation, and the
    passing CI run.
 
+## Turnspan 4 (`1.6.5+turnspan.4`)
+
+- Apps that never resume saved workflows can pass `resume_workflow=False`
+  to `stream_agent_response` to skip the thread-history lookup. Workflows
+  created during the current run still stream normally, and the default
+  behavior continues to look for a saved workflow.
+  [Streaming guide](guides/respond-to-user-message.md#run-inference-and-stream-events)
+
 ## Turnspan 3 (`1.6.5+turnspan.3`)
 
 ### What's new

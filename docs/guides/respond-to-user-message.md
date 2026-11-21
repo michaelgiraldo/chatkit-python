@@ -476,6 +476,11 @@ async def load_document(ctx: RunContextWrapper[AgentContext], document_id: str):
 
 `stream_agent_response` forwards these events alongside assistant text and tool updates. To call a browser callback from an agent tool, use [`request_client_tool`](update-client-during-response.md#define-a-client-tool-in-your-agent).
 
+By default, `stream_agent_response` checks the latest thread items for a
+saved workflow. If your app never stores workflows for later continuation,
+pass `resume_workflow=False` to skip that lookup. Progress from workflows
+created during the current run still streams normally.
+
 ### Save structured tool results after a turn
 
 Use the same `AgentContext` for the run and the ChatKit stream. Inside a tool,

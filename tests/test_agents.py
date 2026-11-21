@@ -1684,7 +1684,10 @@ async def test_interleaved_web_searches_keep_their_task_indices_and_citations():
     )
 
 
-async def test_active_web_search_at_end_of_stream_finishes_workflow():
+@pytest.mark.parametrize("resume_workflow", [True, False])
+async def test_active_web_search_at_end_of_stream_finishes_workflow(
+    resume_workflow: bool,
+):
     store = Mock(
         generate_item_id=Mock(return_value="search_workflow"),
         load_thread_items=AsyncMock(return_value=Page()),
@@ -1705,7 +1708,9 @@ async def test_active_web_search_at_end_of_stream_finishes_workflow():
     )
     async with (
         asyncio.timeout(2),
-        aclosing(stream_agent_response(context, result)) as events,
+        aclosing(
+            stream_agent_response(context, result, resume_workflow=resume_workflow)
+        ) as events,
     ):
         opened = await anext(events)
         assert isinstance(opened, ThreadItemAddedEvent)
@@ -1746,6 +1751,7 @@ async def test_active_web_search_at_end_of_stream_finishes_workflow():
     assert task.queries == ["partial search"]
     assert task.status_indicator == "none"
     assert context.workflow_item is None
+    assert store.load_thread_items.await_count == int(resume_workflow)
     store.add_thread_item.assert_not_awaited()
 
 
@@ -1790,6 +1796,7 @@ async def test_web_search_finishes_resumed_workflow_with_replacement():
     assert replaced.item.workflow.tasks == [thought, updated.update.task]
     assert isinstance(updated.update.task, SearchTask)
     assert updated.update.task.status_indicator == "complete"
+    store.load_thread_items.assert_awaited_once_with(thread.id, None, 2, "desc", None)
     store.generate_item_id.assert_not_called()
     store.add_thread_item.assert_not_awaited()
 
