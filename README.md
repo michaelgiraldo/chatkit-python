@@ -69,6 +69,10 @@ Run `make sync` to install the locked development environment and `make check`
 to run formatting, lint, type checks, tests, and the strict docs build. Use
 `make test TESTS='tests/test_fastapi.py -k missing_thread'` for a focused run.
 
+When changing modules, imports, or optional dependencies, run `make wheel-check`.
+It builds a fresh package and checks the installed core, FastAPI, Agents, and
+template imports in isolated environments. CI runs the same command.
+
 Run `make serve-docs` to preview the Zensical site and `make docs-check` to
 build it into `site/`. Zensical generates the API reference from `chatkit/`.
 Add new public modules to the API navigation in [zensical.toml](zensical.toml).
