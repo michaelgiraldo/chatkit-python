@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -193,15 +193,33 @@ def test_agent_context_requires_an_explicit_resume_choice():
         })
 
 
-def test_agent_context_rejects_legacy_workflow_argument():
-    with pytest.raises(ValidationError, match="workflow_item"):
-        AgentContext.model_validate({
-            "thread": thread,
-            "store": mock_store,
-            "request_context": None,
-            "resume_from": None,
-            "workflow_item": None,
-        })
+@pytest.mark.parametrize("field", ["resum_from", "workflow_item"])
+def test_agent_context_identifies_unknown_constructor_field(field: str):
+    extra: dict[str, Any] = {field: None}
+    with pytest.raises(ValidationError) as error:
+        AgentContext(
+            thread=thread,
+            store=mock_store,
+            request_context=None,
+            resume_from=None,
+            **extra,
+        )
+    (issue,) = error.value.errors()
+    assert (issue["type"], issue["loc"]) == ("extra_forbidden", (field,))
+
+
+def test_agent_context_accepts_declared_app_fields():
+    class AppContext(AgentContext[None]):
+        locale: str
+
+    context = AppContext(
+        thread=thread,
+        store=mock_store,
+        request_context=None,
+        resume_from=None,
+        locale="es",
+    )
+    assert context.locale == "es"
 
 
 def test_agent_context_rejects_workflow_from_another_thread():

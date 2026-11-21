@@ -32,6 +32,10 @@ install command, tested dependency versions, and links to docs at that commit.
 
 ## Unreleased
 
+- **Breaking Python constructor change.** `AgentContext` raises a validation
+  error for each unknown keyword. Pass request-scoped values in `request_context`
+  or declare run-specific fields on an `AgentContext` subclass. Use
+  `resume_from` to supply a saved workflow. [App context guide](guides/pass-extra-app-context-to-your-model.md#send-app-context-with-each-request)
 - Widget actions omit server-only context from browser replies. The FastAPI
   adapter notices when a visitor leaves during a silent stream. Ordinary
   streaming saves the partial reply for reload.

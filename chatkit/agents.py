@@ -35,7 +35,6 @@ from pydantic import (
     SkipValidation,
     TypeAdapter,
     ValidationError,
-    model_validator,
 )
 
 from ._agent_output import _CHAT_COMPLETIONS_PLACEHOLDER_ID, _StreamedOutput
@@ -186,7 +185,7 @@ class AgentContext[TContext](BaseModel):
     `None` for a fresh run. Construct the context before starting the runner.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     thread: ThreadMetadata
     store: Annotated[ThreadStore[TContext], SkipValidation]
@@ -199,13 +198,6 @@ class AgentContext[TContext](BaseModel):
     _events: asyncio.Queue[ThreadStreamEvent] = PrivateAttr(
         default_factory=asyncio.Queue
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _require_explicit_workflow(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "workflow_item" in data:
-            raise ValueError("Replace workflow_item with resume_from.")
-        return data
 
     def model_post_init(self, _context: Any, /) -> None:
         if self.resume_from is None:
