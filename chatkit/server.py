@@ -153,6 +153,16 @@ class ChatKitServer[TContext = Any](ABC):
         self.attachment_store = attachment_store
         self.attachment_metadata_store = attachment_metadata_store
 
+    def _require_client_tool_store(self) -> None:
+        store_type = type(self.store)
+        if (
+            store_type.load_client_tool_status is ThreadStore.load_client_tool_status
+            or store_type.cancel_client_tool_call is ThreadStore.cancel_client_tool_call
+        ):
+            raise UnsupportedOperationError(
+                "Client tool callbacks require a compatible thread store"
+            )
+
     def _get_attachment_store(self) -> AttachmentStore[TContext]:
         """Return the configured AttachmentStore or raise if missing."""
         if self.attachment_store is None:
@@ -449,28 +459,33 @@ class ChatKitServer[TContext = Any](ABC):
                 )
 
             case ThreadsAddClientToolOutputReq():
+                self._require_client_tool_store()
                 thread = await self.store.load_thread(
                     request.params.thread_id, context=context
                 )
-                items = await self.store.load_thread_items(
-                    thread.id, None, 1, "desc", context
+                result = request.params.result
+                status = await self.store.load_client_tool_status(
+                    thread.id, result.item_id, context
                 )
-                tool_call = next(
-                    (
-                        item
-                        for item in items.data
-                        if isinstance(item, ClientToolCallItem)
-                        and item.status == "pending"
-                    ),
-                    None,
+                if status != "pending":
+                    raise ConflictError("The client tool call is no longer pending.")
+
+                tool_call = await self.store.load_item(
+                    thread.id, result.item_id, context=context
                 )
-                if not tool_call:
+                if (
+                    not isinstance(tool_call, ClientToolCallItem)
+                    or tool_call.id != result.item_id
+                    or tool_call.thread_id != thread.id
+                ):
                     raise InvalidOperationError(
-                        "The thread is not waiting for a client tool result."
+                        "The requested item does not accept a client tool result."
                     )
+                if tool_call.status != "pending":
+                    raise ConflictError("The client tool call is no longer pending.")
 
                 completed = tool_call.model_copy(
-                    update={"output": request.params.result, "status": "completed"}
+                    update={"output": result.output, "status": "completed"}
                 )
                 await self.store.claim_pending_item(
                     thread.id, tool_call, completed, context
@@ -724,6 +739,18 @@ class ChatKitServer[TContext = Any](ABC):
         # so that we can persist them when the stream is cancelled.
         pending_items: dict[str, ThreadItem] = {}
         hidden_item_ids: set[str] = set()
+        issued_tool_ids: set[str] = set()
+        stream_failed = False
+
+        async def register_client_tool(item: ClientToolCallItem) -> None:
+            self._require_client_tool_store()
+            await self.store.add_thread_item(thread.id, item, context=context)
+            issued_tool_ids.add(item.id)
+
+        async def cancel_issued_tools() -> None:
+            for item_id in issued_tool_ids.copy():
+                await self.store.cancel_client_tool_call(thread.id, item_id, context)
+                issued_tool_ids.discard(item_id)
 
         try:
             if form_update is not None:
@@ -736,6 +763,35 @@ class ChatKitServer[TContext = Any](ABC):
                         pending_items[event.item.id] = event.item.model_copy(deep=True)
 
                     match event:
+                        case (
+                            ThreadItemAddedEvent(
+                                item=ClientToolCallItem(status="pending")
+                            )
+                            | ThreadItemReplacedEvent(
+                                item=ClientToolCallItem(status="pending")
+                            )
+                        ):
+                            raise ValueError(
+                                "Publish pending client tools with ThreadItemDoneEvent"
+                            )
+                        case ThreadItemDoneEvent(
+                            item=ClientToolCallItem(status="pending") as tool
+                        ):
+                            if stream_failed:
+                                continue
+                            # A disconnect during a transaction must settle registration
+                            # before cleanup decides which exact callback to cancel.
+                            registration = asyncio.create_task(
+                                register_client_tool(tool)
+                            )
+                            try:
+                                await asyncio.shield(registration)
+                            except asyncio.CancelledError:
+                                try:
+                                    await registration
+                                except Exception:
+                                    logger.exception("Error registering client tool")
+                                raise
                         case ThreadItemDoneEvent():
                             await self.store.add_thread_item(
                                 thread.id, event.item, context=context
@@ -746,6 +802,7 @@ class ChatKitServer[TContext = Any](ABC):
                                 thread.id, event.item_id, context=context
                             )
                             pending_items.pop(event.item_id, None)
+                            issued_tool_ids.discard(event.item_id)
                         case ThreadItemReplacedEvent():
                             await self.store.save_item(
                                 thread.id, event.item, context=context
@@ -756,6 +813,9 @@ class ChatKitServer[TContext = Any](ABC):
                             # so that we have a reference to the latest version of these pending items
                             # when the stream is cancelled.
                             self._update_pending_items(pending_items, event)
+                        case ErrorEvent():
+                            stream_failed = True
+                            await cancel_issued_tools()
 
                     if isinstance(event, (ThreadCreatedEvent, ThreadUpdatedEvent)):
                         hidden_item_ids.update(
@@ -787,13 +847,18 @@ class ChatKitServer[TContext = Any](ABC):
                         yield event
 
         except asyncio.CancelledError, GeneratorExit:
-            await self.handle_stream_cancelled(
-                thread, list(pending_items.values()), context
-            )
+            try:
+                await cancel_issued_tools()
+            finally:
+                await self.handle_stream_cancelled(
+                    thread, list(pending_items.values()), context
+                )
             raise
         except (CustomStreamError, StreamError) as error:
+            await cancel_issued_tools()
             yield _stream_error_event(error)
         except Exception as e:
+            await cancel_issued_tools()
             yield ErrorEvent(
                 code=ErrorCode.STREAM_ERROR,
                 allow_retry=True,

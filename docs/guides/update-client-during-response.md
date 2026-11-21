@@ -124,7 +124,10 @@ const chatkit = useChatKit({
 
 ## Call client tools mid-inference
 
-Client tool calls let the agent invoke browser/app callbacks mid-inference. Register the tool on both client and server; when triggered, ChatKit pauses the model, sends the tool request to the client, and resumes with the returned result.
+Client tool calls let the agent invoke browser or app callbacks
+mid-inference. Register the tool on the client and server. When the model
+calls the tool, ChatKit pauses the model, sends the tool request to the
+client, and resumes with the returned result.
 
 Use client effects instead when you do not need to wait for the client callback response for the rest of your response.
 
@@ -157,18 +160,34 @@ assistant = Agent[AgentContext](
 
 ### Register the client tool in ChatKit.js
 
-Provide a matching callback when initializing ChatKit on the client. Match the name passed to `request_client_tool`. The client sends the return value back to the server to resume the run.
+Register an `onClientTool` callback that handles the name passed to
+`request_client_tool`. Turnspan supplies the saved item ID and the tool
+arguments as `params.item_id` and `params.input`. Return the same item ID
+with your tool's JSON output. The canvas tool below takes a project ID
+under `input.project` and returns the selected nodes under `output.nodes`.
+[ChatKit.js callback API](https://openai.github.io/chatkit-js/api/openai/chatkit/type-aliases/chatkitoptions/#onclienttool)
 
 ```ts
 const chatkit = useChatKit({
   // ...
   onClientTool: async ({name, params}) => {
-    if (name !== "get_selected_canvas_nodes" || typeof params.project !== "string") {
+    const {item_id, input} = params;
+    if (
+      name !== "get_selected_canvas_nodes" ||
+      typeof item_id !== "string" ||
+      !item_id ||
+      typeof input !== "object" ||
+      input === null ||
+      !("project" in input) ||
+      typeof input.project !== "string"
+    ) {
       throw new Error("Unexpected client tool request");
     }
-    const nodes = myCanvas.getSelectedNodes(params.project);
+
+    const nodes = myCanvas.getSelectedNodes(input.project);
     return {
-      nodes: nodes.map((node) => ({id: node.id, kind: node.type})),
+      item_id,
+      output: {nodes: nodes.map((node) => ({id: node.id, kind: node.type}))},
     };
   },
 });
@@ -177,18 +196,82 @@ const chatkit = useChatKit({
 ### Stream and resume
 
 In `respond(self, turn)`, use `turn.thread` and `turn.context` to construct
-your `AgentContext`, then stream via `stream_agent_response`. ChatKit emits a
-pending client tool call, and the frontend posts the tool's output back.
+your `AgentContext`, then stream via `stream_agent_response`. ChatKit saves a
+pending client tool call before emitting the request to the browser. The
+agent helper emits a `ThreadItemDoneEvent` for the pending tool item. Use that
+event if you build the tool request directly in a custom responder.
 
-ChatKit saves the tool result before calling `respond` again. On that turn,
-`turn.input` is a `ClientToolTurn`, and `turn.input.tool_call.output` holds the
-client's result. When you convert the saved thread history,
-`ThreadItemConverter.client_tool_call_to_input` supplies the model with both
-the call and the matching output.
+ChatKit.js posts the callback's return value as `params.result` in the
+existing `threads.add_client_tool_output` operation.
+
+```json
+{
+  "type": "threads.add_client_tool_output",
+  "params": {
+    "thread_id": "thr_example",
+    "result": {
+      "item_id": "tc_example",
+      "output": {"nodes": [{"id": "node_1", "kind": "text"}]}
+    }
+  }
+}
+```
+
+The Python request model exposes that result as
+[`ClientToolCallbackResult`](../api/chatkit/requests.md#chatkit.requests.ClientToolCallbackResult).
+The server uses the authenticated request context, the thread ID, and the
+item ID to find the pending invocation. It commits the claim and output before
+calling `respond` again. On that turn, `turn.input` is a `ClientToolTurn` and
+`turn.input.tool_call.output` contains the inner `output` value. The
+`ThreadItemConverter.client_tool_call_to_input` method supplies the model with
+the original tool arguments, the output, and the provider's original
+`call_id`. The callback envelope belongs to the browser transport.
 
 For each run, pass `resume_from=None` to start fresh or prepare an explicitly
 linked [saved workflow](respond-to-user-message.md#prepare-workflow-progress)
-before starting the agent. The application can use the claimed pending tool
-item to resolve its workflow from trusted storage.
+before starting the agent. Use the claimed tool item to resolve a linked
+workflow from trusted storage if your app needs to resume one.
+
+### Know when a callback can complete
+
+Each thread can have one pending client tool call. A completed handoff leaves
+that exact call pending so a callback can arrive later, even after the server
+restarts with a durable store. New messages and retries cancel the pending
+call. Deleting the call cancels it, and deleting the thread invalidates every
+callback for that thread. Closing or failing a stream before it finishes the
+handoff cancels the exact call the stream opened if it is still pending.
+A result that already won the atomic claim stays completed.
+
+A callback for a missing, already completed, cancelled, or inaccessible
+invocation cannot resume the turn. The server matches the saved ID even when
+other items were written to the transcript after the tool request. See
+[implement the client tool lifecycle](respond-to-user-message.md#implement-the-client-tool-lifecycle)
+for storage requirements.
+
+The lifecycle governs calls that a responder has already registered. Apps
+that allow overlapping responses in one thread own turn scheduling and
+must prevent a superseded responder from opening its first tool call after
+a newer turn starts.
+
+### Upgrade from older Turnspan versions
+
+1. Update the browser handler to read `params.input` and return the matching
+   `item_id` with `output`. Deploy it with the matching Turnspan server.
+   If you wrote a custom transport, update its tool-call serialization to
+   match the [protocol helpers](respond-to-user-message.md#how-request-context-flows-into-chatkit).
+2. Update your store to track the new lifecycle. Let in-flight callbacks
+   finish on the old release before switching traffic, or have users reload
+   and restart affected interactions. Preserve completed transcript history
+   and let the new server issue any new tool call with a fresh ID.
+3. Verify a fresh reply and a browser callback completing its own tool
+   call after reopening a durable store. Confirm that a repeated callback
+   is rejected without rerunning the responder. Verify that a callback
+   issued before a new message or retry cannot resume an older turn.
+
+For a rollback, switch the browser handler, Python artifact, and store
+implementation together. Keep the previous compatible storage schema or a
+rollback plan for its migrations. Finish or restart in-flight tool calls on
+the matching release, and reload clients still carrying the previous browser
+bundle.
 
 

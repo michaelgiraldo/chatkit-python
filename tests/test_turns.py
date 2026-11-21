@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from chatkit.errors import UnsupportedOperationError
 from chatkit.events import (
     ErrorEvent,
     ThreadItemAddedEvent,
@@ -24,22 +25,25 @@ from chatkit.models import (
     UserMessageTextContent,
 )
 from chatkit.requests import (
+    ClientToolCallbackResult,
     StreamingReq,
     StructuredInputAnswerSubmission,
     StructuredInputSubmission,
     ThreadAddClientToolOutputParams,
     ThreadAddStructuredInputParams,
+    ThreadAddUserMessageParams,
     ThreadCreateParams,
     ThreadRetryAfterItemParams,
     ThreadsAddClientToolOutputReq,
     ThreadsAddStructuredInputReq,
+    ThreadsAddUserMessageReq,
     ThreadsCreateReq,
     ThreadsRetryAfterItemReq,
     ThreadsUpdateReq,
     ThreadUpdateParams,
 )
 from chatkit.server import ChatKitServer, StreamingResult
-from chatkit.store import ConflictError
+from chatkit.store import ConflictError, NotFoundError, ThreadStore
 from chatkit.turns import (
     ClientToolTurn,
     RetryTurn,
@@ -110,19 +114,32 @@ def assistant_message(
     )
 
 
+def client_tool_call(turn: Turn[RequestContext], item_id: str) -> ClientToolCallItem:
+    return ClientToolCallItem(
+        id=item_id,
+        thread_id=turn.thread.id,
+        created_at=datetime.now(),
+        name="read_selection",
+        call_id=f"call-{item_id}",
+        arguments={},
+    )
+
+
+def client_tool_callback(
+    thread_id: str, item_id: str, output: object = None
+) -> ThreadsAddClientToolOutputReq:
+    return ThreadsAddClientToolOutputReq(
+        params=ThreadAddClientToolOutputParams(
+            thread_id=thread_id,
+            result=ClientToolCallbackResult(item_id=item_id, output=output),
+        )
+    )
+
+
 async def test_typed_turn_waits_for_client_tool_then_completes(tmp_path: Path):
     async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
         if isinstance(turn.input, UserMessageTurn):
-            yield ThreadItemDoneEvent(
-                item=ClientToolCallItem(
-                    id="client-tool",
-                    thread_id=turn.thread.id,
-                    created_at=datetime.now(),
-                    name="read_selection",
-                    call_id="call-selection",
-                    arguments={},
-                )
-            )
+            yield ThreadItemDoneEvent(item=client_tool_call(turn, "client-tool"))
             return
 
         assert isinstance(turn.input, ClientToolTurn)
@@ -150,19 +167,175 @@ async def test_typed_turn_waits_for_client_tool_then_completes(tmp_path: Path):
         "client-tool",
     ]
 
-    await server.consume(
-        ThreadsAddClientToolOutputReq(
-            params=ThreadAddClientToolOutputParams(
-                thread_id=initial.thread.id, result="blue"
-            )
-        )
-    )
+    await server.consume(client_tool_callback(initial.thread.id, "client-tool", "blue"))
     first, continuation = server.received
     assert first is initial
     assert isinstance(continuation.input, ClientToolTurn)
     assert len(server.finished) == 2
     assert server.finished[-1][:2] == (continuation, TurnOutcome.COMPLETED)
     assert any(item.id == "reply" for item in server.finished[-1][2])
+
+
+async def test_client_tool_routes_only_the_exact_active_item(tmp_path: Path):
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        if isinstance(turn.input, UserMessageTurn):
+            yield ThreadItemDoneEvent(
+                item=client_tool_call(turn, f"tool-{turn.input.message.id}")
+            )
+            yield ThreadItemDoneEvent(
+                item=assistant_message(turn, f"note-{turn.input.message.id}", "Note")
+            )
+        else:
+            assert isinstance(turn.input, ClientToolTurn)
+
+    def pending_tool(
+        events: list[ThreadStreamEvent],
+    ) -> ClientToolCallItem:
+        (call,) = [
+            event.item
+            for event in events
+            if isinstance(event, ThreadItemDoneEvent)
+            and isinstance(event.item, ClientToolCallItem)
+        ]
+        return call
+
+    server = RecordingServer(tmp_path, respond)
+    first = pending_tool(await server.consume(create_thread()))
+    foreign = pending_tool(await server.consume(create_thread()))
+    second = pending_tool(
+        await server.consume(
+            ThreadsAddUserMessageReq(
+                params=ThreadAddUserMessageParams(
+                    thread_id=first.thread_id, input=create_thread().params.input
+                )
+            )
+        )
+    )
+    assert first.name == second.name == foreign.name
+
+    with pytest.raises(ConflictError):
+        await server.consume(client_tool_callback(first.thread_id, first.id, "late"))
+    with pytest.raises(NotFoundError):
+        await server.consume(
+            client_tool_callback(first.thread_id, foreign.id, "foreign")
+        )
+
+    await server.consume(client_tool_callback(first.thread_id, second.id, "current"))
+    with pytest.raises(ConflictError):
+        await server.consume(
+            client_tool_callback(first.thread_id, second.id, "duplicate")
+        )
+
+    (resumed,) = [
+        turn.input.tool_call
+        for turn in server.received
+        if isinstance(turn.input, ClientToolTurn)
+    ]
+    assert (resumed.id, resumed.call_id, resumed.output) == (
+        second.id,
+        second.call_id,
+        "current",
+    )
+
+
+async def test_client_tool_fails_closed_on_legacy_stores(tmp_path: Path):
+    class LegacyStore(SQLiteStore):
+        load_client_tool_status = ThreadStore.load_client_tool_status
+        cancel_client_tool_call = ThreadStore.cancel_client_tool_call
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        assert isinstance(turn.input, UserMessageTurn)
+        yield ThreadItemDoneEvent(item=client_tool_call(turn, "example-tool"))
+
+    server = RecordingServer(tmp_path, respond)
+    await server.consume(create_thread())
+    (initial,) = server.received
+    server.store = LegacyStore(str(tmp_path / "turns.sqlite"))
+
+    with pytest.raises(UnsupportedOperationError):
+        await server.consume(client_tool_callback(initial.thread.id, "example-tool"))
+    assert server.received == [initial]
+
+    events = await server.consume(create_thread())
+    assert isinstance(events[-1], ErrorEvent)
+    assert not any(
+        isinstance(event, ThreadItemDoneEvent)
+        and isinstance(event.item, ClientToolCallItem)
+        for event in events
+    )
+    assert all(item.id != "example-tool" for item in server.finished[-1][2])
+
+
+@pytest.mark.parametrize("end", ["close", "error_event", "raised_error"])
+async def test_interrupted_client_tool_handoff_cancels_the_callback(
+    tmp_path: Path, end: str
+):
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        assert isinstance(turn.input, UserMessageTurn)
+        yield ThreadItemDoneEvent(item=client_tool_call(turn, "example-tool"))
+        if end == "error_event":
+            yield ErrorEvent(message="Synthetic failure")
+        elif end == "raised_error":
+            raise RuntimeError("Synthetic failure")
+
+    server = RecordingServer(tmp_path, respond)
+    if end == "close":
+        async with aclosing(await server.open_stream(create_thread())) as events:
+            async for event in events:
+                if isinstance(event, ThreadItemDoneEvent) and isinstance(
+                    event.item, ClientToolCallItem
+                ):
+                    break
+    else:
+        events = await server.consume(create_thread())
+        assert isinstance(events[-1], ErrorEvent)
+
+    ((turn, outcome, _),) = server.finished
+    expected_outcome = TurnOutcome.CANCELLED if end == "close" else TurnOutcome.FAILED
+    assert outcome is expected_outcome
+    assert (
+        await server.store.load_client_tool_status(
+            turn.thread.id, "example-tool", turn.context
+        )
+        == "cancelled"
+    )
+    with pytest.raises(ConflictError):
+        await server.consume(client_tool_callback(turn.thread.id, "example-tool"))
+
+
+async def test_disconnect_settles_in_flight_client_tool_registration(tmp_path: Path):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowStore(SQLiteStore):
+        async def add_thread_item(
+            self, thread_id: str, item: ThreadItem, context: RequestContext
+        ) -> None:
+            await super().add_thread_item(thread_id, item, context)
+            if isinstance(item, ClientToolCallItem):
+                started.set()
+                await release.wait()
+
+    async def respond(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        yield ThreadItemDoneEvent(item=client_tool_call(turn, "example-tool"))
+
+    server = RecordingServer(tmp_path, respond)
+    server.store = SlowStore(str(tmp_path / "turns.sqlite"))
+    consuming = asyncio.create_task(server.consume(create_thread()))
+    await asyncio.wait_for(started.wait(), 5)
+    consuming.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await consuming
+
+    ((turn, outcome, _),) = server.finished
+    assert outcome is TurnOutcome.CANCELLED
+    assert (
+        await server.store.load_client_tool_status(
+            turn.thread.id, "example-tool", turn.context
+        )
+        == "cancelled"
+    )
 
 
 async def test_typed_turn_distinguishes_form_submission_and_retry(tmp_path: Path):

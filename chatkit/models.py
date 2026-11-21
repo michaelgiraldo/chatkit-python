@@ -122,6 +122,13 @@ class ClientToolCallItem(ThreadItemBase):
     arguments: dict[str, Any]
     output: Any | None = None
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, serializer, info: SerializationInfo):
+        data = serializer(self)
+        if self.status == "pending" and (info.context or {}).get("browser_wire"):
+            data["arguments"] = {"item_id": self.id, "input": data["arguments"]}
+        return data
+
 
 class WidgetItem(ThreadItemBase):
     """Thread item containing widget content."""

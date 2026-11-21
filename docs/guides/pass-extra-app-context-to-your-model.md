@@ -93,22 +93,29 @@ On the client, implement the callback:
 ```ts
 const chatkit = useChatKit({
   // ...
-  onClientTool: async ({name}) => {
-    if (name !== "get_canvas_selection") {
-      throw new Error(`Unknown client tool: ${name}`);
+  onClientTool: async ({name, params}) => {
+    const {item_id} = params;
+    if (name !== "get_canvas_selection" || typeof item_id !== "string" || !item_id) {
+      throw new Error("Unexpected client tool request");
     }
     const selection = myCanvas.getSelection();
     return {
-      nodes: selection.map((node) => ({
-        name: node.name,
-        description: node.description,
-      })),
+      item_id,
+      output: {
+        nodes: selection.map((node) => ({
+          name: node.name,
+          description: node.description,
+        })),
+      },
     };
   },
 });
 ```
 
-Configure the agent to [stop at the client tool](update-client-during-response.md#define-a-client-tool-in-your-agent). ChatKit sends the client tool result back to the server and continues the run with that data included as model input.
+Configure the agent to [stop at the client tool](update-client-during-response.md#define-a-client-tool-in-your-agent).
+ChatKit sends the echoed item ID and result back to the server. The run
+continues with the selected nodes after the server claims that exact call.
+See the [client tool callback guide](update-client-during-response.md#register-the-client-tool-in-chatkitjs).
 
 ## Inject extra context as model input item
 

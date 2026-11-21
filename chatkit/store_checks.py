@@ -55,7 +55,7 @@ async def check_thread_store[TContext](
     other_context: TContext,
     peer: ThreadStore[TContext] | None = None,
 ) -> None:
-    """Check scoped reads, pagination, patches, claims, and retry truncation.
+    """Check scoped reads, pagination, patches, callback lifecycle, and retry truncation.
 
     Run against a disposable database with contexts for two distinct users.
     Supply an independent store instance sharing that database to check
@@ -142,8 +142,21 @@ async def check_thread_store[TContext](
                 tool.model_copy(update={"status": "completed", "output": "two"}),
             ),
         )
+        hidden = SDKHiddenContextItem(
+            id=store.generate_item_id("sdk_hidden_context", thread, context),
+            thread_id=thread.id,
+            created_at=created_at + timedelta(seconds=3),
+            content="Internal store check",
+        )
         for pending, first, second in claims:
             await store.add_thread_item(thread.id, pending, context)
+            if isinstance(pending, ClientToolCallItem):
+                _require(
+                    await peer.load_client_tool_status(thread.id, pending.id, context)
+                    == "pending",
+                    "A registered callback must be pending across store instances",
+                )
+                await peer.add_thread_item(thread.id, hidden, context)
             outcomes = await asyncio.gather(
                 store.claim_pending_item(thread.id, pending, first, context),
                 peer.claim_pending_item(thread.id, pending, second, context),
@@ -158,7 +171,17 @@ async def check_thread_store[TContext](
             winner = (first, second)[outcomes.index(None)]
             saved = await peer.load_item(thread.id, pending.id, context)
             _require(saved == winner, f"The winning {pending.type} claim must be saved")
+            if isinstance(pending, ClientToolCallItem):
+                _require(
+                    await peer.load_client_tool_status(thread.id, pending.id, context)
+                    == "completed",
+                    "The callback lifecycle must complete with the winning claim",
+                )
 
+        cancelled = tool.model_copy(
+            update={"id": store.generate_item_id("tool_call", thread, context)}
+        )
+        await store.add_thread_item(thread.id, cancelled, context)
         target = await store.truncate_after(thread.id, ascending_ids[0], context)
         remaining = await load_page(None, 10, "asc")
         _require(
@@ -168,7 +191,7 @@ async def check_thread_store[TContext](
             and remaining.after is None,
             "Retry must remove every later item from paginated history",
         )
-        for later_id in [*ascending_ids[1:], form.id, tool.id]:
+        for later_id in [*ascending_ids[1:], form.id, tool.id, hidden.id, cancelled.id]:
             try:
                 await peer.load_item(thread.id, later_id, context)
             except NotFoundError:
@@ -177,13 +200,18 @@ async def check_thread_store[TContext](
                 "Retry must hide each truncated item from direct reads"
             )
 
-        hidden = SDKHiddenContextItem(
-            id=store.generate_item_id("sdk_hidden_context", thread, context),
-            thread_id=thread.id,
-            created_at=created_at + timedelta(seconds=3),
-            content="Internal store check",
+        _require(
+            await peer.load_client_tool_status(thread.id, cancelled.id, context)
+            == "cancelled",
+            "Retry must close active callbacks and retain their lifecycle",
         )
+
         await store.add_thread_item(thread.id, hidden, context)
+        explicitly_cancelled = cancelled.model_copy(
+            update={"id": store.generate_item_id("tool_call", thread, context)}
+        )
+        await store.add_thread_item(thread.id, explicitly_cancelled, context)
+        await peer.cancel_client_tool_call(thread.id, explicitly_cancelled.id, context)
         visible = await peer.load_thread_items(
             thread.id, None, 1, "desc", context, include_hidden=False
         )
@@ -191,7 +219,7 @@ async def check_thread_store[TContext](
             [item.id for item in visible.data] == [target.id]
             and not visible.has_more
             and visible.after is None,
-            "Visible history must exclude hidden items before applying the page limit",
+            "Visible history must exclude hidden and cancelled items before applying the page limit",
         )
     finally:
         await store.delete_thread(thread.id, context)

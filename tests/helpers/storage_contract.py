@@ -218,7 +218,7 @@ class ThreadStoreContract(ABC):
         )
 
     @pytest.mark.asyncio
-    async def test_client_tool_claim_checks_latest_item_in_stable_order(self):
+    async def test_client_tool_claim_ignores_unrelated_transcript_items(self):
         thread = make_thread()
         await self.store.save_thread(thread, DEFAULT_CONTEXT)
         pending = ClientToolCallItem(
@@ -238,14 +238,127 @@ class ThreadStoreContract(ABC):
             DEFAULT_CONTEXT,
         )
         completed = pending.model_copy(update={"status": "completed", "output": "ok"})
-        with pytest.raises(ConflictError):
-            await self.store.claim_pending_item(
-                thread.id, pending, completed, DEFAULT_CONTEXT
+        await self.store.claim_pending_item(
+            thread.id, pending, completed, DEFAULT_CONTEXT
+        )
+        await self.store.cancel_client_tool_call(thread.id, pending.id, DEFAULT_CONTEXT)
+        assert (
+            await self.store.load_client_tool_status(
+                thread.id, pending.id, DEFAULT_CONTEXT
             )
+            == "completed"
+        )
         assert (
             await self.store.load_item(thread.id, pending.id, DEFAULT_CONTEXT)
-            == pending
+            == completed
         )
+
+    @pytest.mark.asyncio
+    async def test_client_tool_lifecycle_cancels_only_the_exact_pending_call(self):
+        store = self.store
+        context = DEFAULT_CONTEXT
+        thread = make_thread()
+        await store.save_thread(thread, context)
+        original = ClientToolCallItem(
+            id="original",
+            thread_id=thread.id,
+            created_at=thread.created_at,
+            call_id="call_example",
+            name="example",
+            arguments={},
+        )
+        next_tool = original.model_copy(
+            update={
+                "id": "next",
+                "created_at": thread.created_at + timedelta(seconds=2),
+            }
+        )
+        await store.add_thread_item(thread.id, original, context)
+        with pytest.raises(ConflictError):
+            await store.add_thread_item(thread.id, next_tool, context)
+        with pytest.raises(NotFoundError):
+            await store.load_item(thread.id, next_tool.id, context)
+        with pytest.raises(NotFoundError):
+            await store.load_client_tool_status(
+                thread.id, original.id, ALTERNATIVE_CONTEXT
+            )
+        await store.cancel_client_tool_call(thread.id, original.id, ALTERNATIVE_CONTEXT)
+        assert (
+            await store.load_client_tool_status(thread.id, original.id, context)
+            == "pending"
+        )
+
+        new_message = UserMessageItem(
+            id="user",
+            thread_id=thread.id,
+            created_at=thread.created_at + timedelta(seconds=1),
+            content=[],
+            inference_options=InferenceOptions(),
+        )
+        await store.add_thread_item(thread.id, new_message, context)
+        await store.add_thread_item(thread.id, next_tool, context)
+        with pytest.raises(ConflictError):
+            await store.claim_pending_item(
+                thread.id,
+                original,
+                original.model_copy(update={"status": "completed", "output": "late"}),
+                context,
+            )
+        await store.cancel_client_tool_call(thread.id, original.id, context)
+        assert (
+            await store.load_client_tool_status(thread.id, original.id, context)
+            == "cancelled"
+        )
+        assert (
+            await store.load_client_tool_status(thread.id, next_tool.id, context)
+            == "pending"
+        )
+
+        visible = await store.load_thread_items(
+            thread.id, None, 2, "asc", context, include_hidden=False
+        )
+        assert [item.id for item in visible.data] == [new_message.id, next_tool.id]
+        assert not visible.has_more
+        assert await store.load_item(thread.id, original.id, context) == original
+
+        with pytest.raises(ConflictError):
+            await store.save_item(
+                thread.id, next_tool.model_copy(update={"status": "completed"}), context
+            )
+        with pytest.raises(ConflictError):
+            await store.save_item(
+                thread.id,
+                AssistantMessageItem(
+                    id=next_tool.id,
+                    thread_id=thread.id,
+                    created_at=thread.created_at,
+                    content=[],
+                ),
+                context,
+            )
+
+        await store.truncate_after(thread.id, new_message.id, context)
+        assert (
+            await store.load_client_tool_status(thread.id, next_tool.id, context)
+            == "cancelled"
+        )
+        with pytest.raises(NotFoundError):
+            await store.load_item(thread.id, next_tool.id, context)
+        with pytest.raises(ConflictError):
+            await store.add_thread_item(thread.id, next_tool, context)
+
+        third = next_tool.model_copy(update={"id": "third"})
+        await store.add_thread_item(thread.id, third, context)
+        await store.delete_thread_item(thread.id, third.id, context)
+        assert (
+            await store.load_client_tool_status(thread.id, third.id, context)
+            == "cancelled"
+        )
+        with pytest.raises(NotFoundError):
+            await store.load_item(thread.id, third.id, context)
+        await store.delete_thread(thread.id, context)
+        with pytest.raises(NotFoundError):
+            await store.load_client_tool_status(thread.id, third.id, context)
 
     @pytest.mark.asyncio
     async def test_truncate_after_retries_from_user_message_in_stable_order(self):

@@ -40,8 +40,8 @@ from chatkit.models import (
     UserMessageInput,
     UserMessageTextContent,
 )
+from chatkit.protocol import encode_message, encode_sse, parse_request
 from chatkit.requests import (
-    ThreadAddClientToolOutputParams,
     ThreadAddUserMessageParams,
     ThreadCreateParams,
     ThreadGetByIdParams,
@@ -472,13 +472,14 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
 ):
     provider_requests = 0
     server_calls: list[str] = []
+    tool_arguments = {"kind": "selection"}
 
     def handle_request(request: httpx2.Request) -> httpx2.Response:
         nonlocal provider_requests
         provider_requests += 1
         turn = (provider_requests + 1) // 2
         expected_call_id = f"call_client_read_{turn}"
-        expected_result = f"selection-{turn}"
+        expected_result = None if turn == 1 else {"selection": turn}
         body = json.loads(request.content)
         assert request.url.path == (
             "/v1/responses" if api == "responses" else "/v1/chat/completions"
@@ -488,6 +489,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         elif api == "responses":
             call, output = body["input"]
             assert (call["name"], call["call_id"]) == ("client_read", expected_call_id)
+            assert json.loads(call["arguments"]) == tool_arguments
             assert output["call_id"] == expected_call_id
             assert json.loads(output["output"]) == expected_result
             stream = _responses_stream(turn)
@@ -498,6 +500,7 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                 "client_read",
                 expected_call_id,
             )
+            assert json.loads(invocation["function"]["arguments"]) == tool_arguments
             assert output["tool_call_id"] == expected_call_id
             assert json.loads(output["content"]) == expected_result
             stream = _chat_completions_stream(
@@ -518,7 +521,9 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
     @function_tool
     async def client_read(ctx: ToolContext[AgentContext[RequestContext]]) -> None:
         """Read a selection from the browser."""
-        ctx.context.request_client_tool(ctx, name="client_read", arguments={})
+        ctx.context.request_client_tool(
+            ctx, name="client_read", arguments=tool_arguments
+        )
 
     @function_tool
     async def server_lookup(ctx: ToolContext[AgentContext[RequestContext]]) -> str:
@@ -584,25 +589,52 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
                         )
                     )
                 assert not any(isinstance(event, ErrorEvent) for event in events)
-                (pending,) = [
-                    event.item
+                (pending_event,) = [
+                    event
                     for event in events
                     if isinstance(event, ThreadItemDoneEvent)
                     and isinstance(event.item, ClientToolCallItem)
                 ]
+                pending = pending_event.item
+                assert isinstance(pending, ClientToolCallItem)
                 assert (pending.name, pending.call_id, pending.status) == (
                     "client_read",
                     f"call_client_read_{turn}",
                     "pending",
                 )
                 pending_items.append(pending)
-                resumed = await server.process_streaming(
-                    ThreadsAddClientToolOutputReq(
-                        params=ThreadAddClientToolOutputParams(
-                            thread_id=thread_id, result=f"selection-{turn}"
-                        )
-                    )
+                expected_arguments = {"item_id": pending.id, "input": tool_arguments}
+                assert pending.arguments == tool_arguments
+                frame = json.loads(encode_sse(pending_event).removeprefix(b"data: "))
+                assert frame["item"]["arguments"] == expected_arguments
+
+                loaded_pending = await server.process_non_streaming(
+                    ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
                 )
+                assert isinstance(loaded_pending, Thread)
+                (pending_from_history,) = [
+                    item
+                    for item in json.loads(encode_message(loaded_pending))["items"][
+                        "data"
+                    ]
+                    if item["id"] == pending.id
+                ]
+                assert pending_from_history["arguments"] == expected_arguments
+
+                callback = parse_request(
+                    json.dumps({
+                        "type": "threads.add_client_tool_output",
+                        "params": {
+                            "thread_id": thread_id,
+                            "result": {
+                                "item_id": frame["item"]["arguments"]["item_id"],
+                                "output": None if turn == 1 else {"selection": turn},
+                            },
+                        },
+                    })
+                )
+                assert isinstance(callback, ThreadsAddClientToolOutputReq)
+                resumed = await server.process_streaming(callback)
                 assert _completed_reply(resumed).content[0].text == "Example reply"
             loaded = await server.process_non_streaming(
                 ThreadsGetByIdReq(params=ThreadGetByIdParams(thread_id=thread_id))
@@ -622,6 +654,16 @@ async def test_client_tool_handoff_uses_invocation_id_and_survives_reload(
         for item in loaded.items.data
         if isinstance(item, ClientToolCallItem)
     ] == [
-        (item.id, item.call_id, "completed", f"selection-{index}")
+        (
+            item.id,
+            item.call_id,
+            "completed",
+            None if index == 1 else {"selection": index},
+        )
         for index, item in enumerate(pending_items, 1)
     ]
+    assert [
+        item["arguments"]
+        for item in json.loads(encode_message(loaded))["items"]["data"]
+        if item["type"] == "client_tool_call"
+    ] == [tool_arguments, tool_arguments]

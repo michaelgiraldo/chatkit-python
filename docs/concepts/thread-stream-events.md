@@ -48,7 +48,10 @@ while the transport is sending an event, between reads from the ChatKit stream.
 `StreamingResult` is an async iterator of typed events. For a custom transport,
 own it with `async with aclosing(result)` and encode each event with
 `chatkit.protocol.encode_sse`. Closing an active stream releases the responder
-and saves partial assistant replies by default.
+and saves partial assistant replies by default. If the stream closes before
+it finishes a client tool handoff, ChatKit cancels the exact pending call
+it opened. A completed handoff leaves the call pending for the browser.
+[Client tool lifecycle](../guides/update-client-during-response.md#know-when-a-callback-can-complete)
 
 For FastAPI or Starlette, use `chatkit.fastapi.process_request` to keep the
 iterator open for the lifetime of the HTTP response and close it when the

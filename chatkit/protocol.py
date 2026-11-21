@@ -22,7 +22,7 @@ def encode_message(message: BaseModel) -> bytes:
     return message.model_dump_json(
         by_alias=True,
         exclude_none=True,
-        context={"exclude_metadata": True},
+        context={"exclude_metadata": True, "browser_wire": True},
     ).encode("utf-8")
 
 

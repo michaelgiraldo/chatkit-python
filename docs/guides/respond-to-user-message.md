@@ -183,9 +183,15 @@ result = await server.process(parse_request(await request.body()), context)
 Build authorization fields in the context from your authenticated application
 session. Treat metadata in the request body as client input.
 With FastAPI, pass the server, the HTTP request, and your context to
-`chatkit.fastapi.process_request`. For other transports, use the
-[protocol helpers](../api/chatkit/protocol.md) to parse requests and encode the
-response or stream.
+`chatkit.fastapi.process_request`. For custom transports, use `parse_request`
+on inbound JSON and `encode_message` or `encode_sse` for outbound JSON or
+SSE. The encoders wrap pending browser tool arguments as `{item_id, input}`.
+Application events, models, and storage keep the original arguments and
+output. A custom encoder must preserve the wire format in both streamed
+events and saved items loaded by the browser. The inbound operation supplies
+the browser's `{item_id, output}` inside `params.result`.
+[Protocol helpers](../api/chatkit/protocol.md) ·
+[Browser callback contract](update-client-during-response.md#register-the-client-tool-in-chatkitjs)
 
 ## Implement your ChatKit data store
 
@@ -209,10 +215,49 @@ To support uploads, supply an
 `AttachmentMetadataStore` for records and an `AttachmentStore` for file
 operations. [Attachment setup](accept-rich-user-input.md#configure-an-upload-strategy)
 
+### Implement the client tool lifecycle
+
+Implement `load_client_tool_status(thread_id, item_id, context)` and
+`cancel_client_tool_call(thread_id, item_id, context)` when your app uses
+browser tools. The state belongs to the same authenticated owner, thread, and
+item as the tool call. Keep it durable and independent of the transcript's
+ordering or visibility. Maintain at most one pending call per scoped thread.
+
+- In `add_thread_item`, create a pending `ClientToolCallItem` and record
+  its pending status in one transaction. Reject a second pending call or
+  reuse of any recorded callback ID in that thread. Inserting a new user
+  message cancels the pending call in the same transaction, including when
+  `save_item` inserts the message. Use `claim_pending_item` to complete a
+  tool call and reject direct tool item writes through `save_item`.
+- In `claim_pending_item`, compare the exact saved pending item and its
+  pending status, then save the completed item and its completed status in
+  the same transaction. Only one claimant can succeed. If you use
+  `validate_pending_claim`, call it with the existing item, expected item,
+  and replacement. The `latest_item_id` argument was removed.
+- In `truncate_after`, cancel the pending call as part of the retry.
+  In `delete_thread_item`, cancel the pending call if its item is deleted.
+  Keep lifecycle records after retry or item deletion so
+  `load_client_tool_status` can still report their state. In
+  `delete_thread`, remove those records with the rest of the thread.
+- In browser-visible pagination (`include_hidden=False`), exclude pending
+  tool items with cancelled or unregistered callbacks before calculating
+  the page and cursor.
+- Make `cancel_client_tool_call` safe to repeat. It cancels only the
+  specified pending ID. If the call is already completed or cancelled, or a
+  different ID is pending, keep that state unchanged. ChatKit uses this
+  during cleanup when a stream fails to finish its browser-tool handoff.
+
+Store implementations can use the [in-memory](../examples/in_memory_thread_store.py)
+and [SQLite](../examples/sqlite_thread_store.py) examples as references.
+Test concurrent claims and verify that cancellation and completion remain
+effective after reopening durable storage. Treat the returned tool output
+as client input before using it in any application decision.
+
 ### Use the file-backed SQLite example
 
-The [SQLite example](../examples/sqlite_thread_store.py) implements all 12
-`ThreadStore` methods. Save it with your app or import it from this checkout.
+The [SQLite example](../examples/sqlite_thread_store.py) implements
+`ThreadStore` with the client tool lifecycle. Save it with your app or import
+it from this checkout.
 It scopes thread and item queries by `context.user_id`, so supply this value
 from your authenticated application session. The database survives restarts.
 Use a new SQLite file for the example.
@@ -262,10 +307,11 @@ pages and retries that cross the boundary between legacy and newer items.
 
 ### Check your app's store
 
-Run `check_thread_store` in your app's test suite with a disposable database
-and contexts for two distinct test users. The check writes and deletes a
-synthetic thread. It verifies scoped reads, tied-timestamp pagination,
-concurrent patches, form and tool claims, and retry truncation.
+Run `check_thread_store` against a store that supports browser tools using
+a disposable database and contexts for two distinct test users. The check
+writes and deletes a synthetic thread. It verifies scoped reads,
+tied-timestamp pagination, concurrent patches, form claims, callback
+completion and cancellation, and retry truncation.
 
 ```python
 import pytest

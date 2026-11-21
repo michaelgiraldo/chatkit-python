@@ -2,6 +2,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Literal, TypedDict
 
+from .errors import UnsupportedOperationError
 from .models import (
     Attachment,
     ClientToolCallItem,
@@ -53,6 +54,7 @@ class ConflictError(Exception):
 
 
 type PendingTurnItem = ClientToolCallItem | StructuredInputItem
+type ClientToolCallbackStatus = Literal["pending", "completed", "cancelled"]
 
 
 class ThreadPatch(TypedDict, total=False):
@@ -85,8 +87,6 @@ def validate_pending_claim(
     current: ThreadItem,
     expected: PendingTurnItem,
     replacement: PendingTurnItem,
-    *,
-    latest_item_id: str | None = None,
 ) -> None:
     """Validate a claim against the current state inside a store transaction."""
     if (
@@ -101,8 +101,14 @@ def validate_pending_claim(
         raise ConflictError(
             "The thread item is no longer pending in the expected state"
         )
-    if isinstance(expected, ClientToolCallItem) and expected.id != latest_item_id:
-        raise ConflictError("The client tool call is no longer the latest thread item")
+    if isinstance(expected, ClientToolCallItem) and (
+        not isinstance(replacement, ClientToolCallItem)
+        or replacement.status != "completed"
+        or replacement.call_id != expected.call_id
+        or replacement.name != expected.name
+        or replacement.arguments != expected.arguments
+    ):
+        raise ValueError("A client tool claim may only complete the item with output")
 
 
 class AttachmentStore[TContext = Any](ABC):
@@ -179,8 +185,10 @@ class ThreadStore[TContext = Any](ABC):
         Use a stable order for items with the same timestamp. Accept `"asc"`
         for oldest first and `"desc"` for newest first. If more items exist,
         set `has_more=True` and return a cursor in `Page.after` for the next page.
-        When `include_hidden=False`, exclude `HIDDEN_ITEM_TYPES` before applying
-        the cursor and limit. Derive pagination metadata from the visible rows.
+        When `include_hidden=False`, exclude `HIDDEN_ITEM_TYPES` and pending
+        client tool items whose callback is no longer pending or was never
+        registered before applying the cursor and limit. Derive pagination
+        metadata from the visible rows.
         """
         pass
 
@@ -204,15 +212,47 @@ class ThreadStore[TContext = Any](ABC):
     async def add_thread_item(
         self, thread_id: str, item: ThreadItem, context: TContext
     ) -> None:
-        """Persist a newly created thread item."""
+        """Persist a newly created thread item.
+
+        For a pending client tool item, atomically register its callback with
+        the item. Each thread can have one pending callback at a time. Reject
+        reused callback IDs, including IDs whose items were removed, with
+        `ConflictError`. A new user message atomically cancels the pending
+        callback in the same transaction as the insertion.
+        """
         pass
 
     @abstractmethod
     async def save_item(
         self, thread_id: str, item: ThreadItem, context: TContext
     ) -> None:
-        """Upsert a thread item by id."""
+        """Upsert a thread item by id.
+
+        For client tools, use `add_thread_item` for registration and
+        `claim_pending_item` for completion. Reject direct writes to those
+        items and their reserved IDs. A first insertion of a user message
+        has the same cancellation semantics as `add_thread_item`.
+        """
         pass
+
+    async def load_client_tool_status(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> ClientToolCallbackStatus:
+        """Read a scoped callback's lifecycle, including after item deletion.
+
+        Raise `NotFoundError` for an unavailable or unregistered callback.
+        """
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
+
+    async def cancel_client_tool_call(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> None:
+        """Atomically cancel one pending callback. Closed or unknown IDs have no effect."""
+        raise UnsupportedOperationError(
+            "Client tool callbacks require a compatible thread store"
+        )
 
     @abstractmethod
     async def claim_pending_item(
@@ -224,9 +264,10 @@ class ThreadStore[TContext = Any](ABC):
     ) -> None:
         """Atomically replace a pending item if its stored value matches `expected`.
 
-        The replacement must complete the same thread item. A client tool call must
-        still be the last item in the thread's stable order. Raise `ConflictError`
-        on stale or completed state and `NotFoundError` for an unavailable item or
+        The replacement must complete the same thread item. A client tool
+        callback must be registered and pending, and completion must persist
+        in its lifecycle and transcript together. Raise `ConflictError` on
+        stale or closed state and `NotFoundError` for an unavailable item or
         thread. Commit the claim before starting inference.
         """
         pass
@@ -239,8 +280,9 @@ class ThreadStore[TContext = Any](ABC):
 
         Use the stable order of `load_thread_items` and return the retained
         user message. Later items must disappear from pagination and direct
-        reads before returning. A store can commit a visibility boundary and
-        reclaim the inactive records separately.
+        reads before returning. Atomically cancel any pending client tool
+        callback and retain its status. A store can commit a visibility
+        boundary and reclaim the inactive records separately.
 
         Raise `NotFoundError` for an unavailable target and `ConflictError`
         when the target is not a user message.
@@ -256,14 +298,14 @@ class ThreadStore[TContext = Any](ABC):
 
     @abstractmethod
     async def delete_thread(self, thread_id: str, context: TContext) -> None:
-        """Delete a thread and its items."""
+        """Delete a thread, its items and callback records."""
         pass
 
     @abstractmethod
     async def delete_thread_item(
         self, thread_id: str, item_id: str, context: TContext
     ) -> None:
-        """Delete a thread item by id."""
+        """Delete a thread item by id and atomically cancel its pending callback."""
         pass
 
 

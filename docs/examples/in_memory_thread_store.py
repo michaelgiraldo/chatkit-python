@@ -10,6 +10,7 @@ from chatkit.models import (
 )
 from chatkit.store import (
     HIDDEN_ITEM_TYPES,
+    ClientToolCallbackStatus,
     ConflictError,
     NotFoundError,
     PendingTurnItem,
@@ -31,6 +32,7 @@ class InMemoryThreadStore(ThreadStore[Context]):
     def __init__(self):
         self.threads: dict[str, ThreadMetadata] = {}
         self.items: dict[str, dict[str, ThreadItem]] = {}
+        self._callbacks: dict[str, dict[str, ClientToolCallbackStatus]] = {}
 
     async def load_thread(self, thread_id: str, context: Context) -> ThreadMetadata:
         if thread_id not in self.threads:
@@ -66,25 +68,89 @@ class InMemoryThreadStore(ThreadStore[Context]):
         include_hidden: bool = True,
     ) -> Page[ThreadItem]:
         items = self.items.get(thread_id, {}).values()
+        callbacks = self._callbacks.get(thread_id, {})
         rows = (
             items
             if include_hidden
-            else (item for item in items if item.type not in HIDDEN_ITEM_TYPES)
+            else (
+                item
+                for item in items
+                if item.type not in HIDDEN_ITEM_TYPES
+                and (
+                    not isinstance(item, ClientToolCallItem)
+                    or item.status == "completed"
+                    or callbacks.get(item.id) == "pending"
+                )
+            )
         )
         return self._page(rows, after, limit, order)
 
     async def add_thread_item(
         self, thread_id: str, item: ThreadItem, context: Context
     ) -> None:
+        self._require_item_scope(thread_id, item)
         items = self.items.setdefault(thread_id, {})
+        callbacks = self._callbacks.get(thread_id, {})
+        if item.id in callbacks:
+            raise ConflictError("The client tool callback ID is already reserved")
         if item.id in items:
             raise ValueError(f"Item {item.id} already exists in thread {thread_id}")
-        items[item.id] = item.model_copy(deep=True)
+        stored = item.model_copy(deep=True)
+        if isinstance(stored, ClientToolCallItem):
+            if stored.status != "pending":
+                raise ValueError("A new client tool call must be pending")
+            if "pending" in callbacks.values():
+                raise ConflictError(
+                    "The thread already has a pending client tool callback"
+                )
+            self._callbacks.setdefault(thread_id, {})[stored.id] = "pending"
+        elif isinstance(stored, UserMessageItem):
+            self._cancel_pending_callbacks(thread_id)
+        items[item.id] = stored
 
     async def save_item(
         self, thread_id: str, item: ThreadItem, context: Context
     ) -> None:
-        self.items.setdefault(thread_id, {})[item.id] = item.model_copy(deep=True)
+        self._require_item_scope(thread_id, item)
+        items = self.items.setdefault(thread_id, {})
+        current = items.get(item.id)
+        if (
+            isinstance(item, ClientToolCallItem)
+            or isinstance(current, ClientToolCallItem)
+            or item.id in self._callbacks.get(thread_id, {})
+        ):
+            raise ConflictError("Client tool items require registration and completion")
+        stored = item.model_copy(deep=True)
+        if current is None and isinstance(stored, UserMessageItem):
+            self._cancel_pending_callbacks(thread_id)
+        items[item.id] = stored
+
+    def _require_item_scope(self, thread_id: str, item: ThreadItem) -> None:
+        if item.thread_id != thread_id:
+            raise ValueError("Item must belong to the requested thread")
+        if thread_id not in self.threads:
+            raise NotFoundError(f"Thread {thread_id} not found")
+
+    async def load_client_tool_status(
+        self, thread_id: str, item_id: str, context: Context
+    ) -> ClientToolCallbackStatus:
+        status = self._callbacks.get(thread_id, {}).get(item_id)
+        if status is None:
+            raise NotFoundError("Client tool callback not found")
+        return status
+
+    async def cancel_client_tool_call(
+        self, thread_id: str, item_id: str, context: Context
+    ) -> None:
+        self._cancel_pending_callbacks(thread_id, item_id)
+
+    def _cancel_pending_callbacks(
+        self, thread_id: str, item_id: str | None = None
+    ) -> None:
+        callbacks = self._callbacks.get(thread_id, {})
+        for callback_id, status in callbacks.items():
+            if status == "pending" and (item_id is None or callback_id == item_id):
+                callbacks[callback_id] = "cancelled"
 
     async def claim_pending_item(
         self,
@@ -99,13 +165,14 @@ class InMemoryThreadStore(ThreadStore[Context]):
         current = items.get(expected.id)
         if current is None:
             raise NotFoundError(f"Item {expected.id} not found in thread {thread_id}")
-        latest_item_id = None
+        validate_pending_claim(current, expected, replacement)
+        stored = replacement.model_copy(deep=True)
         if isinstance(expected, ClientToolCallItem):
-            latest_item_id = max(items.values(), key=self._sort_key).id
-        validate_pending_claim(
-            current, expected, replacement, latest_item_id=latest_item_id
-        )
-        items[expected.id] = replacement.model_copy(deep=True)
+            callbacks = self._callbacks.get(thread_id, {})
+            if callbacks.get(expected.id) != "pending":
+                raise ConflictError("The client tool callback is no longer pending")
+            callbacks[expected.id] = "completed"
+        items[expected.id] = stored
 
     async def truncate_after(
         self, thread_id: str, item_id: str, context: Context
@@ -120,6 +187,7 @@ class InMemoryThreadStore(ThreadStore[Context]):
             raise ConflictError("A retry must start from a user message")
         target = self._sort_key(item)
         later = [row.id for row in items.values() if self._sort_key(row) > target]
+        self._cancel_pending_callbacks(thread_id)
         for later_id in later:
             del items[later_id]
         return item.model_copy(deep=True)
@@ -135,10 +203,12 @@ class InMemoryThreadStore(ThreadStore[Context]):
     async def delete_thread(self, thread_id: str, context: Context) -> None:
         self.threads.pop(thread_id, None)
         self.items.pop(thread_id, None)
+        self._callbacks.pop(thread_id, None)
 
     async def delete_thread_item(
         self, thread_id: str, item_id: str, context: Context
     ) -> None:
+        self._cancel_pending_callbacks(thread_id, item_id)
         self.items.get(thread_id, {}).pop(item_id, None)
 
     @staticmethod

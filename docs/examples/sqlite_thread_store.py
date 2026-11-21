@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel
 
@@ -17,6 +17,7 @@ from chatkit.models import (
 )
 from chatkit.store import (
     HIDDEN_ITEM_TYPES,
+    ClientToolCallbackStatus,
     ConflictError,
     NotFoundError,
     PendingTurnItem,
@@ -80,6 +81,21 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                 FOREIGN KEY (thread_id, user_id) REFERENCES threads (id, user_id)
                     ON DELETE CASCADE
                 )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS client_tool_callbacks (
+                id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'cancelled')),
+                PRIMARY KEY (thread_id, user_id, id),
+                FOREIGN KEY (thread_id, user_id) REFERENCES threads (id, user_id)
+                    ON DELETE CASCADE
+                )"""
+            )
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS one_pending_client_tool_callback
+                ON client_tool_callbacks (thread_id, user_id) WHERE status = 'pending'"""
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS threads_by_user ON threads (user_id, created_at, id)"
@@ -158,7 +174,20 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             condition = "thread_id = ? AND user_id = ?"
             params: list[str | int | None] = [thread_id, context.user_id]
             if not include_hidden:
-                condition += " AND json_extract(data, '$.item.type') NOT IN (?, ?)"
+                condition += """
+                    AND json_extract(data, '$.item.type') NOT IN (?, ?)
+                    AND (
+                        json_extract(data, '$.item.type') != 'client_tool_call'
+                        OR json_extract(data, '$.item.status') = 'completed'
+                        OR EXISTS (
+                            SELECT 1 FROM client_tool_callbacks AS callback
+                            WHERE callback.thread_id = items.thread_id
+                                AND callback.user_id = items.user_id
+                                AND callback.id = items.id
+                                AND callback.status = 'pending'
+                        )
+                    )
+                """
                 params.extend(HIDDEN_ITEM_TYPES)
             created_after: str | None = None
             if after is not None:
@@ -245,17 +274,34 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             raise ValueError("Item must belong to the requested thread")
         with closing(self._create_connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._require_thread(conn, thread_id, context.user_id)
+            scope = (thread_id, context.user_id)
+            self._require_thread(conn, *scope)
+            if self._callback_status(conn, *scope, item.id) is not None:
+                raise ConflictError("The client tool callback ID is already reserved")
             conn.execute(
                 "INSERT INTO items (id, thread_id, user_id, created_at, data) VALUES (?, ?, ?, ?, ?)",
                 (
                     item.id,
-                    thread_id,
-                    context.user_id,
+                    *scope,
                     _sort_timestamp(item.created_at),
                     ItemData(item=item).model_dump_json(),
                 ),
             )
+            if isinstance(item, ClientToolCallItem):
+                if item.status != "pending":
+                    raise ValueError("A new client tool call must be pending")
+                try:
+                    conn.execute(
+                        """INSERT INTO client_tool_callbacks (thread_id, user_id, id, status)
+                        VALUES (?, ?, ?, 'pending')""",
+                        (*scope, item.id),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise ConflictError(
+                        "The thread already has a pending client tool callback"
+                    ) from exc
+            elif isinstance(item, UserMessageItem):
+                self._cancel_pending_callbacks(conn, *scope)
 
     async def save_item(
         self, thread_id: str, item: ThreadItem, context: TContext
@@ -264,7 +310,21 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             raise ValueError("Item must belong to the requested thread")
         with closing(self._create_connection()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._require_thread(conn, thread_id, context.user_id)
+            scope = (thread_id, context.user_id)
+            self._require_thread(conn, *scope)
+            current = conn.execute(
+                """SELECT json_extract(data, '$.item.type') FROM items
+                WHERE thread_id = ? AND user_id = ? AND id = ?""",
+                (*scope, item.id),
+            ).fetchone()
+            if (
+                isinstance(item, ClientToolCallItem)
+                or (current is not None and current[0] == "client_tool_call")
+                or self._callback_status(conn, *scope, item.id) is not None
+            ):
+                raise ConflictError(
+                    "Client tool items require registration and completion"
+                )
             saved = conn.execute(
                 """
                 INSERT INTO items (id, thread_id, user_id, created_at, data)
@@ -285,6 +345,48 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             )
             if not saved.rowcount:
                 raise NotFoundError(f"Item {item.id} not found in thread {thread_id}")
+            if current is None and isinstance(item, UserMessageItem):
+                self._cancel_pending_callbacks(conn, *scope)
+
+    @staticmethod
+    def _callback_status(
+        conn: sqlite3.Connection, thread_id: str, user_id: str, item_id: str
+    ) -> ClientToolCallbackStatus | None:
+        row = conn.execute(
+            """SELECT status FROM client_tool_callbacks
+            WHERE thread_id = ? AND user_id = ? AND id = ?""",
+            (thread_id, user_id, item_id),
+        ).fetchone()
+        return cast(ClientToolCallbackStatus, row[0]) if row is not None else None
+
+    async def load_client_tool_status(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> ClientToolCallbackStatus:
+        with closing(self._create_connection()) as conn:
+            status = self._callback_status(conn, thread_id, context.user_id, item_id)
+            if status is None:
+                raise NotFoundError("Client tool callback not found")
+            return status
+
+    async def cancel_client_tool_call(
+        self, thread_id: str, item_id: str, context: TContext
+    ) -> None:
+        with closing(self._create_connection()) as conn, conn:
+            self._cancel_pending_callbacks(conn, thread_id, context.user_id, item_id)
+
+    @staticmethod
+    def _cancel_pending_callbacks(
+        conn: sqlite3.Connection,
+        thread_id: str,
+        user_id: str,
+        item_id: str | None = None,
+    ) -> None:
+        conn.execute(
+            """UPDATE client_tool_callbacks SET status = 'cancelled'
+            WHERE thread_id = ? AND user_id = ? AND status = 'pending'
+                AND (? IS NULL OR id = ?)""",
+            (thread_id, user_id, item_id, item_id),
+        )
 
     async def claim_pending_item(
         self,
@@ -307,21 +409,17 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
                     f"Item {expected.id} not found in thread {thread_id}"
                 )
 
-            latest_item_id = None
-            if isinstance(expected, ClientToolCallItem):
-                latest = conn.execute(
-                    """SELECT id FROM items WHERE thread_id = ? AND user_id = ?
-                    ORDER BY created_at DESC, id DESC LIMIT 1""",
-                    scope,
-                ).fetchone()
-                if latest is not None:
-                    latest_item_id = latest[0]
             validate_pending_claim(
-                ItemData.model_validate_json(row[0]).item,
-                expected,
-                replacement,
-                latest_item_id=latest_item_id,
+                ItemData.model_validate_json(row[0]).item, expected, replacement
             )
+            if isinstance(expected, ClientToolCallItem):
+                claim = conn.execute(
+                    """UPDATE client_tool_callbacks SET status = 'completed'
+                    WHERE id = ? AND thread_id = ? AND user_id = ? AND status = 'pending'""",
+                    params,
+                )
+                if not claim.rowcount:
+                    raise ConflictError("The client tool callback is no longer pending")
             conn.execute(
                 "UPDATE items SET data = ? WHERE id = ? AND thread_id = ? AND user_id = ?",
                 (ItemData(item=replacement).model_dump_json(), *params),
@@ -344,6 +442,7 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
             item = ItemData.model_validate_json(row[0]).item
             if not isinstance(item, UserMessageItem):
                 raise ConflictError("A retry must start from a user message")
+            self._cancel_pending_callbacks(conn, *scope)
             conn.execute(
                 """DELETE FROM items
                 WHERE thread_id = ? AND user_id = ? AND (created_at, id) > (?, ?)""",
@@ -382,8 +481,9 @@ class SQLiteThreadStore[TContext: UserContext](ThreadStore[TContext]):
         self, thread_id: str, item_id: str, context: TContext
     ) -> None:
         with closing(self._create_connection()) as conn, conn:
+            # Start the write transaction before either mutation.
+            self._cancel_pending_callbacks(conn, thread_id, context.user_id, item_id)
             conn.execute(
                 "DELETE FROM items WHERE id = ? AND thread_id = ? AND user_id = ?",
                 (item_id, thread_id, context.user_id),
             )
-            conn.commit()

@@ -26,6 +26,7 @@ from chatkit.models import (
     WidgetItem,
 )
 from chatkit.requests import (
+    ClientToolCallbackResult,
     ItemFeedbackParams,
     ItemsFeedbackReq,
     StructuredInputAnswerSubmission,
@@ -113,7 +114,9 @@ async def test_respond_with_tool_call():
             ThreadsAddClientToolOutputReq(
                 params=ThreadAddClientToolOutputParams(
                     thread_id=thread.id,
-                    result={"text": "Wow!"},
+                    result=ClientToolCallbackResult(
+                        item_id="msg_1", output={"text": "Wow!"}
+                    ),
                 )
             )
         )

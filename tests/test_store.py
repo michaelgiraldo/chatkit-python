@@ -1,15 +1,24 @@
 import asyncio
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 
 import pytest
 
-from chatkit.models import AssistantMessageItem, StructuredInputItem, ThreadMetadata
-from chatkit.store import ConflictError
+from chatkit.models import (
+    AssistantMessageItem,
+    ClientToolCallItem,
+    InferenceOptions,
+    StructuredInputItem,
+    ThreadMetadata,
+    UserMessageItem,
+)
+from chatkit.store import ConflictError, NotFoundError
 from chatkit.store_checks import check_thread_store
-from docs.examples.sqlite_thread_store import SQLiteThreadStore
+from docs.examples.in_memory_thread_store import InMemoryThreadStore
+from docs.examples.sqlite_thread_store import ItemData, SQLiteThreadStore
 from tests._types import RequestContext
 from tests.helpers.mock_store import SQLiteStore
 from tests.helpers.storage_contract import (
@@ -180,3 +189,143 @@ async def test_file_backed_example_reopens_with_stable_timestamp_order(tmp_path:
         thread.id, page.after, 1, "asc", DEFAULT_CONTEXT
     )
     assert [item.id for item in second_page.data] == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_client_tool_lifecycle_reopens_and_leaves_legacy_items_readable(
+    tmp_path: Path,
+):
+    path = tmp_path / "callbacks.sqlite3"
+    context = DEFAULT_CONTEXT
+    thread = make_thread()
+    initial = SQLiteThreadStore[RequestContext](path)
+    await initial.save_thread(thread, context)
+    active = ClientToolCallItem(
+        id="active",
+        thread_id=thread.id,
+        created_at=thread.created_at,
+        call_id="call_active",
+        name="example",
+        arguments={"value": "active"},
+    )
+    old_pending = active.model_copy(update={"id": "legacy_pending"})
+    old_completed = active.model_copy(
+        update={"id": "legacy_completed", "status": "completed", "output": "old"}
+    )
+    with closing(sqlite3.connect(path)) as connection, connection:
+        # These transcript rows predate the callback lifecycle and have no binding.
+        for item in (old_pending, old_completed):
+            connection.execute(
+                """INSERT INTO items (id, thread_id, user_id, created_at, data)
+                VALUES (?, ?, ?, ?, ?)""",
+                (
+                    item.id,
+                    thread.id,
+                    context.user_id,
+                    thread.created_at.isoformat(),
+                    ItemData(item=item).model_dump_json(),
+                ),
+            )
+    await initial.add_thread_item(thread.id, active, context)
+    reopened = SQLiteThreadStore[RequestContext](path)
+    assert (
+        await reopened.load_client_tool_status(thread.id, active.id, context)
+        == "pending"
+    )
+    with pytest.raises(NotFoundError):
+        await reopened.load_client_tool_status(thread.id, old_pending.id, context)
+    with pytest.raises(ConflictError):
+        await reopened.claim_pending_item(
+            thread.id,
+            old_pending,
+            old_pending.model_copy(update={"status": "completed"}),
+            context,
+        )
+    public = await reopened.load_thread_items(
+        thread.id, None, 2, "asc", context, include_hidden=False
+    )
+    assert {item.id for item in public.data} == {active.id, old_completed.id}
+    assert not public.has_more
+    assert await reopened.load_item(thread.id, old_pending.id, context) == old_pending
+
+    completed = active.model_copy(update={"status": "completed", "output": "current"})
+    await reopened.claim_pending_item(thread.id, active, completed, context)
+    assert (
+        await initial.load_client_tool_status(thread.id, active.id, context)
+        == "completed"
+    )
+    assert await initial.load_item(thread.id, active.id, context) == completed
+
+
+@pytest.mark.asyncio
+async def test_sqlite_only_one_client_tool_registers_across_connections(tmp_path: Path):
+    path = tmp_path / "client-tool-race.sqlite"
+    first_store = SQLiteThreadStore[RequestContext](path)
+    second_store = SQLiteThreadStore[RequestContext](path)
+    thread = make_thread()
+    context = DEFAULT_CONTEXT
+    await first_store.save_thread(thread, context)
+    barrier = Barrier(2, timeout=5)
+
+    def register(store: SQLiteThreadStore[RequestContext], item_id: str) -> bool:
+        item = ClientToolCallItem(
+            id=item_id,
+            thread_id=thread.id,
+            created_at=thread.created_at,
+            call_id=f"call_{item_id}",
+            name="example",
+            arguments={},
+        )
+        barrier.wait()
+        try:
+            asyncio.run(store.add_thread_item(thread.id, item, context))
+        except ConflictError:
+            return False
+        return True
+
+    results = await asyncio.gather(
+        asyncio.to_thread(register, first_store, "first"),
+        asyncio.to_thread(register, second_store, "second"),
+    )
+    assert results.count(True) == 1
+    winner = ("first", "second")[results.index(True)]
+    page = await second_store.load_thread_items(thread.id, None, 10, "asc", context)
+    assert [item.id for item in page.data] == [winner]
+    assert (
+        await second_store.load_client_tool_status(thread.id, winner, context)
+        == "pending"
+    )
+
+
+@pytest.mark.asyncio
+async def test_in_memory_save_user_message_cancels_unfinished_callback():
+    store = InMemoryThreadStore()
+    context: dict[str, object] = {}
+    thread = make_thread()
+    await store.save_thread(thread, context)
+    tool = ClientToolCallItem(
+        id="tool",
+        thread_id=thread.id,
+        created_at=thread.created_at,
+        call_id="call_test",
+        name="example",
+        arguments={},
+    )
+    await store.add_thread_item(thread.id, tool, context)
+    user_message = UserMessageItem(
+        id="user",
+        thread_id=thread.id,
+        created_at=thread.created_at + timedelta(seconds=1),
+        content=[],
+        inference_options=InferenceOptions(),
+    )
+    await store.save_item(thread.id, user_message, context)
+    assert (
+        await store.load_client_tool_status(thread.id, tool.id, context) == "cancelled"
+    )
+    visible = await store.load_thread_items(
+        thread.id, None, 1, "desc", context, include_hidden=False
+    )
+    assert visible.data == [user_message]
+    assert not visible.has_more
+    assert await store.load_item(thread.id, tool.id, context) == tool

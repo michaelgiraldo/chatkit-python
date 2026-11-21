@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal, TypeIs
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import actions, models
 
@@ -76,11 +76,20 @@ class ThreadsAddClientToolOutputReq(BaseReq):
     params: ThreadAddClientToolOutputParams
 
 
+class ClientToolCallbackResult(BaseModel):
+    """Output for one exact client tool invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: Annotated[str, Field(min_length=1, pattern=r"\S")]
+    output: Any
+
+
 class ThreadAddClientToolOutputParams(BaseModel):
     """Parameters for recording tool output in a thread."""
 
     thread_id: str
-    result: Any
+    result: ClientToolCallbackResult
 
 
 class StructuredInputAnswerSubmission(BaseModel):

@@ -18,6 +18,29 @@ The `openai-chatkit` package on PyPI tracks the
    release with the changelog, the full commit SHA for installation, and the
    passing CI run.
 
+## Turnspan 6 (`1.6.5+turnspan.6`)
+
+### Breaking changes
+
+- Browser callbacks receive `{item_id, input}` as the `onClientTool`
+  parameters and must return `{item_id, output}`. The browser still sends
+  `threads.add_client_tool_output` with `params.thread_id` and
+  `params.result`. Earlier callback response shapes are unsupported.
+- ChatKit accepts the callback once for the exact pending tool item in the
+  authorized thread. The store records completion or cancellation durably.
+  Transcript order no longer determines which invocation can resume.
+  Custom responders must publish pending calls with `ThreadItemDoneEvent`.
+- Custom stores that support client tools must atomically couple the
+  lifecycle with thread item writes and claims. The store utility
+  `validate_pending_claim` removes the `latest_item_id` keyword. Custom
+  transports must use `encode_message` and `encode_sse` or supply the same
+  wire representation. Integrations without browser tools can skip the
+  callback setup.
+- Update the browser handler, Python server, and store together. Finish
+  pending callbacks on the old release or restart those interactions after
+  cutover. Use the [upgrade and rollback guide](guides/update-client-during-response.md#upgrade-from-older-turnspan-versions)
+  to verify both a new reply and a resumed browser-tool turn.
+
 ## Turnspan 5 (`1.6.5+turnspan.5`)
 
 ### Breaking changes
@@ -104,7 +127,8 @@ The `openai-chatkit` package on PyPI tracks the
   belongs to one response run, and writes after it closes raise
   `asyncio.QueueShutDown`.
 - Client tool callbacks use `AgentContext.request_client_tool` with the
-  Agents SDK's `ToolContext` to bind the browser callback to its invocation.
+  Agents SDK's `ToolContext` to build the outgoing browser request from the
+  model's tool invocation.
 - Custom HTTP transports parse the request with `chatkit.protocol.parse_request`,
   pass the typed request to `ChatKitServer.process`, and serialize the typed
   response or closeable event stream with the protocol helpers.

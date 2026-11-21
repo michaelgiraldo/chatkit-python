@@ -238,6 +238,33 @@ def test_streaming_request_resolves_thread_before_sending_headers(client: TestCl
     assert response.json() == {"detail": "ChatKit resource not found."}
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        "example",
+        {"output": None},
+        {"item_id": "tool"},
+        {"item_id": "", "output": None},
+        {"item_id": "  ", "output": None},
+        {"item_id": "tool", "output": None, "unexpected": "value"},
+    ],
+)
+def test_tool_output_requires_a_correlated_envelope(client: TestClient, result: object):
+    response = client.post(
+        "/chatkit",
+        json={
+            "type": "threads.add_client_tool_output",
+            "params": {"thread_id": "example-thread", "result": result},
+        },
+    )
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/json"
+    assert all(
+        issue["location"][:3] == ["threads.add_client_tool_output", "params", "result"]
+        for issue in response.json()["detail"]
+    )
+
+
 def test_tool_output_requires_a_pending_call_before_sending_headers(client: TestClient):
     created = client.post(
         "/chatkit",
@@ -258,14 +285,14 @@ def test_tool_output_requires_a_pending_call_before_sending_headers(client: Test
         "/chatkit",
         json={
             "type": "threads.add_client_tool_output",
-            "params": {"thread_id": event.thread.id, "result": "example"},
+            "params": {
+                "thread_id": event.thread.id,
+                "result": {"item_id": "unknown-tool", "output": None},
+            },
         },
     )
-    assert response.status_code == 422
-    assert (
-        response.json()["detail"]
-        == "The thread is not waiting for a client tool result."
-    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "ChatKit resource not found."}
 
 
 @pytest.mark.parametrize(

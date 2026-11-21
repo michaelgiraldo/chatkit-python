@@ -2,9 +2,10 @@
 
 Turnspan is a maintained Python 3.14 fork of OpenAI ChatKit.
 
-**Turnspan 5** installs as `openai-chatkit 1.6.5+turnspan.5` and requires
-Python 3.14 or newer. See the [breaking changes and migration examples](docs/release.md#turnspan-5-165turnspan5)
-for explicit workflow resumption.
+**Turnspan 6** installs as `openai-chatkit 1.6.5+turnspan.6` and requires
+Python 3.14 or newer. See the [breaking changes](docs/release.md#turnspan-6-165turnspan6)
+and [upgrade guide](docs/guides/update-client-during-response.md#upgrade-from-older-turnspan-versions)
+for matching browser callbacks to exact saved tool calls.
 
 Install from the root of the checkout with `python -m pip install .`. Select
 the `agents` extra for `chatkit.agents`, `fastapi` for the HTTP adapter and
