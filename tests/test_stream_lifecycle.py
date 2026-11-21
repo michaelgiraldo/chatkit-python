@@ -1,12 +1,15 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
 from chatkit.errors import ErrorCode
 from chatkit.events import (
+    AssistantMessageContentPartAdded,
+    AssistantMessageContentPartAnnotationAdded,
+    AssistantMessageContentPartDone,
     AssistantMessageContentPartTextDelta,
     ErrorEvent,
     ProgressUpdateEvent,
@@ -18,10 +21,12 @@ from chatkit.events import (
     ThreadStreamEvent,
 )
 from chatkit.models import (
+    Annotation,
     AssistantMessageContent,
     AssistantMessageItem,
     InferenceOptions,
     ThreadMetadata,
+    URLSource,
     UserMessageInput,
     UserMessageItem,
     UserMessageTextContent,
@@ -86,6 +91,77 @@ async def assert_cancelled_turn(
     assert isinstance(assistant_message, AssistantMessageItem)
     assert assistant_message.id == "partial-answer"
     assert assistant_message.content[0].text == expected_text
+
+
+async def test_pending_text_delta_leaves_responder_content_untouched():
+    part = AssistantMessageContent(text="")
+
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        item = AssistantMessageItem(
+            id="reply",
+            thread_id=turn.thread.id,
+            created_at=datetime.now(UTC),
+            content=[],
+        )
+        yield ThreadItemAddedEvent(item=item)
+        yield ThreadItemUpdatedEvent(
+            item_id=item.id,
+            update=AssistantMessageContentPartAdded(content_index=0, content=part),
+        )
+        yield ThreadItemUpdatedEvent(
+            item_id=item.id,
+            update=AssistantMessageContentPartTextDelta(content_index=0, delta="Hi"),
+        )
+        part.text += "Hi"
+        item.content.append(part)
+        yield ThreadItemDoneEvent(item=item)
+
+    with make_server(responder) as server:
+        async with aclosing(await start_stream(server)) as stream:
+            created = await read_turn_prelude(stream)
+            events = [event async for event in stream]
+        saved = await server.store.load_item(
+            created.thread.id, "reply", DEFAULT_CONTEXT
+        )
+        assert isinstance(saved, AssistantMessageItem)
+        assert saved.content == [AssistantMessageContent(text="Hi")]
+        assert part.text == "Hi"
+        assert events[-1] == ThreadItemDoneEvent(item=saved)
+
+
+async def test_disconnect_saves_only_emitted_content_and_citation():
+    part = AssistantMessageContent(text="Second part")
+    citation = Annotation(source=URLSource(url="https://example.com", title="Source"))
+
+    async def responder(turn: Turn[RequestContext]) -> AsyncIterator[ThreadStreamEvent]:
+        yield partial_message(turn.thread)
+        yield ThreadItemUpdatedEvent(
+            item_id="partial-answer",
+            update=AssistantMessageContentPartDone(content_index=1, content=part),
+        )
+        yield ThreadItemUpdatedEvent(
+            item_id="partial-answer",
+            update=AssistantMessageContentPartAnnotationAdded(
+                content_index=1, annotation_index=0, annotation=citation
+            ),
+        )
+        part.text = "Unpublished edit"
+        citation.source.title = "Unpublished title"
+        yield ProgressUpdateEvent(text="Working")
+
+    with make_server(responder) as server:
+        async with aclosing(await start_stream(server)) as stream:
+            created = await read_turn_prelude(stream)
+            async for event in stream:
+                if isinstance(event, ProgressUpdateEvent):
+                    break
+        saved = await server.store.load_item(
+            created.thread.id, "partial-answer", DEFAULT_CONTEXT
+        )
+        assert isinstance(saved, AssistantMessageItem)
+        assert [content.text for content in saved.content] == ["Partial", "Second part"]
+        assert [a.source.title for a in saved.content[1].annotations] == ["Source"]
+        assert part.annotations == []
 
 
 async def test_stream_close_finalizes_responder_and_persists_partial_message():
