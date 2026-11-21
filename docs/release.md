@@ -50,6 +50,9 @@ install command, tested dependency versions, and links to docs at that commit.
   Responses message phase for the next model request.
 - A private context item from the app or SDK leaves an active progress
   display open while the agent continues working.
+- The server keeps its own copies of streamed content, citations, and workflow
+  tasks. A responder can assemble its final message without duplicating text,
+  and edits it hasn't emitted stay out of a partial reply saved on disconnect.
 - **Custom stores** must reject an older form while a different turn is
   starting or running. Implement the ownership check in the claim transaction.
 - A custom store must filter server-only items before paginating browser

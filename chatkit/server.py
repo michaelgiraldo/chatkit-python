@@ -1075,18 +1075,17 @@ class ChatKitServer[TContext = Any](ABC):
             item.content.append(AssistantMessageContent(text="", annotations=[]))
 
         match update:
-            case AssistantMessageContentPartAdded():
-                item.content[update.content_index] = update.content
+            case AssistantMessageContentPartAdded() | AssistantMessageContentPartDone():
+                item.content[update.content_index] = update.content.model_copy(
+                    deep=True
+                )
             case AssistantMessageContentPartTextDelta():
                 item.content[update.content_index].text += update.delta
             case AssistantMessageContentPartAnnotationAdded():
                 annotations = item.content[update.content_index].annotations
-                if update.annotation_index <= len(annotations):
-                    annotations.insert(update.annotation_index, update.annotation)
-                else:
-                    annotations.append(update.annotation)
-            case AssistantMessageContentPartDone():
-                item.content[update.content_index] = update.content
+                annotations.insert(
+                    update.annotation_index, update.annotation.model_copy(deep=True)
+                )
         return item
 
     def _update_pending_items(
@@ -1114,9 +1113,13 @@ class ChatKitServer[TContext = Any](ABC):
                 if isinstance(update, (WorkflowTaskUpdated, WorkflowTaskAdded)):
                     match update:
                         case WorkflowTaskUpdated():
-                            updated_item.workflow.tasks[update.task_index] = update.task
+                            updated_item.workflow.tasks[update.task_index] = (
+                                update.task.model_copy(deep=True)
+                            )
                         case WorkflowTaskAdded():
-                            updated_item.workflow.tasks.append(update.task)
+                            updated_item.workflow.tasks.append(
+                                update.task.model_copy(deep=True)
+                            )
 
                     pending_items[updated_item.id] = updated_item
             case _:
