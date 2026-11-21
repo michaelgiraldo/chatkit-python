@@ -76,15 +76,6 @@ class Borders(TypedDict):
     """Vertical borders or thickness in px."""
 
 
-class MinMax(TypedDict):
-    """Integer minimum/maximum bounds."""
-
-    min: NotRequired[int]
-    """Minimum value (inclusive)."""
-    max: NotRequired[int]
-    """Maximum value (inclusive)."""
-
-
 class EditableProps(TypedDict):
     """Editable field options for text widgets."""
 
@@ -146,7 +137,9 @@ class WidgetComponentBase(BaseModel):
 
     key: str | None = None
     id: str | None = None
-    type: str = Field(...)
+    # Concrete builders freeze and narrow the wire tag. Pyright treats model fields
+    # as mutable, so only its override diagnostic is suppressed on those tags.
+    type: str
 
     def build(self) -> widget_models.WidgetComponent:
         """Build the widget node used for events and storage."""
@@ -212,7 +205,7 @@ WidgetStatus = WidgetStatusWithFavicon | WidgetStatusWithIcon
 class ListViewItem(WidgetComponentBase):
     """Single row inside a ``ListView`` component."""
 
-    type: Literal["ListViewItem"] = Field(default="ListViewItem", frozen=True)  # pyright: ignore
+    type: Literal["ListViewItem"] = Field(default="ListViewItem", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     children: list[_WidgetChild]
     """Content for the list item."""
     onClickAction: actions.ActionConfig | None = None
@@ -226,7 +219,7 @@ class ListViewItem(WidgetComponentBase):
 class ListView(_WidgetRootBuilder):
     """Container component for rendering collections of list items."""
 
-    type: Literal["ListView"] = Field(default="ListView", frozen=True)  # pyright: ignore
+    type: Literal["ListView"] = Field(default="ListView", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     children: list[ListViewItem]
     """Items to render in the list."""
     limit: int | Literal["auto"] | None = None
@@ -249,7 +242,7 @@ class CardAction(TypedDict):
 class Card(_WidgetRootBuilder):
     """Versatile container used for structuring widget content."""
 
-    type: Literal["Card"] = Field(default="Card", frozen=True)  # pyright: ignore
+    type: Literal["Card"] = Field(default="Card", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     asForm: bool | None = None
     """Treat the card as an HTML form so confirm/cancel capture form data."""
     children: list[_WidgetChild]
@@ -282,7 +275,7 @@ class Card(_WidgetRootBuilder):
 class Markdown(WidgetComponentBase):
     """Widget rendering Markdown content, optionally streamed."""
 
-    type: Literal["Markdown"] = Field(default="Markdown", frozen=True)  # pyright: ignore
+    type: Literal["Markdown"] = Field(default="Markdown", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     value: str
     """Markdown source string to render."""
     streaming: bool | None = None
@@ -292,7 +285,7 @@ class Markdown(WidgetComponentBase):
 class Text(WidgetComponentBase):
     """Widget rendering plain text with typography controls."""
 
-    type: Literal["Text"] = Field(default="Text", frozen=True)  # pyright: ignore
+    type: Literal["Text"] = Field(default="Text", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     value: str
     """Text content to display."""
     streaming: bool | None = None
@@ -330,7 +323,7 @@ class Text(WidgetComponentBase):
 class Title(WidgetComponentBase):
     """Widget rendering prominent headline text."""
 
-    type: Literal["Title"] = Field(default="Title", frozen=True)  # pyright: ignore
+    type: Literal["Title"] = Field(default="Title", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     value: str
     """Text content to display."""
     color: str | ThemeColor | None = None
@@ -356,7 +349,7 @@ class Title(WidgetComponentBase):
 class Caption(WidgetComponentBase):
     """Widget rendering supporting caption text."""
 
-    type: Literal["Caption"] = Field(default="Caption", frozen=True)  # pyright: ignore
+    type: Literal["Caption"] = Field(default="Caption", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     value: str
     """Text content to display."""
     color: str | ThemeColor | None = None
@@ -382,7 +375,7 @@ class Caption(WidgetComponentBase):
 class Badge(WidgetComponentBase):
     """Small badge indicating status or categorization."""
 
-    type: Literal["Badge"] = Field(default="Badge", frozen=True)  # pyright: ignore
+    type: Literal["Badge"] = Field(default="Badge", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     label: str
     """Text to display inside the badge."""
     color: (
@@ -452,7 +445,7 @@ class BoxBase(BaseModel):
 class Box(WidgetComponentBase, BoxBase):
     """Generic flex container with direction control."""
 
-    type: Literal["Box"] = Field(default="Box", frozen=True)  # pyright: ignore
+    type: Literal["Box"] = Field(default="Box", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     direction: Literal["row", "col"] | None = None
     """Flex direction for content within this container."""
 
@@ -460,19 +453,19 @@ class Box(WidgetComponentBase, BoxBase):
 class Row(WidgetComponentBase, BoxBase):
     """Horizontal flex container."""
 
-    type: Literal["Row"] = Field(default="Row", frozen=True)  # pyright: ignore
+    type: Literal["Row"] = Field(default="Row", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class Col(WidgetComponentBase, BoxBase):
     """Vertical flex container."""
 
-    type: Literal["Col"] = Field(default="Col", frozen=True)  # pyright: ignore
+    type: Literal["Col"] = Field(default="Col", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class Form(WidgetComponentBase, BoxBase):
     """Form wrapper capable of submitting ``onSubmitAction``."""
 
-    type: Literal["Form"] = Field(default="Form", frozen=True)  # pyright: ignore
+    type: Literal["Form"] = Field(default="Form", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     onSubmitAction: actions.ActionConfig | None = None
     """Action dispatched when the form is submitted."""
     direction: Literal["row", "col"] | None = None
@@ -482,7 +475,7 @@ class Form(WidgetComponentBase, BoxBase):
 class Divider(WidgetComponentBase):
     """Visual divider separating content sections."""
 
-    type: Literal["Divider"] = Field(default="Divider", frozen=True)  # pyright: ignore
+    type: Literal["Divider"] = Field(default="Divider", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     color: str | ThemeColor | None = None
     """Divider color; accepts border color token, a primitive color token, a CSS string, or theme-aware `{ light, dark }`.
 
@@ -501,7 +494,7 @@ class Divider(WidgetComponentBase):
 class Icon(WidgetComponentBase):
     """Icon component referencing a built-in icon name."""
 
-    type: Literal["Icon"] = Field(default="Icon", frozen=True)  # pyright: ignore
+    type: Literal["Icon"] = Field(default="Icon", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     name: icons.IconName
     """Name of the icon to display."""
     color: str | ThemeColor | None = None
@@ -519,7 +512,7 @@ class Icon(WidgetComponentBase):
 class Image(WidgetComponentBase):
     """Image component with sizing and fitting controls."""
 
-    type: Literal["Image"] = Field(default="Image", frozen=True)  # pyright: ignore
+    type: Literal["Image"] = Field(default="Image", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     src: str
     """Image URL source."""
     alt: str | None = None
@@ -583,7 +576,7 @@ class Image(WidgetComponentBase):
 class Button(WidgetComponentBase):
     """Button component optionally wired to an action."""
 
-    type: Literal["Button"] = Field(default="Button", frozen=True)  # pyright: ignore
+    type: Literal["Button"] = Field(default="Button", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     submit: bool | None = None
     """Configure the button as a submit button for the nearest form."""
     label: str | None = None
@@ -629,7 +622,7 @@ class Button(WidgetComponentBase):
 class Spacer(WidgetComponentBase):
     """Flexible spacer used to push content apart."""
 
-    type: Literal["Spacer"] = Field(default="Spacer", frozen=True)  # pyright: ignore
+    type: Literal["Spacer"] = Field(default="Spacer", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     minSize: int | str | None = None
     """Minimum size the spacer should occupy along the flex direction."""
 
@@ -650,7 +643,7 @@ class SelectOption(TypedDict):
 class Select(WidgetComponentBase):
     """Select dropdown component."""
 
-    type: Literal["Select"] = Field(default="Select", frozen=True)  # pyright: ignore
+    type: Literal["Select"] = Field(default="Select", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str
     """The name of the form control field used when submitting forms."""
     options: list[SelectOption]
@@ -680,7 +673,7 @@ class Select(WidgetComponentBase):
 class DatePicker(WidgetComponentBase):
     """Date picker input component."""
 
-    type: Literal["DatePicker"] = Field(default="DatePicker", frozen=True)  # pyright: ignore
+    type: Literal["DatePicker"] = Field(default="DatePicker", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str
     """The name of the form control field used when submitting forms."""
     onChangeAction: actions.ActionConfig | None = None
@@ -714,7 +707,7 @@ class DatePicker(WidgetComponentBase):
 class Checkbox(WidgetComponentBase):
     """Checkbox input component."""
 
-    type: Literal["Checkbox"] = Field(default="Checkbox", frozen=True)  # pyright: ignore
+    type: Literal["Checkbox"] = Field(default="Checkbox", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str
     """The name of the form control field used when submitting forms."""
     label: str | None = None
@@ -732,7 +725,7 @@ class Checkbox(WidgetComponentBase):
 class Input(WidgetComponentBase):
     """Single-line text input component."""
 
-    type: Literal["Input"] = Field(default="Input", frozen=True)  # pyright: ignore
+    type: Literal["Input"] = Field(default="Input", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str
     """The name of the form control field used when submitting forms."""
     inputType: Literal["number", "email", "text", "password", "tel", "url"] | None = (
@@ -768,7 +761,7 @@ class Input(WidgetComponentBase):
 class Label(WidgetComponentBase):
     """Form label associated with a field."""
 
-    type: Literal["Label"] = Field(default="Label", frozen=True)  # pyright: ignore
+    type: Literal["Label"] = Field(default="Label", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     value: str
     """Text content of the label."""
     fieldName: str
@@ -803,7 +796,7 @@ class RadioOption(TypedDict):
 class RadioGroup(WidgetComponentBase):
     """Grouped radio input control."""
 
-    type: Literal["RadioGroup"] = Field(default="RadioGroup", frozen=True)  # pyright: ignore
+    type: Literal["RadioGroup"] = Field(default="RadioGroup", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str
     """The name of the form control field used when submitting forms."""
     options: list[RadioOption] | None = None
@@ -825,7 +818,7 @@ class RadioGroup(WidgetComponentBase):
 class Textarea(WidgetComponentBase):
     """Multiline text input component."""
 
-    type: Literal["Textarea"] = Field(default="Textarea", frozen=True)  # pyright: ignore
+    type: Literal["Textarea"] = Field(default="Textarea", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str
     """The name of the form control field used when submitting forms."""
     defaultValue: str | None = None
@@ -861,7 +854,7 @@ class Textarea(WidgetComponentBase):
 class Transition(WidgetComponentBase):
     """Wrapper enabling transitions for a child component."""
 
-    type: Literal["Transition"] = Field(default="Transition", frozen=True)  # pyright: ignore
+    type: Literal["Transition"] = Field(default="Transition", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     children: _WidgetChild | None
     """The child component to animate layout changes for."""
 
@@ -869,7 +862,7 @@ class Transition(WidgetComponentBase):
 class Chart(WidgetComponentBase):
     """Data visualization component for simple bar/line/area charts."""
 
-    type: Literal["Chart"] = Field(default="Chart", frozen=True)  # pyright: ignore
+    type: Literal["Chart"] = Field(default="Chart", frozen=True)  # pyright: ignore[reportIncompatibleVariableOverride]
     data: list[dict[str, str | int | float]]
     """Tabular data for the chart, where each row maps field names to values."""
     series: list[Series]
@@ -941,71 +934,46 @@ CurveType = Literal[
 """Interpolation curve types for `area` and `line` series."""
 
 
-class BarSeries(BaseModel):
+class _ChartSeries(BaseModel):
+    label: str | None
+    """Legend label for the series."""
+    dataKey: str
+    """Field name from each data row that contains the numeric value."""
+    color: str | ThemeColor | None = None
+    """
+    Color for the series; accepts chart color token, a primitive color token, a CSS string, or theme-aware { light, dark }.
+
+    Chart color tokens: `blue` `purple` `orange` `green` `red` `yellow` `pink`
+
+    Primitive color token, e.g., `red-100`, `blue-900`, `gray-500`
+
+    Note: By default, a color will be sequentially assigned from the chart series colors.
+    """
+
+
+class BarSeries(_ChartSeries):
     """A bar series plotted from a numeric `dataKey`. Supports stacking."""
 
     type: Literal["bar"] = Field(default="bar", frozen=True)
-    label: str | None
-    """Legend label for the series."""
-    dataKey: str
-    """Field name from each data row that contains the numeric value."""
     stack: str | None = None
     """Optional stack group ID. Series with the same ID stack together."""
-    color: str | ThemeColor | None = None
-    """
-    Color for the series; accepts chart color token, a primitive color token, a CSS string, or theme-aware { light, dark }.
-
-    Chart color tokens: `blue` `purple` `orange` `green` `red` `yellow` `pink`
-
-    Primitive color token, e.g., `red-100`, `blue-900`, `gray-500`
-
-    Note: By default, a color will be sequentially assigned from the chart series colors.
-    """
 
 
-class AreaSeries(BaseModel):
+class AreaSeries(_ChartSeries):
     """An area series plotted from a numeric `dataKey`. Supports stacking and curves."""
 
     type: Literal["area"] = Field(default="area", frozen=True)
-    label: str | None
-    """Legend label for the series."""
-    dataKey: str
-    """Field name from each data row that contains the numeric value."""
     stack: str | None = None
     """Optional stack group ID. Series with the same ID stack together."""
-    color: str | ThemeColor | None = None
-    """
-    Color for the series; accepts chart color token, a primitive color token, a CSS string, or theme-aware { light, dark }.
-
-    Chart color tokens: `blue` `purple` `orange` `green` `red` `yellow` `pink`
-
-    Primitive color token, e.g., `red-100`, `blue-900`, `gray-500`
-
-    Note: By default, a color will be sequentially assigned from the chart series colors.
-    """
-    curveType: None | Literal[CurveType] = None
+    curveType: CurveType | None = None
     """Interpolation curve type used to connect points."""
 
 
-class LineSeries(BaseModel):
+class LineSeries(_ChartSeries):
     """A line series plotted from a numeric `dataKey`. Supports curves."""
 
     type: Literal["line"] = Field(default="line", frozen=True)
-    label: str | None
-    """Legend label for the series."""
-    dataKey: str
-    """Field name from each data row that contains the numeric value."""
-    color: str | ThemeColor | None = None
-    """
-    Color for the series; accepts chart color token, a primitive color token, a CSS string, or theme-aware { light, dark }.
-
-    Chart color tokens: `blue` `purple` `orange` `green` `red` `yellow` `pink`
-
-    Primitive color token, e.g., `red-100`, `blue-900`, `gray-500`
-
-    Note: By default, a color will be sequentially assigned from the chart series colors.
-    """
-    curveType: None | Literal[CurveType] = None
+    curveType: CurveType | None = None
     """Interpolation curve type used to connect points."""
 
 
