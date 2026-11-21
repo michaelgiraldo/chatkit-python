@@ -139,7 +139,7 @@ async def save_approval_checkpoint(self, thread, turn_id, checkpoint, context):
 
 Here `self.approvals` is your application's private checkpoint repository. Scope records by the authenticated owner, thread, and turn. The turn reaches `WAITING` after the save succeeds. A missing hook or failed save produces `FAILED`. The checkpoint stays out of the event stream and thread history.
 
-For a run using `AgentContext`, rebuild its store and request context at review time. Save any additional application data that tools need alongside the checkpoint. Your review handler authorizes each decision, verifies the original turn is still waiting, and claims the saved checkpoint once before resuming. The following helper takes the claimed server-side record and decisions keyed by the original tool call IDs:
+For a run using `AgentContext`, rebuild its store and request context at review time. Save any additional application data that tools need alongside the checkpoint. Authenticate the reviewer and validate a boolean decision for each pending tool call ID. In one storage transaction, verify that the original turn still owns the thread and is waiting, then claim its checkpoint once. The following helper takes the claimed server-side record and those validated decisions.
 
 ```python
 from agents import RunContextWrapper, Runner, RunState
@@ -157,7 +157,7 @@ async def resume_reviewed_run(agent, agent_context, checkpoint, decisions):
     return Runner.run_streamed(agent, state)
 ```
 
-Forward this result through `stream_agent_response` inside an application-authorized responder to deliver the resumed reply to ChatKit. Another SDK pause produces a new checkpoint. Your application owns the review interface and storage. [OpenAI's approval lifecycle](https://developers.openai.com/api/docs/guides/agents/guardrails-approvals#streaming-and-delayed-review-use-the-same-state-model)
+Forward this result through `stream_agent_response` inside an application-authorized responder to deliver the resumed reply to ChatKit. Another SDK pause produces a new checkpoint. Your application owns the review interface and storage. [OpenAI's guide to server-side approval state](https://openai.github.io/openai-agents-python/human_in_the_loop/#keep-approval-state-on-the-server)
 
 ### Wire ChatKit to your web framework
 
@@ -682,8 +682,8 @@ output guardrail result for the final text. A run without one fails.
 Output guardrails inspect the final answer. Reviewed delivery discards
 intermediate commentary, progress, citations, widgets, and other app events.
 Use ordinary streaming for interactive browser tool handoffs. Model calls,
-server tool side effects, and application-owned storage follow the app's
-normal policies.
+server tool side effects, SDK session storage, and tracing each follow
+their own policies. [OpenAI's output guardrails](https://openai.github.io/openai-agents-python/guardrails/#output-guardrails)
 
 ### Save structured tool results after a turn
 

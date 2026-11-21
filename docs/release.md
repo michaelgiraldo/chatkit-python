@@ -30,6 +30,24 @@ The `openai-chatkit` package on PyPI is published by the
 The workflow only verifies and produces notes. The notes include the commit,
 install command, tested dependency versions, and links to docs at that commit.
 
+## Unreleased
+
+- Widget actions omit server-only context from browser replies. The FastAPI
+  adapter notices when a visitor leaves during a silent stream. Ordinary
+  streaming saves the partial reply for reload.
+- Agents integrations can select `delivery="reviewed_text"` to publish the
+  final answer after an output guardrail approves it. Closing the connection
+  during review leaves the candidate out of the transcript.
+- Agents using tool approvals must implement `save_approval_checkpoint`.
+  Turnspan reports `WAITING` after the save. A failed save reports `FAILED`.
+- Transcript replay uses assistant input text and preserves a recorded
+  Responses message phase for the next model request.
+- **Custom stores** must reject an older form while a different turn is
+  starting or running. Implement the ownership check in the claim transaction.
+- **Store tests** can run `check_thread_store` for core operations. Suites
+  that previously used it to cover browser tools must also run
+  `check_client_tool_store`. [Store and responder guide](guides/respond-to-user-message.md)
+
 ## Turnspan 6 (`1.6.5+turnspan.6`)
 
 - **Breaking store contract.** Every streaming response has a durable turn
