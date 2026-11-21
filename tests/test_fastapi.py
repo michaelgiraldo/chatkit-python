@@ -5,13 +5,24 @@ from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from chatkit.events import ProgressUpdateEvent, ThreadCreatedEvent
+from chatkit.events import (
+    ProgressUpdateEvent,
+    SyncCustomActionResponse,
+    ThreadCreatedEvent,
+)
 from chatkit.fastapi import ChatKitStreamingResponse, process_request
-from chatkit.models import ThreadMetadata
+from chatkit.models import (
+    HiddenContextItem,
+    SDKHiddenContextItem,
+    ThreadMetadata,
+    WidgetItem,
+)
 from chatkit.protocol import encode_sse
 from chatkit.server import ChatKitServer, StreamingResult
+from chatkit.widgets import Card, Text
 from tests._types import RequestContext
 from tests.helpers.server import DEFAULT_CONTEXT, decode_event, make_server
+from tests.helpers.storage_contract import make_thread
 
 
 def make_client(server: ChatKitServer[RequestContext]) -> TestClient:
@@ -70,6 +81,64 @@ def test_process_request_rejects_malformed_json(client: TestClient):
     assert response.status_code == 400
     assert response.json()["detail"]
     assert "example-private-input" not in response.text
+
+
+@pytest.mark.parametrize(
+    "reply", ["widget", "empty", "hidden_context_item", "sdk_hidden_context"]
+)
+async def test_sync_widget_reply_visibility(reply: str):
+    thread = make_thread()
+    sender = WidgetItem(
+        id="widget",
+        thread_id=thread.id,
+        created_at=thread.created_at,
+        widget=Card(children=[Text(value="Ready")]).build(),
+    )
+    updated = sender.model_copy(
+        update={"widget": Card(children=[Text(value="Done")]).build()}
+    )
+    replies = {
+        "widget": updated,
+        "empty": None,
+        "hidden_context_item": HiddenContextItem(
+            id="app-note",
+            thread_id=thread.id,
+            created_at=thread.created_at,
+            content="App only",
+        ),
+        "sdk_hidden_context": SDKHiddenContextItem(
+            id="sdk-note",
+            thread_id=thread.id,
+            created_at=thread.created_at,
+            content="SDK only",
+        ),
+    }
+    result = SyncCustomActionResponse(updated_item=replies[reply])
+    with (
+        make_server(sync_action_callback=lambda *_: result) as server,
+        make_client(server) as client,
+    ):
+        await server.store.save_thread(thread, DEFAULT_CONTEXT)
+        await server.store.add_thread_item(thread.id, sender, DEFAULT_CONTEXT)
+        response = client.post(
+            "/chatkit",
+            json={
+                "type": "threads.sync_custom_action",
+                "params": {
+                    "thread_id": thread.id,
+                    "item_id": sender.id,
+                    "action": {"type": "confirm"},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    if reply == "widget":
+        assert response.json() == {
+            "updated_item": updated.model_dump(mode="json", exclude_none=True)
+        }
+    else:
+        assert response.json() == {}
 
 
 def test_process_request_uses_app_response_for_streaming_only():

@@ -654,12 +654,18 @@ class ChatKitServer[TContext = Any](ABC):
 
         if item and not isinstance(item, WidgetItem):
             raise InvalidOperationError("A custom action needs a widget sender.")
-        return await self.sync_action(
+        response = await self.sync_action(
             thread_metadata,
             request.params.action,
             item,
             context,
         )
+        if (
+            response.updated_item is not None
+            and response.updated_item.type in HIDDEN_ITEM_TYPES
+        ):
+            return SyncCustomActionResponse()
+        return response
 
     def _apply_structured_input_submission(
         self,

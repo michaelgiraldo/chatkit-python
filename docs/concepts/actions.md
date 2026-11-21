@@ -24,6 +24,8 @@ To run a widget action while a response is streaming, set `"streaming": false` i
 
 Return a [`SyncCustomActionResponse`](../api/chatkit/events.md#chatkit.events.SyncCustomActionResponse) with `updated_item` to replace the item in the browser. Call `await self.store.save_item(thread.id, updated_item, context)` if the replacement should survive a reload.
 
+Return `SyncCustomActionResponse()` when the action has no visible update. If the handler returns a `HiddenContextItem` or `SDKHiddenContextItem`, the server sends the same empty JSON reply (`{}`).
+
 ## Client-sent actions using the chatkit.sendCustomAction() command
 
 Your client integration can also initiate actions directly with `chatkit.sendCustomAction(action, itemId?)`, optionally namespaced to a specific widget item. The server receives these in `ChatKitServer.action` just like a widget-triggered action and can stream widgets, messages, or client effects in response. This pattern is useful when a flow starts outside a widget—or after a client-handled action—but you still want the server to persist results or involve the model.
