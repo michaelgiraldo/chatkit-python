@@ -29,18 +29,17 @@ The demo uses sample replies and runs without a model API key.
 
 ## Install Turnspan in an app
 
-Each [published release](https://github.com/michaelgiraldo/chatkit-python/releases/latest)
-includes a verified install command. For
-[Turnspan 6](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.6)
-(`openai-chatkit 1.6.5+turnspan.6`), install this source commit in your app's Python environment.
+[Turnspan 7](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.7)
+is the latest stable release (`openai-chatkit 1.6.5+turnspan.7`). Install
+the verified source commit in your app's Python environment.
 
 ```sh
-python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/0d916c03ef8e48d4d77ddcc461431e1d6f7b8718.tar.gz'
+python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/1680fed58b24021581622edd5c75073eb0194ca7.tar.gz'
 ```
 
 Omit `[agents,fastapi]` for the core server alone. Add `templates` to the
 extras if your app loads `.widget` files. See the
-[docs at the release commit](https://github.com/michaelgiraldo/chatkit-python/tree/0d916c03ef8e48d4d77ddcc461431e1d6f7b8718/docs)
+[docs at the release commit](https://github.com/michaelgiraldo/chatkit-python/tree/1680fed58b24021581622edd5c75073eb0194ca7/docs)
 for the matching Python and storage contracts.
 
 **Upgrading from Turnspan 6 to 7?** Check your thread store's history queries
