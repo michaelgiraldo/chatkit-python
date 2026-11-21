@@ -10,7 +10,7 @@ dependencies = [
 
 [project.optional-dependencies]
 agents = [
-  "openai>=3.56.0,<4",
+  "openai>=3.57.0,<4",
   # Widen after verifying the next Agents SDK minor release.
   "openai-agents>=0.25.0,<0.26",
 ]
@@ -39,7 +39,7 @@ dev = [
   "pyright>=1.1.414,<2",
 ]
 docs = [
-  "zensical>=0.1.2,<0.2",
+  "zensical>=0.1.3,<0.2",
   "mkdocstrings-python>=2.0.11,<3",
 ]
 lint = [
