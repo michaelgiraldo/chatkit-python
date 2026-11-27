@@ -1,6 +1,6 @@
 [project]
 name = "openai-chatkit"
-version = "1.6.5+turnspan.7"
+version = "1.6.5+turnspan.8"
 description = "A ChatKit backend SDK."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -12,7 +12,7 @@ dependencies = [
 agents = [
   "openai>=3.57.0,<4",
   # Widen after verifying the next Agents SDK minor release.
-  "openai-agents>=0.25.0,<0.26",
+  "openai-agents>=0.25.0,<0.27",
 ]
 fastapi = [
   "anyio>=4.16.0,<5",
