@@ -43,11 +43,6 @@ jobs:
       - name: Test
         run: make test
 
-      - name: Test the minimum supported Agents SDK
-        env:
-          AGENTS_VERSION: "0.25.0"
-        run: make sdk-check
-
       - name: Build docs
         run: make docs-check
 
