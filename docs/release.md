@@ -35,6 +35,34 @@ supported release before publishing. CI tests the version in `uv.lock`; use
 `make sdk-check AGENTS_VERSION=VERSION` to test a different supported version.
 The source-archive check verifies what a fresh consumer install resolves.
 
+## Turnspan 9 (`1.6.5+turnspan.9`)
+
+This is a dependency refresh. App dependency ranges, Python 3.14 minimum,
+browser protocol, and thread-store contracts are unchanged from Turnspan 8.
+
+- Update the locked [OpenAI Python SDK](https://github.com/openai/openai-python/releases/tag/v3.60.0)
+  from 3.57.0 to 3.60.0. The declared range stays `>=3.57.0,<4`.
+  The Agents SDK stays at 0.26.0 (`>=0.26.0,<0.27`).
+- Update [Zensical](https://github.com/zensical/zensical/releases/tag/v0.1.4)
+  to 0.1.4 and refresh Certifi, charset-normalizer, Markdown, packaging,
+  platformdirs, PyMdown Extensions, PyYAML, sse-starlette, watchdog, and
+  Zensical UI in the lock.
+- Update the pinned [setup-uv action](https://github.com/astral-sh/setup-uv/releases/tag/v10.4.0)
+  to 10.4.0. Checkout, Pages actions, and the upstream-only PyPI publisher
+  were already current. The fork still publishes through GitHub Releases.
+- Review the Pydantic core, FastAPI/Starlette/AnyIO/Uvicorn, Jinja2, setuptools,
+  and test/type/lint tool requirements. No direct update was available for
+  those packages within their existing requirements.
+- The model adapter still uses the Responses and Chat Completions SDK types.
+  No migration is needed for this release under the
+  [OpenAI deprecation schedule](https://developers.openai.com/api/docs/deprecations).
+  The demo loads the OpenAI-managed browser component instead of an npm
+  dependency and uses Turnspan's own endpoint, not hosted Agent Builder.
+- The OSV audit of the 73 locked dependencies found no known advisories on
+  Linux, macOS, or Windows for Python 3.14. The SDK suite passed on Python
+  3.14 and 3.15, and on the OpenAI Python 3.57.0 floor. The local browser
+  demo also passed message, widget action, and history reload checks.
+
 ## Turnspan 8 (`1.6.5+turnspan.8`)
 
 - **New Agents SDK baseline.** The `agents` extra requires
