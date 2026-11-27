@@ -29,17 +29,17 @@ The demo uses sample replies and runs without a model API key.
 
 ## Install Turnspan in an app
 
-[Turnspan 8](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.8)
-is the latest stable release (`openai-chatkit 1.6.5+turnspan.8`). Install
+[Turnspan 9](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.9)
+is the latest stable release (`openai-chatkit 1.6.5+turnspan.9`). Install
 the verified source commit in your app's Python environment.
 
 ```sh
-python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/1c4a4a1df2077436a797800401dd2a3155e94302.tar.gz'
+python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/ccddcf0706e2beaaeb8c74a72ebeeb72775157f4.tar.gz'
 ```
 
 Omit `[agents,fastapi]` for the core server alone. Add `templates` to the
 extras if your app loads `.widget` files. See the
-[docs at the release commit](https://github.com/michaelgiraldo/chatkit-python/tree/1c4a4a1df2077436a797800401dd2a3155e94302/docs)
+[docs at the release commit](https://github.com/michaelgiraldo/chatkit-python/tree/ccddcf0706e2beaaeb8c74a72ebeeb72775157f4/docs)
 for the matching Python and storage contracts.
 
 **Upgrading from Turnspan 7?** Apps using the `agents` extra need Agents SDK
