@@ -30,6 +30,25 @@ The `openai-chatkit` package on PyPI is published by the
 The workflow only verifies and produces notes. The notes include the commit,
 install command, tested dependency versions, and links to docs at that commit.
 
+When changing the Agents SDK range, test the supported minimum and the newest
+supported release before publishing. CI tests the version in `uv.lock`; use
+`make sdk-check AGENTS_VERSION=VERSION` to test a different supported version.
+The source-archive check verifies what a fresh consumer install resolves.
+
+## Turnspan 8 (`1.6.5+turnspan.8`)
+
+- **New Agents SDK baseline.** The `agents` extra requires
+  `openai-agents>=0.26.0,<0.27`. If your app pins 0.25, update that pin and
+  refresh your lock before adopting Turnspan 8. Run your streaming, history,
+  and tool-approval checks against the new lock. The core install without the
+  `agents` extra is unaffected. No browser or storage migration is required
+  from Turnspan 7.
+- `check_thread_store` and `check_client_tool_store` accept a `context_factory`
+  for stores with mutable request context. Each simulated request can get fresh
+  state for the same authenticated visitor. Existing callers can omit it.
+- The [production guide](guides/prepare-your-app-for-production.md) covers
+  signed thread-list smoke tests and delayed and repeated retention events.
+
 ## Turnspan 7 (`1.6.5+turnspan.7`)
 
 ### Upgrading an app from Turnspan 6
