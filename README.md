@@ -29,20 +29,24 @@ The demo uses sample replies and runs without a model API key.
 
 ## Install Turnspan in an app
 
-[Turnspan 7](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.7)
-is the latest stable release (`openai-chatkit 1.6.5+turnspan.7`). Install
+[Turnspan 8](https://github.com/michaelgiraldo/chatkit-python/releases/tag/v1.6.5%2Bturnspan.8)
+is the latest stable release (`openai-chatkit 1.6.5+turnspan.8`). Install
 the verified source commit in your app's Python environment.
 
 ```sh
-python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/1680fed58b24021581622edd5c75073eb0194ca7.tar.gz'
+python -m pip install 'openai-chatkit[agents,fastapi] @ https://github.com/michaelgiraldo/chatkit-python/archive/1c4a4a1df2077436a797800401dd2a3155e94302.tar.gz'
 ```
 
 Omit `[agents,fastapi]` for the core server alone. Add `templates` to the
 extras if your app loads `.widget` files. See the
-[docs at the release commit](https://github.com/michaelgiraldo/chatkit-python/tree/1680fed58b24021581622edd5c75073eb0194ca7/docs)
+[docs at the release commit](https://github.com/michaelgiraldo/chatkit-python/tree/1c4a4a1df2077436a797800401dd2a3155e94302/docs)
 for the matching Python and storage contracts.
 
-**Upgrading from Turnspan 6 to 7?** Check your thread store's history queries
+**Upgrading from Turnspan 7?** Apps using the `agents` extra need Agents SDK
+0.26. Update any 0.25 pin and refresh your app's lockfile. The browser component
+and the storage contract are unchanged for this upgrade.
+
+**Coming from Turnspan 6?** Also check your thread store's history queries
 and form handling. Apps using Agents SDK tool approvals also need to save
 paused runs. The [app migration checklist](https://michaelgiraldo.github.io/chatkit-python/release/#upgrading-an-app-from-turnspan-6)
 covers the affected integrations. The ChatKit browser component can stay on
